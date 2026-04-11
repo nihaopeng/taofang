@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>移动端触摸测试</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: Arial, sans-serif;
+            background: #f5f5f5;
+        }
+        
+        .container {
+            max-width: 600px;
+            margin: 0 auto;
+        }
+        
+        h1 {
+            text-align: center;
+            color: #333;
+        }
+        
+        .test-area {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            margin: 20px 0;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        
+        .touch-canvas {
+            width: 100%;
+            height: 300px;
+            border: 2px solid #4ecdc4;
+            border-radius: 5px;
+            background: white;
+            touch-action: none;
+            -webkit-user-select: none;
+            user-select: none;
+        }
+        
+        .log {
+            background: #333;
+            color: #0f0;
+            padding: 15px;
+            border-radius: 5px;
+            font-family: monospace;
+            height: 200px;
+            overflow-y: auto;
+            margin-top: 20px;
+            font-size: 14px;
+        }
+        
+        .status {
+            padding: 10px;
+            border-radius: 5px;
+            margin: 10px 0;
+            text-align: center;
+        }
+        
+        .success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        
+        .warning {
+            background: #fff3cd;
+            color: #856404;
+            border: 1px solid #ffeaa7;
+        }
+        
+        .info {
+            background: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+        
+        button {
+            background: #4ecdc4;
+            color: white;
+            border: none;
+            padding: 12px 20px;
+            border-radius: 5px;
+            font-size: 16px;
+            cursor: pointer;
+            width: 100%;
+            margin: 10px 0;
+        }
+        
+        button:hover {
+            background: #26a69a;
+        }
+        
+        .device-info {
+            background: #e9ecef;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 10px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📱 移动端触摸测试</h1>
+        
+        <div class="device-info">
+            <h3>设备信息</h3>
+            <div id="device-details">正在检测设备...</div>
+        </div>
+        
+        <div class="test-area">
+            <h3>触摸测试区域</h3>
+            <p>请用手指在下方区域绘制：</p>
+            <canvas id="test-canvas" class="touch-canvas"></canvas>
+            
+            <div class="status info" id="touch-status">
+                等待触摸输入...
+            </div>
+            
+            <button onclick="clearCanvas()">清空画布</button>
+            <button onclick="runTests()">运行诊断测试</button>
+        </div>
+        
+        <div class="test-area">
+            <h3>事件日志</h3>
+            <div class="log" id="event-log"></div>
+        </div>
+        
+        <div class="test-area">
+            <h3>测试结果</h3>
+            <div id="test-results">
+                <div class="status warning">测试未运行</div>
+            </div>
+            <button onclick="location.href='/game/canvas'">返回Canvas Sync游戏</button>
+        </div>
+    </div>
+    
+    <script>
+        // 设备检测
+        function detectDevice() {
+            const details = document.getElementById('device-details');
+            const info = {
+                userAgent: navigator.userAgent,
+                platform: navigator.platform,
+                maxTouchPoints: navigator.maxTouchPoints || '未知',
+                touchSupport: 'ontouchstart' in window ? '支持' : '不支持',
+                screenWidth: window.screen.width,
+                screenHeight: window.screen.height,
+                devicePixelRatio: window.devicePixelRatio,
+                isMobile: /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
+            };
+            
+            let html = '<ul>';
+            for (const [key, value] of Object.entries(info)) {
+                html += `<li><strong>${key}:</strong> ${value}</li>`;
+            }
+            html += '</ul>';
+            
+            details.innerHTML = html;
+            
+            // 更新状态
+            const status = document.getElementById('touch-status');
+            if (info.isMobile || info.touchSupport === '支持') {
+                status.className = 'status success';
+                status.textContent = '✅ 设备支持触摸输入';
+            } else {
+                status.className = 'status warning';
+                status.textContent = '⚠️ 设备可能不支持触摸输入';
+            }
+        }
+        
+        // 事件日志
+        const eventLog = document.getElementById('event-log');
+        function logEvent(message) {
+            const timestamp = new Date().toLocaleTimeString();
+            const logEntry = `[${timestamp}] ${message}\n`;
+            eventLog.textContent += logEntry;
+            eventLog.scrollTop = eventLog.scrollHeight;
+        }
+        
+        // 画布设置
+        const canvas = document.getElementById('test-canvas');
+        const ctx = canvas.getContext('2d');
+        
+        // 设置画布尺寸
+        function resizeCanvas() {
+            const rect = canvas.getBoundingClientRect();
+            canvas.width = rect.width;
+            canvas.height = rect.height;
+            
+            // 清空画布
+            ctx.fillStyle = 'white';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.strokeStyle = '#ff6b6b';
+            ctx.lineWidth = 3;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+        }
+        
+        // 触摸事件处理
+        let isDrawing = false;
+        let lastX = 0;
+        let lastY = 0;
+        
+        function startDrawing(e) {
+            e.preventDefault();
+            isDrawing = true;
+            const coords = getCoordinates(e);
+            [lastX, lastY] = coords;
+            logEvent(`触摸开始: (${lastX.toFixed(1)}, ${lastY.toFixed(1)})`);
+        }
+        
+        function draw(e) {
+            if (!isDrawing) return;
+            e.preventDefault();
+            
+            const coords = getCoordinates(e);
+            const [x, y] = coords;
+            
+            // 绘制
+            ctx.beginPath();
+            ctx.moveTo(lastX, lastY);
+            ctx.lineTo(x, y);
+            ctx.stroke();
+            
+            logEvent(`绘制到: (${x.toFixed(1)}, ${y.toFixed(1)})`);
+            
+            [lastX, lastY] = [x, y];
+        }
+        
+        function stopDrawing() {
+            if (isDrawing) {
+                isDrawing = false;
+                logEvent('触摸结束');
+            }
+        }
+        
+        function getCoordinates(e) {
+            const rect = canvas.getBoundingClientRect();
+            let clientX, clientY;
+            
+            if (e.touches && e.touches.length > 0) {
+                clientX = e.touches[0].clientX;
+                clientY = e.touches[0].clientY;
+            } else if (e.changedTouches && e.changedTouches.length > 0) {
+                clientX = e.changedTouches[0].clientX;
+                clientY = e.changedTouches[0].clientY;
+            } else {
+                clientX = e.clientX;
+                clientY = e.clientY;
+            }
+            
+            const scaleX = canvas.width / rect.width;
+            const scaleY = canvas.height / rect.height;
+            
+            const x = (clientX - rect.left) * scaleX;
+            const y = (clientY - rect.top) * scaleY;
+            
+            return [x, y];
+        }
+        
+        function clearCanvas() {
+            ctx.fillStyle = 'white';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            logEvent('画布已清空');
+        }
+        
+        // 诊断测试
+        function runTests() {
+            const results = document.getElementById('test-results');
+            results.innerHTML = '';
+            
+            const tests = [
+                {
+                    name: '触摸事件支持',
+                    test: () => 'ontouchstart' in window,
+                    message: { true: '✅ 支持触摸事件', false: '❌ 不支持触摸事件' }
+                },
+                {
+                    name: '画布触摸响应',
+                    test: () => {
+                        try {
+                            canvas.dispatchEvent(new TouchEvent('touchstart', {
+                                touches: [new Touch({ identifier: 1, target: canvas, clientX: 10, clientY: 10 })]
+                            }));
+                            return true;
+                        } catch (e) {
+                            return false;
+                        }
+                    },
+                    message: { true: '✅ 画布响应触摸', false: '⚠️ 画布触摸响应可能有问题' }
+                },
+                {
+                    name: '事件阻止默认行为',
+                    test: () => {
+                        const event = new Event('touchstart', { cancelable: true });
+                        return event.cancelable;
+                    },
+                    message: { true: '✅ 可以阻止默认行为', false: '⚠️ 无法阻止默认行为' }
+                },
+                {
+                    name: 'Passive事件监听',
+                    test: () => {
+                        try {
+                            canvas.addEventListener('test', () => {}, { passive: true });
+                            canvas.removeEventListener('test', () => {});
+                            return true;
+                        } catch (e) {
+                            return false;
+                        }
+                    },
+                    message: { true: '✅ 支持passive事件监听', false: '⚠️ 不支持passive事件监听' }
+                }
+            ];
+            
+            let allPassed = true;
+            
+            tests.forEach(test => {
+                const result = test.test();
+                const div = document.createElement('div');
+                div.className = `status ${result ? 'success' : 'warning'}`;
+                div.textContent = `${test.name}: ${test.message[result]}`;
+                results.appendChild(div);
+                
+                if (!result) allPassed = false;
+            });
+            
+            // 总体结果
+            const summary = document.createElement('div');
+            summary.className = `status ${allPassed ? 'success' : 'warning'}`;
+            summary.textContent = allPassed ? 
+                '✅ 所有测试通过！移动端绘画应该正常工作。' :
+                '⚠️ 部分测试未通过，移动端绘画可能有问题。';
+            results.appendChild(summary);
+            
+            logEvent('诊断测试完成');
+        }
+        
+        // 初始化
+        window.addEventListener('load', () => {
+            detectDevice();
+            resizeCanvas();
+            
+            // 事件监听
+            canvas.addEventListener('touchstart', startDrawing, { passive: false });
+            canvas.addEventListener('touchmove', draw, { passive: false });
+            canvas.addEventListener('touchend', stopDrawing, { passive: false });
+            canvas.addEventListener('touchcancel', stopDrawing, { passive: false });
+            
+            // 鼠标事件（用于桌面测试）
+            canvas.addEventListener('mousedown', startDrawing);
+            canvas.addEventListener('mousemove', draw);
+            canvas.addEventListener('mouseup', stopDrawing);
+            canvas.addEventListener('mouseout', stopDrawing);
+            
+            // 窗口大小变化
+            window.addEventListener('resize', resizeCanvas);
+            
+            logEvent('测试页面已初始化');
+        });
+    </script>
+</body>
+</html>

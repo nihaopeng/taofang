@@ -1,0 +1,378 @@
+from starlette.responses import JSONResponse
+from starlette.requests import Request
+from ..database import get_connection, get_user_streak, get_longest_streak, get_checkin_stats, get_checkin_calendar
+from datetime import datetime
+import json
+
+async def get_love_counter(request: Request):
+    """API endpoint for love counter data"""
+    if not request.session.get("authenticated"):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    # Get anniversary date
+    cursor.execute("SELECT value FROM meta_config WHERE key = 'anniversary_date'")
+    anniversary_row = cursor.fetchone()
+    
+    if not anniversary_row:
+        conn.close()
+        return JSONResponse({"error": "Anniversary date not set"}, status_code=500)
+    
+    anniversary_date = datetime.strptime(anniversary_row[0], "%Y-%m-%d")
+    today = datetime.now()
+    
+    # Calculate time difference
+    delta = today - anniversary_date
+    
+    # Calculate years, months, days
+    years = delta.days // 365
+    months = (delta.days % 365) // 30
+    days = delta.days % 30
+    
+    # Calculate hours, minutes, seconds
+    hours = delta.seconds // 3600
+    minutes = (delta.seconds % 3600) // 60
+    seconds = delta.seconds % 60
+    
+    conn.close()
+    
+    return JSONResponse({
+        "days": delta.days,
+        "years": years,
+        "months": months,
+        "days_remaining": days,
+        "hours": hours,
+        "minutes": minutes,
+        "seconds": seconds,
+        "total_seconds": int(delta.total_seconds()),
+        "anniversary_date": anniversary_date.strftime("%Y-%m-%d"),
+    })
+
+async def checkin(request: Request):
+    """Handle daily check-in"""
+    if not request.session.get("authenticated"):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    user_id = request.session.get("user_id")
+    
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    # Check if already checked in today
+    cursor.execute("""
+    SELECT COUNT(*) FROM daily_checkin 
+    WHERE user_id = ? AND DATE(checkin_time) = DATE('now')
+    """, (user_id,))
+    
+    if cursor.fetchone()[0] > 0:
+        conn.close()
+        return JSONResponse({"error": "Already checked in today", "success": False}, status_code=400)
+    
+    # Record check-in
+    cursor.execute("INSERT INTO daily_checkin (user_id) VALUES (?)", (user_id,))
+    
+    # Check if both users have checked in today
+    cursor.execute("""
+    SELECT COUNT(DISTINCT user_id) FROM daily_checkin 
+    WHERE DATE(checkin_time) = DATE('now')
+    """)
+    both_checked_in = cursor.fetchone()[0] >= 2
+    
+    conn.commit()
+    conn.close()
+    
+    # Check for achievements after check-in
+    from ..database import check_and_unlock_achievements
+    check_and_unlock_achievements(user_id)
+    
+    return JSONResponse({
+        "success": True,
+        "message": "Check-in recorded",
+        "both_checked_in": both_checked_in,
+        "timestamp": datetime.now().isoformat(),
+    })
+
+async def get_achievements(request: Request):
+    """Get user achievements"""
+    if not request.session.get("authenticated"):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    user_id = request.session.get("user_id")
+    
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    # Get user's achievements
+    cursor.execute("""
+    SELECT ach_name, unlock_date FROM achievements 
+    WHERE user_id = ? ORDER BY unlock_date DESC
+    """, (user_id,))
+    
+    achievements = [
+        {"name": row[0], "unlocked": row[1], "date": row[1]}
+        for row in cursor.fetchall()
+    ]
+    
+    # Get all possible achievements from config
+    cursor.execute("SELECT key, value FROM meta_config WHERE key LIKE 'achievement_%'")
+    all_achievements = []
+    
+    for key, value in cursor.fetchall():
+        name, description = value.split("|", 1)
+        ach_id = key.replace("achievement_", "")
+        all_achievements.append({
+            "id": ach_id,
+            "name": name,
+            "description": description,
+        })
+    
+    conn.close()
+    
+    return JSONResponse({
+        "unlocked": achievements,
+        "all": all_achievements,
+    })
+
+async def get_streak_info(request: Request):
+    """Get user's check-in streak information"""
+    if not request.session.get("authenticated"):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    user_id = request.session.get("user_id")
+    
+    current_streak = get_user_streak(user_id)
+    longest_streak = get_longest_streak(user_id)
+    
+    return JSONResponse({
+        "current_streak": current_streak,
+        "longest_streak": longest_streak,
+        "user_id": user_id,
+    })
+
+async def get_checkin_statistics(request: Request):
+    """Get comprehensive check-in statistics"""
+    if not request.session.get("authenticated"):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    user_id = request.session.get("user_id")
+    
+    stats = get_checkin_stats(user_id)
+    
+    return JSONResponse(stats)
+
+async def get_checkin_calendar_data(request: Request):
+    """Get check-in data for calendar display"""
+    if not request.session.get("authenticated"):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    user_id = request.session.get("user_id")
+    
+    # Get year and month from query parameters
+    query_params = dict(request.query_params)
+    year = int(query_params.get("year", datetime.now().year))
+    month = int(query_params.get("month", datetime.now().month))
+    
+    calendar_data = get_checkin_calendar(user_id, year, month)
+    
+    return JSONResponse(calendar_data)
+
+async def get_checkin_insights(request: Request):
+    """Get check-in patterns and insights"""
+    if not request.session.get("authenticated"):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    user_id = request.session.get("user_id")
+    
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    # Get check-in patterns by day of week
+    cursor.execute("""
+    SELECT 
+        strftime('%w', checkin_time) as weekday,
+        COUNT(*) as count
+    FROM daily_checkin
+    WHERE user_id = ?
+    GROUP BY weekday
+    ORDER BY weekday
+    """, (user_id,))
+    
+    weekday_stats = cursor.fetchall()
+    weekdays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
+    weekday_data = []
+    total_weekday = sum(row[1] for row in weekday_stats)
+    
+    for i, weekday in enumerate(weekdays):
+        count = 0
+        for row in weekday_stats:
+            if int(row[0]) == i:
+                count = row[1]
+                break
+        
+        percentage = (count / total_weekday * 100) if total_weekday > 0 else 0
+        weekday_data.append({
+            "day": weekday,
+            "count": count,
+            "percentage": round(percentage, 1)
+        })
+    
+    # Get check-in patterns by hour
+    cursor.execute("""
+    SELECT 
+        strftime('%H', checkin_time) as hour,
+        COUNT(*) as count
+    FROM daily_checkin
+    WHERE user_id = ?
+    GROUP BY hour
+    ORDER BY hour
+    """, (user_id,))
+    
+    hour_stats = cursor.fetchall()
+    hour_data = []
+    
+    for hour in range(24):
+        count = 0
+        for row in hour_stats:
+            if int(row[0]) == hour:
+                count = row[1]
+                break
+        
+        hour_str = f"{hour:02d}:00"
+        hour_data.append({
+            "hour": hour_str,
+            "count": count
+        })
+    
+    # Get monthly consistency
+    cursor.execute("""
+    SELECT 
+        strftime('%Y-%m', checkin_time) as month,
+        COUNT(DISTINCT DATE(checkin_time)) as days
+    FROM daily_checkin
+    WHERE user_id = ?
+    GROUP BY month
+    ORDER BY month DESC
+    LIMIT 12
+    """, (user_id,))
+    
+    monthly_consistency = []
+    for row in cursor.fetchall():
+        month_str, days = row
+        year, month = map(int, month_str.split('-'))
+        
+        # Get days in month
+        if month == 12:
+            next_month = datetime(year + 1, 1, 1)
+        else:
+            next_month = datetime(year, month + 1, 1)
+        
+        days_in_month = (next_month - datetime(year, month, 1)).days
+        consistency = (days / days_in_month * 100)
+        
+        monthly_consistency.append({
+            "month": month_str,
+            "days": days,
+            "total_days": days_in_month,
+            "consistency": round(consistency, 1)
+        })
+    
+    # Get best streak period
+    cursor.execute("""
+    SELECT DATE(checkin_time) as checkin_date
+    FROM daily_checkin
+    WHERE user_id = ?
+    ORDER BY checkin_date
+    """, (user_id,))
+    
+    all_dates = [datetime.strptime(row[0], "%Y-%m-%d").date() for row in cursor.fetchall()]
+    
+    best_streak = 0
+    best_streak_start = None
+    best_streak_end = None
+    
+    if all_dates:
+        current_streak = 1
+        streak_start = all_dates[0]
+        
+        for i in range(1, len(all_dates)):
+            days_diff = (all_dates[i] - all_dates[i-1]).days
+            
+            if days_diff == 1:
+                current_streak += 1
+            else:
+                if current_streak > best_streak:
+                    best_streak = current_streak
+                    best_streak_start = streak_start
+                    best_streak_end = all_dates[i-1]
+                
+                current_streak = 1
+                streak_start = all_dates[i]
+        
+        # Check last streak
+        if current_streak > best_streak:
+            best_streak = current_streak
+            best_streak_start = streak_start
+            best_streak_end = all_dates[-1]
+    
+    conn.close()
+    
+    # Generate insights
+    insights = []
+    
+    # Weekday insight
+    most_common_day = max(weekday_data, key=lambda x: x["count"])
+    if most_common_day["count"] > 0:
+        insights.append({
+            "type": "pattern",
+            "title": "最爱签到日",
+            "content": f"你最喜欢在{most_common_day['day']}签到，共{most_common_day['count']}次",
+            "icon": "📅"
+        })
+    
+    # Hour insight
+    most_common_hour = max(hour_data, key=lambda x: x["count"])
+    if most_common_hour["count"] > 0:
+        hour_name = "早晨" if 5 <= int(most_common_hour["hour"][:2]) < 12 else \
+                   "下午" if 12 <= int(most_common_hour["hour"][:2]) < 18 else \
+                   "晚上" if 18 <= int(most_common_hour["hour"][:2]) < 22 else "深夜"
+        
+        insights.append({
+            "type": "pattern",
+            "title": "最佳签到时间",
+            "content": f"你通常在{hour_name}{most_common_hour['hour']}签到",
+            "icon": "⏰"
+        })
+    
+    # Consistency insight
+    if monthly_consistency:
+        best_month = max(monthly_consistency, key=lambda x: x["consistency"])
+        if best_month["consistency"] > 70:
+            insights.append({
+                "type": "achievement",
+                "title": "月度全勤王",
+                "content": f"{best_month['month']}你签到了{best_month['days']}天，出勤率{best_month['consistency']}%！",
+                "icon": "🏆"
+            })
+    
+    # Streak insight
+    if best_streak >= 30:
+        insights.append({
+            "type": "achievement",
+            "title": "超长连胜",
+            "content": f"你的最长连续签到记录是{best_streak}天！从{best_streak_start}到{best_streak_end}",
+            "icon": "🔥"
+        })
+    
+    return JSONResponse({
+        "weekday_patterns": weekday_data,
+        "hour_patterns": hour_data,
+        "monthly_consistency": monthly_consistency,
+        "best_streak": {
+            "length": best_streak,
+            "start": best_streak_start.isoformat() if best_streak_start else None,
+            "end": best_streak_end.isoformat() if best_streak_end else None
+        },
+        "insights": insights
+    })

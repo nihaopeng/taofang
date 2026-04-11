@@ -1,0 +1,1201 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>心动坐标 - 我们的世界</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <style>
+        :root {
+            --primary-color: #667eea;
+            --secondary-color: #764ba2;
+            --accent-color: #ff6b6b;
+            --success-color: #51cf66;
+            --text-color: #333;
+            --light-bg: rgba(255, 255, 255, 0.9);
+            --glass-bg: rgba(255, 255, 255, 0.1);
+            --shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+        }
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Arial', sans-serif;
+            background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+            color: var(--text-color);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        
+        /* Header */
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 20px;
+            background: var(--light-bg);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            margin-bottom: 20px;
+            box-shadow: var(--shadow);
+        }
+        
+        .logo {
+            font-size: 1.8em;
+            color: var(--primary-color);
+            font-weight: bold;
+        }
+        
+        .user-info {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+        
+        .user-name {
+            font-weight: bold;
+            color: var(--secondary-color);
+        }
+        
+        .nav-links {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        
+        .nav-btn {
+            padding: 8px 16px;
+            background: var(--glass-bg);
+            color: var(--text-color);
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            text-decoration: none;
+            transition: all 0.3s ease;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        
+        .nav-btn:hover {
+            background: var(--primary-color);
+            color: white;
+            transform: translateY(-2px);
+        }
+        
+        .logout-btn {
+            padding: 8px 16px;
+            background: var(--accent-color);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            transition: transform 0.3s ease;
+            text-decoration: none;
+        }
+        
+        .user-name {
+            font-weight: bold;
+            color: var(--secondary-color);
+        }
+        
+        .logout-btn {
+            padding: 8px 16px;
+            background: var(--accent-color);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            transition: transform 0.3s ease;
+        }
+        
+        .logout-btn:hover {
+            transform: translateY(-2px);
+        }
+        
+        /* Main Content */
+        .main-content {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        
+        @media (max-width: 768px) {
+            .main-content {
+                grid-template-columns: 1fr;
+            }
+        }
+        
+        /* Love Counter Card */
+        .love-counter {
+            background: var(--light-bg);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: var(--shadow);
+        }
+        
+        .counter-title {
+            font-size: 1.5em;
+            color: var(--secondary-color);
+            margin-bottom: 20px;
+            text-align: center;
+        }
+        
+        .counter-display {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        
+        .days-count {
+            font-size: 3em;
+            font-weight: bold;
+            color: var(--accent-color);
+            margin-bottom: 10px;
+        }
+        
+        .time-display {
+            font-size: 1.2em;
+            color: var(--text-color);
+            margin-bottom: 10px;
+        }
+        
+        .anniversary-date {
+            color: var(--secondary-color);
+            font-style: italic;
+        }
+        
+        /* Check-in Card */
+        .checkin-card {
+            background: var(--light-bg);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: var(--shadow);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .checkin-title {
+            font-size: 1.5em;
+            color: var(--secondary-color);
+            margin-bottom: 20px;
+        }
+        
+        .checkin-btn {
+            padding: 15px 30px;
+            background: var(--success-color);
+            color: white;
+            border: none;
+            border-radius: 15px;
+            font-size: 1.2em;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            margin-bottom: 20px;
+        }
+        
+        .checkin-btn:hover:not(:disabled) {
+            transform: scale(1.05);
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+        }
+        
+        .checkin-btn:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        
+        .checkin-status {
+            display: flex;
+            gap: 20px;
+            margin-top: 20px;
+        }
+        
+        .status-item {
+            text-align: center;
+        }
+        
+        .status-icon {
+            font-size: 2em;
+            margin-bottom: 5px;
+        }
+        
+        /* Streak Section */
+        .streak-section {
+            background: var(--light-bg);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: var(--shadow);
+            grid-column: 1 / -1;
+            margin-bottom: 20px;
+        }
+        
+        .streak-stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .streak-stat {
+            background: var(--glass-bg);
+            border-radius: 15px;
+            padding: 20px;
+            text-align: center;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            transition: transform 0.3s ease;
+        }
+        
+        .streak-stat:hover {
+            transform: translateY(-5px);
+        }
+        
+        .stat-value {
+            font-size: 2.5em;
+            font-weight: bold;
+            color: var(--accent-color);
+            margin-bottom: 5px;
+        }
+        
+        .stat-label {
+            font-size: 0.9em;
+            color: #666;
+            margin-bottom: 10px;
+        }
+        
+        .stat-icon {
+            font-size: 1.5em;
+        }
+        
+        .monthly-stats {
+            margin-bottom: 30px;
+        }
+        
+        .monthly-stats h3 {
+            color: var(--secondary-color);
+            margin-bottom: 15px;
+            font-size: 1.2em;
+        }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+        }
+        
+        .month-stat {
+            background: var(--glass-bg);
+            border-radius: 10px;
+            padding: 15px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        
+        .month-name {
+            font-weight: bold;
+            margin-bottom: 5px;
+            color: var(--text-color);
+        }
+        
+        .month-count {
+            font-size: 0.9em;
+            color: #666;
+            margin-bottom: 10px;
+        }
+        
+        .month-bar {
+            height: 8px;
+            background: rgba(0, 0, 0, 0.1);
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        
+        .bar-fill {
+            height: 100%;
+            background: linear-gradient(90deg, var(--primary-color), var(--secondary-color));
+            border-radius: 4px;
+            transition: width 1s ease;
+        }
+        
+        .calendar-container {
+            margin-top: 30px;
+        }
+        
+        .calendar-container h3 {
+            color: var(--secondary-color);
+            margin-bottom: 15px;
+            font-size: 1.2em;
+        }
+        
+        .calendar {
+            background: var(--glass-bg);
+            border-radius: 15px;
+            padding: 20px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            min-height: 200px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .calendar-legend {
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+            margin-top: 15px;
+        }
+        
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.9em;
+            color: #666;
+        }
+        
+        .legend-color {
+            width: 15px;
+            height: 15px;
+            border-radius: 3px;
+        }
+        
+        .legend-color.user-checkin {
+            background: var(--primary-color);
+        }
+        
+        .legend-color.both-checkin {
+            background: var(--success-color);
+        }
+        
+        .loading {
+            color: #666;
+            font-style: italic;
+        }
+        
+        /* Notifications */
+        .notifications-container {
+            background: linear-gradient(135deg, #ffd166 0%, #ff9e6d 100%);
+            border-radius: 20px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: var(--shadow);
+            border: 2px solid rgba(255, 255, 255, 0.3);
+        }
+        
+        .notifications-container h3 {
+            color: #333;
+            margin-bottom: 15px;
+            font-size: 1.3em;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .notifications-list {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        
+        .notification-item {
+            background: rgba(255, 255, 255, 0.9);
+            border-radius: 10px;
+            padding: 15px;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            animation: slideIn 0.5s ease;
+            border-left: 4px solid var(--accent-color);
+        }
+        
+        .notification-icon {
+            font-size: 1.5em;
+            flex-shrink: 0;
+        }
+        
+        .notification-content {
+            flex-grow: 1;
+        }
+        
+        .notification-message {
+            font-weight: bold;
+            color: #333;
+            margin-bottom: 5px;
+        }
+        
+        .notification-time {
+            font-size: 0.8em;
+            color: #666;
+        }
+        
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateX(-20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateX(0);
+            }
+        }
+        
+        /* Insights Section */
+        .insights-section {
+            background: var(--light-bg);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: var(--shadow);
+            grid-column: 1 / -1;
+            margin-bottom: 20px;
+        }
+        
+        .insights-container {
+            margin-bottom: 30px;
+        }
+        
+        .insight-item {
+            background: var(--glass-bg);
+            border-radius: 15px;
+            padding: 20px;
+            margin-bottom: 15px;
+            border-left: 4px solid var(--primary-color);
+            display: flex;
+            align-items: flex-start;
+            gap: 15px;
+            animation: fadeIn 0.5s ease;
+        }
+        
+        .insight-item.achievement {
+            border-left-color: var(--accent-color);
+        }
+        
+        .insight-icon {
+            font-size: 1.5em;
+            flex-shrink: 0;
+        }
+        
+        .insight-content {
+            flex-grow: 1;
+        }
+        
+        .insight-title {
+            font-weight: bold;
+            color: var(--text-color);
+            margin-bottom: 5px;
+            font-size: 1.1em;
+        }
+        
+        .insight-text {
+            color: #666;
+            line-height: 1.5;
+        }
+        
+        .insights-charts {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 30px;
+        }
+        
+        .chart-container {
+            background: var(--glass-bg);
+            border-radius: 15px;
+            padding: 20px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        
+        .chart-container h3 {
+            color: var(--secondary-color);
+            margin-bottom: 15px;
+            font-size: 1.1em;
+            text-align: center;
+        }
+        
+        .chart {
+            height: 200px;
+            display: flex;
+            align-items: flex-end;
+            justify-content: space-around;
+            padding: 10px 0;
+        }
+        
+        .chart-bar {
+            width: 30px;
+            background: linear-gradient(to top, var(--primary-color), var(--secondary-color));
+            border-radius: 5px 5px 0 0;
+            position: relative;
+            transition: height 1s ease;
+        }
+        
+        .chart-bar:hover {
+            opacity: 0.8;
+        }
+        
+        .chart-label {
+            position: absolute;
+            bottom: -25px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 0.8em;
+            color: #666;
+            white-space: nowrap;
+        }
+        
+        .chart-value {
+            position: absolute;
+            top: -25px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 0.8em;
+            font-weight: bold;
+            color: var(--text-color);
+        }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        /* Achievements Section */
+        .achievements-section {
+            background: var(--light-bg);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: var(--shadow);
+            grid-column: 1 / -1;
+        }
+        
+        .section-title {
+            font-size: 1.5em;
+            color: var(--secondary-color);
+            margin-bottom: 20px;
+        }
+        
+        .achievements-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 15px;
+        }
+        
+        .achievement-card {
+            background: var(--glass-bg);
+            border-radius: 15px;
+            padding: 20px;
+            text-align: center;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            transition: transform 0.3s ease;
+        }
+        
+        .achievement-card:hover {
+            transform: translateY(-5px);
+        }
+        
+        .achievement-icon {
+            font-size: 2em;
+            margin-bottom: 10px;
+        }
+        
+        .achievement-name {
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+        
+        .achievement-date {
+            font-size: 0.9em;
+            color: #666;
+        }
+        
+        /* Footer */
+        .footer {
+            text-align: center;
+            padding: 20px;
+            color: white;
+            font-size: 0.9em;
+            opacity: 0.8;
+        }
+        
+        /* Animations */
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+        }
+        
+        .pulse {
+            animation: pulse 2s infinite;
+        }
+        
+        @keyframes float {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-10px); }
+        }
+        
+        .float {
+            animation: float 3s ease-in-out infinite;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="logo">❤️ 心动坐标</div>
+            <div class="user-info">
+                <span class="user-name">欢迎，{{ user_name }}！</span>
+                <div class="nav-links">
+                    <a href="/games" class="nav-btn">🎨 同步画板</a>
+                    <a href="/logout" class="logout-btn">退出</a>
+                </div>
+            </div>
+        </header>
+        
+        <!-- Notifications -->
+        {% if has_notifications %}
+        {{ notifications_html|safe }}
+        {% endif %}
+        
+        <!-- Main Content -->
+        <div class="main-content">
+            <!-- Love Counter -->
+            <div class="love-counter">
+                <h2 class="counter-title">恋爱计时器</h2>
+                <div class="counter-display">
+                    <div class="days-count" id="days-count">{{ days_together }} 天</div>
+                    <div class="time-display" id="time-display">正在计算...</div>
+                    <div class="anniversary-date">始于 {{ anniversary_date }}</div>
+                </div>
+            </div>
+            
+            <!-- Daily Check-in -->
+            <div class="checkin-card">
+                <h2 class="checkin-title">每日签到</h2>
+                <button class="checkin-btn {% if checked_in_today %}pulse{% endif %}" 
+                        id="checkin-btn"
+                        {% if checked_in_today %}disabled{% endif %}>
+                    {% if checked_in_today %}✅ 今日已签到{% else %}点击签到 ❤️{% endif %}
+                </button>
+                
+                <div class="checkin-status">
+                    <div class="status-item">
+                        <div class="status-icon">👤</div>
+                        <div>你：{% if checked_in_today %}✅{% else %}⏳{% endif %}</div>
+                    </div>
+                    <div class="status-item">
+                        <div class="status-icon">👥</div>
+                        <div>双方：{% if both_checked_in %}✅{% else %}⏳{% endif %}</div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Streak Tracking -->
+            <div class="streak-section">
+                <h2 class="section-title">签到记录</h2>
+                <div class="streak-stats">
+                    <div class="streak-stat">
+                        <div class="stat-value">{{ current_streak }}</div>
+                        <div class="stat-label">当前连续签到</div>
+                        <div class="stat-icon">🔥</div>
+                    </div>
+                    <div class="streak-stat">
+                        <div class="stat-value">{{ longest_streak }}</div>
+                        <div class="stat-label">最长连续签到</div>
+                        <div class="stat-icon">🏆</div>
+                    </div>
+                    <div class="streak-stat">
+                        <div class="stat-value">{{ total_checkins }}</div>
+                        <div class="stat-label">总签到次数</div>
+                        <div class="stat-icon">📅</div>
+                    </div>
+                    <div class="streak-stat">
+                        <div class="stat-value">{{ total_both_checkins }}</div>
+                        <div class="stat-label">双人签到天数</div>
+                        <div class="stat-icon">👥</div>
+                    </div>
+                </div>
+                
+                <!-- Monthly Stats -->
+                <div class="monthly-stats">
+                    <h3>最近签到统计</h3>
+                    <div class="stats-grid">
+                        {% for month_stat in monthly_stats %}
+                        <div class="month-stat">
+                            <div class="month-name">{{ month_stat.month }}</div>
+                            <div class="month-count">{{ month_stat.count }} 天</div>
+                            <div class="month-bar">
+                                <div class="bar-fill" style="width: {{ (month_stat.count / 30 * 100)|round }}%"></div>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+                
+                <!-- Calendar View -->
+                <div class="calendar-container">
+                    <h3>签到日历</h3>
+                    <div class="calendar" id="checkin-calendar">
+                        <!-- Calendar will be loaded via JavaScript -->
+                        <div class="loading">加载日历中...</div>
+                    </div>
+                    <div class="calendar-legend">
+                        <div class="legend-item">
+                            <span class="legend-color user-checkin"></span>
+                            <span>你的签到</span>
+                        </div>
+                        <div class="legend-item">
+                            <span class="legend-color both-checkin"></span>
+                            <span>双人签到</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Insights Section -->
+            <div class="insights-section">
+                <h2 class="section-title">签到洞察</h2>
+                <div class="insights-container" id="insights-container">
+                    <div class="loading">分析签到模式中...</div>
+                </div>
+                <div class="insights-charts">
+                    <div class="chart-container">
+                        <h3>每周签到分布</h3>
+                        <div class="chart" id="weekday-chart"></div>
+                    </div>
+                    <div class="chart-container">
+                        <h3>每日签到时间</h3>
+                        <div class="chart" id="hour-chart"></div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Achievements -->
+            <div class="achievements-section">
+                <h2 class="section-title">我们的成就</h2>
+                <div class="achievements-grid">
+                    {% for achievement in achievements %}
+                    <div class="achievement-card float">
+                        <div class="achievement-icon">🏆</div>
+                        <div class="achievement-name">{{ achievement[0] }}</div>
+                        <div class="achievement-date">{{ achievement[1] }}</div>
+                    </div>
+                    {% endfor %}
+                    
+                    {% if not achievements %}
+                    <div class="achievement-card">
+                        <div class="achievement-icon">🌱</div>
+                        <div class="achievement-name">萌芽</div>
+                        <div class="achievement-date">等待解锁...</div>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+        
+        <!-- Footer -->
+        <footer class="footer">
+            © 2026 心动坐标 · 只属于我们的私密空间
+        </footer>
+    </div>
+
+    <script>
+        // Update love counter in real-time
+        function updateLoveCounter() {
+            fetch('/api/love-counter')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.error) {
+                        console.error(data.error);
+                        return;
+                    }
+                    
+                    // Update days count
+                    document.getElementById('days-count').textContent = `${data.days} 天`;
+                    
+                    // Update time display
+                    const timeStr = `相爱已：${data.years}年 ${data.months}月 ${data.days_remaining}天 ${data.hours}小时 ${data.minutes}分 ${data.seconds}秒`;
+                    document.getElementById('time-display').textContent = timeStr;
+                })
+                .catch(error => console.error('Error updating counter:', error));
+        }
+        
+        // Update counter immediately and every second
+        updateLoveCounter();
+        setInterval(updateLoveCounter, 1000);
+        
+        // Handle check-in button
+        const checkinBtn = document.getElementById('checkin-btn');
+        if (checkinBtn && !checkinBtn.disabled) {
+            checkinBtn.addEventListener('click', async () => {
+                try {
+                    const response = await fetch('/api/checkin', {
+                        method: 'POST'
+                    });
+                    
+                    const data = await response.json();
+                    
+                    if (data.success) {
+                        checkinBtn.textContent = '✅ 今日已签到';
+                        checkinBtn.disabled = true;
+                        checkinBtn.classList.remove('pulse');
+                        
+                        // Show celebration effect
+                        if (data.both_checked_in) {
+                            showCelebration();
+                        }
+                        
+                        // Reload page to update status
+                        setTimeout(() => location.reload(), 2000);
+                    } else {
+                        alert(data.error || '签到失败');
+                    }
+                } catch (error) {
+                    console.error('Check-in error:', error);
+                    alert('网络错误，请重试');
+                }
+            });
+        }
+        
+        // Celebration effect for both check-ins
+        function showCelebration() {
+            const celebration = document.createElement('div');
+            celebration.style.cssText = `
+                position: fixed;
+                top: 0;
+                left: 0;
+                width: 100%;
+                height: 100%;
+                background: rgba(255, 255, 255, 0.9);
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                z-index: 1000;
+                font-size: 3em;
+                color: #ff6b6b;
+                animation: fadeIn 0.5s ease;
+            `;
+            
+            celebration.innerHTML = `
+                <div style="text-align: center;">
+                    <div style="font-size: 4em;">🎉</div>
+                    <div>恭喜！今日双人签到完成！</div>
+                    <div style="font-size: 0.5em; margin-top: 20px;">爱心特效 +1</div>
+                </div>
+            `;
+            
+            document.body.appendChild(celebration);
+            
+            setTimeout(() => {
+                celebration.style.animation = 'fadeOut 0.5s ease';
+                setTimeout(() => celebration.remove(), 500);
+            }, 2000);
+            
+            // Add CSS for animations
+            const style = document.createElement('style');
+            style.textContent = `
+                @keyframes fadeIn {
+                    from { opacity: 0; }
+                    to { opacity: 1; }
+                }
+                @keyframes fadeOut {
+                    from { opacity: 1; }
+                    to { opacity: 0; }
+                }
+            `;
+            document.head.appendChild(style);
+        }
+        
+        // Add some interactive effects
+        document.querySelectorAll('.achievement-card').forEach(card => {
+            card.addEventListener('mouseenter', () => {
+                card.style.boxShadow = '0 10px 20px rgba(0, 0, 0, 0.2)';
+            });
+            
+            card.addEventListener('mouseleave', () => {
+                card.style.boxShadow = 'none';
+            });
+        });
+        
+        // Load check-in calendar
+        async function loadCheckinCalendar() {
+            try {
+                const response = await fetch('/api/checkin-calendar');
+                const data = await response.json();
+                
+                if (data.error) {
+                    console.error('Error loading calendar:', data.error);
+                    return;
+                }
+                
+                renderCalendar(data);
+            } catch (error) {
+                console.error('Error loading calendar:', error);
+            }
+        }
+        
+        function renderCalendar(data) {
+            const calendarContainer = document.getElementById('checkin-calendar');
+            if (!calendarContainer) return;
+            
+            const { user_checkins, both_checkins, year, month } = data;
+            
+            // Create calendar HTML
+            const monthNames = ['一月', '二月', '三月', '四月', '五月', '六月', 
+                               '七月', '八月', '九月', '十月', '十一月', '十二月'];
+            
+            let calendarHTML = `
+                <div class="calendar-header">
+                    <h4>${year}年 ${monthNames[month-1]}</h4>
+                </div>
+                <div class="calendar-grid">
+                    <div class="calendar-weekday">日</div>
+                    <div class="calendar-weekday">一</div>
+                    <div class="calendar-weekday">二</div>
+                    <div class="calendar-weekday">三</div>
+                    <div class="calendar-weekday">四</div>
+                    <div class="calendar-weekday">五</div>
+                    <div class="calendar-weekday">六</div>
+            `;
+            
+            // Get first day of month and total days
+            const firstDay = new Date(year, month-1, 1).getDay();
+            const daysInMonth = new Date(year, month, 0).getDate();
+            const today = new Date();
+            
+            // Add empty cells for days before first day of month
+            for (let i = 0; i < firstDay; i++) {
+                calendarHTML += '<div class="calendar-day empty"></div>';
+            }
+            
+            // Add days of month
+            for (let day = 1; day <= daysInMonth; day++) {
+                const dateStr = `${year}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`;
+                const isToday = today.getFullYear() === year && 
+                               today.getMonth() + 1 === month && 
+                               today.getDate() === day;
+                
+                let dayClass = 'calendar-day';
+                let dayContent = day;
+                
+                if (isToday) {
+                    dayClass += ' today';
+                }
+                
+                if (both_checkins.includes(dateStr)) {
+                    dayClass += ' both-checkin';
+                    dayContent = '👥';
+                } else if (user_checkins.includes(dateStr)) {
+                    dayClass += ' user-checkin';
+                    dayContent = '✓';
+                }
+                
+                calendarHTML += `<div class="${dayClass}">${dayContent}</div>`;
+            }
+            
+            calendarHTML += '</div>';
+            calendarContainer.innerHTML = calendarHTML;
+            
+            // Add CSS for calendar
+            const style = document.createElement('style');
+            style.textContent = `
+                .calendar-header {
+                    text-align: center;
+                    margin-bottom: 15px;
+                    color: var(--secondary-color);
+                }
+                
+                .calendar-grid {
+                    display: grid;
+                    grid-template-columns: repeat(7, 1fr);
+                    gap: 5px;
+                }
+                
+                .calendar-weekday {
+                    text-align: center;
+                    font-weight: bold;
+                    color: #666;
+                    padding: 5px;
+                    font-size: 0.9em;
+                }
+                
+                .calendar-day {
+                    aspect-ratio: 1;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    border-radius: 5px;
+                    background: rgba(255, 255, 255, 0.1);
+                    border: 1px solid rgba(255, 255, 255, 0.1);
+                    transition: all 0.3s ease;
+                }
+                
+                .calendar-day.empty {
+                    background: transparent;
+                    border: none;
+                }
+                
+                .calendar-day.today {
+                    border: 2px solid var(--accent-color);
+                }
+                
+                .calendar-day.user-checkin {
+                    background: var(--primary-color);
+                    color: white;
+                }
+                
+                .calendar-day.both-checkin {
+                    background: var(--success-color);
+                    color: white;
+                }
+                
+                .calendar-day:hover:not(.empty) {
+                    transform: scale(1.1);
+                    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.2);
+                }
+            `;
+            
+            document.head.appendChild(style);
+        }
+        
+        // Load calendar on page load
+        loadCheckinCalendar();
+        
+        // Update streak stats periodically
+        async function updateStreakStats() {
+            try {
+                const response = await fetch('/api/streak');
+                const data = await response.json();
+                
+                if (data.error) {
+                    console.error('Error updating streak:', data.error);
+                    return;
+                }
+                
+                // Update streak display if elements exist
+                const currentStreakEl = document.querySelector('.streak-stat:nth-child(1) .stat-value');
+                const longestStreakEl = document.querySelector('.streak-stat:nth-child(2) .stat-value');
+                
+                if (currentStreakEl) {
+                    currentStreakEl.textContent = data.current_streak;
+                }
+                if (longestStreakEl) {
+                    longestStreakEl.textContent = data.longest_streak;
+                }
+            } catch (error) {
+                console.error('Error updating streak stats:', error);
+            }
+        }
+        
+        // Update streak stats every 5 minutes
+        setInterval(updateStreakStats, 5 * 60 * 1000);
+        
+        // Load check-in insights
+        async function loadCheckinInsights() {
+            try {
+                const response = await fetch('/api/checkin-insights');
+                const data = await response.json();
+                
+                if (data.error) {
+                    console.error('Error loading insights:', data.error);
+                    return;
+                }
+                
+                renderInsights(data);
+                renderCharts(data);
+            } catch (error) {
+                console.error('Error loading insights:', error);
+            }
+        }
+        
+        function renderInsights(data) {
+            const container = document.getElementById('insights-container');
+            if (!container || !data.insights || data.insights.length === 0) {
+                container.innerHTML = '<div class="insight-item"><div class="insight-text">继续签到，解锁更多洞察！</div></div>';
+                return;
+            }
+            
+            let insightsHTML = '';
+            data.insights.forEach(insight => {
+                const insightClass = insight.type === 'achievement' ? 'insight-item achievement' : 'insight-item';
+                insightsHTML += `
+                    <div class="${insightClass}">
+                        <div class="insight-icon">${insight.icon}</div>
+                        <div class="insight-content">
+                            <div class="insight-title">${insight.title}</div>
+                            <div class="insight-text">${insight.content}</div>
+                        </div>
+                    </div>
+                `;
+            });
+            
+            container.innerHTML = insightsHTML;
+        }
+        
+        function renderCharts(data) {
+            // Weekday chart
+            const weekdayChart = document.getElementById('weekday-chart');
+            if (weekdayChart && data.weekday_patterns) {
+                let maxCount = Math.max(...data.weekday_patterns.map(d => d.count));
+                if (maxCount === 0) maxCount = 1;
+                
+                let weekdayHTML = '';
+                data.weekday_patterns.forEach(day => {
+                    const height = (day.count / maxCount * 100) + '%';
+                    weekdayHTML += `
+                        <div class="chart-bar" style="height: ${height}" title="${day.day}: ${day.count}次">
+                            <div class="chart-value">${day.count}</div>
+                            <div class="chart-label">${day.day}</div>
+                        </div>
+                    `;
+                });
+                
+                weekdayChart.innerHTML = weekdayHTML;
+            }
+            
+            // Hour chart
+            const hourChart = document.getElementById('hour-chart');
+            if (hourChart && data.hour_patterns) {
+                // Group hours for better visualization
+                const hourGroups = [];
+                for (let i = 0; i < 24; i += 3) {
+                    const groupCount = data.hour_patterns
+                        .slice(i, i + 3)
+                        .reduce((sum, hour) => sum + hour.count, 0);
+                    
+                    const hourLabel = `${i.toString().padStart(2, '0')}:00`;
+                    hourGroups.push({
+                        label: hourLabel,
+                        count: groupCount
+                    });
+                }
+                
+                let maxCount = Math.max(...hourGroups.map(g => g.count));
+                if (maxCount === 0) maxCount = 1;
+                
+                let hourHTML = '';
+                hourGroups.forEach(group => {
+                    const height = (group.count / maxCount * 100) + '%';
+                    hourHTML += `
+                        <div class="chart-bar" style="height: ${height}" title="${group.label}: ${group.count}次">
+                            <div class="chart-value">${group.count}</div>
+                            <div class="chart-label">${group.label}</div>
+                        </div>
+                    `;
+                });
+                
+                hourChart.innerHTML = hourHTML;
+            }
+        }
+        
+        // Load insights on page load
+        loadCheckinInsights();
+    </script>
+</body>
+</html>

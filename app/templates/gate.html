@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>心动坐标 - 传送门</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            font-family: 'Arial', sans-serif;
+            transition: background-color 0.5s ease;
+        }
+        
+        .gate-container {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            padding: 40px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            text-align: center;
+            max-width: 400px;
+            width: 90%;
+        }
+        
+        .logo {
+            font-size: 2.5em;
+            color: white;
+            margin-bottom: 20px;
+            font-weight: 300;
+            letter-spacing: 2px;
+        }
+        
+        .subtitle {
+            color: rgba(255, 255, 255, 0.8);
+            margin-bottom: 30px;
+            font-size: 1.1em;
+        }
+        
+        .passphrase-input {
+            width: 100%;
+            padding: 15px;
+            border: none;
+            border-radius: 10px;
+            background: rgba(255, 255, 255, 0.9);
+            font-size: 1.1em;
+            text-align: center;
+            margin-bottom: 20px;
+            box-sizing: border-box;
+            transition: all 0.3s ease;
+        }
+        
+        .passphrase-input:focus {
+            outline: none;
+            box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.3);
+            transform: translateY(-2px);
+        }
+        
+        .passphrase-input.error {
+            background: rgba(255, 200, 200, 0.9);
+            animation: shake 0.5s ease;
+        }
+        
+        @keyframes shake {
+            0%, 100% { transform: translateX(0); }
+            10%, 30%, 50%, 70%, 90% { transform: translateX(-5px); }
+            20%, 40%, 60%, 80% { transform: translateX(5px); }
+        }
+        
+        .submit-btn {
+            width: 100%;
+            padding: 15px;
+            border: none;
+            border-radius: 10px;
+            background: white;
+            color: #667eea;
+            font-size: 1.1em;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        
+        .submit-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+        }
+        
+        .error-message {
+            color: #ff6b6b;
+            margin-top: 10px;
+            font-size: 0.9em;
+            min-height: 20px;
+        }
+        
+        .hint {
+            color: rgba(255, 255, 255, 0.6);
+            font-size: 0.9em;
+            margin-top: 20px;
+            font-style: italic;
+        }
+    </style>
+</head>
+<body>
+    <div class="gate-container">
+        <div class="logo">❤️ 心动坐标</div>
+        <div class="subtitle">只有对的人才能进入</div>
+        
+        <form id="passphrase-form">
+            <input type="password" 
+                   class="passphrase-input" 
+                   placeholder="请输入真爱口令" 
+                   id="passphrase"
+                   autocomplete="off"
+                   autofocus>
+            <button type="submit" class="submit-btn">进入我们的世界</button>
+        </form>
+        
+        <div class="error-message" id="error-message"></div>
+        <div class="hint">提示：我们的初见日期或约定暗号</div>
+    </div>
+
+    <script>
+        const form = document.getElementById('passphrase-form');
+        const passphraseInput = document.getElementById('passphrase');
+        const errorMessage = document.getElementById('error-message');
+        
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const passphrase = passphraseInput.value.trim();
+            if (!passphrase) {
+                showError('请输入真爱口令');
+                return;
+            }
+            
+            try {
+                const formData = new FormData();
+                formData.append('passphrase', passphrase);
+                
+                const response = await fetch('/login', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (response.ok) {
+                    window.location.href = '/';
+                } else {
+                    const data = await response.json();
+                    showError(data.error || '口令错误');
+                    passphraseInput.classList.add('error');
+                    setTimeout(() => {
+                        passphraseInput.classList.remove('error');
+                    }, 500);
+                }
+            } catch (error) {
+                showError('网络错误，请重试');
+            }
+        });
+        
+        function showError(message) {
+            errorMessage.textContent = message;
+            errorMessage.style.opacity = '1';
+            
+            setTimeout(() => {
+                errorMessage.style.opacity = '0';
+            }, 3000);
+        }
+        
+        // Add some visual effects
+        passphraseInput.addEventListener('focus', () => {
+            document.body.style.background = 'linear-gradient(135deg, #764ba2 0%, #667eea 100%)';
+        });
+        
+        passphraseInput.addEventListener('blur', () => {
+            document.body.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
+        });
+    </script>
+</body>
+</html>
