@@ -74,9 +74,11 @@ class GameWebSocketHandler:
         
         elif message_type == "canvas_draw":
             session_id = message.get("session_id")
+            print(f"Received canvas_draw message for session {session_id}")
             if session_id in self.canvas_sessions:
                 # 简单粗暴：直接把收到的整个 message 转发给所有人
                 for uid, ws_conn in self.user_sockets.items():
+                    print(f"Attempting to send canvas_draw message to user {uid}")
                     if uid != user_id:
                         try:
                             await ws_conn.send_json(message)

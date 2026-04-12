@@ -24,7 +24,7 @@ async def games_dashboard(request: Request):
     return request.app.templates.TemplateResponse("games.html", context)
 
 async def canvas_game(request: Request):
-    """Canvas Sync game page"""
+    """Canvas Sync game page - NEW VERSION based on mobile_test"""
     if not request.session.get("authenticated"):
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     
@@ -37,7 +37,7 @@ async def canvas_game(request: Request):
         "user_id": user_id,
     }
     
-    return request.app.templates.TemplateResponse("canvas_game.html", context)
+    return request.app.templates.TemplateResponse("canvas_new.html", context)
 
 async def mobile_test(request: Request):
     """Mobile touch test page"""

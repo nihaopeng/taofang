@@ -122,15 +122,48 @@
         
         /* Main Content */
         .main-content {
-            display: grid;
+            display: grid; /* 确保这里开启了 grid */
             grid-template-columns: 1fr 1fr;
             gap: 20px;
             margin-bottom: 20px;
+            width: 100%; /* 确保填满容器 */
         }
         
         @media (max-width: 768px) {
+            body {
+                padding: 15px !important; 
+            }
+
+            .container {
+                width: 100% !important;
+                padding: 0 !important;
+            }
+
             .main-content {
-                grid-template-columns: 1fr;
+                display: block;           /* 手机端把 grid 换成 block 最稳妥 */
+                width: 100% !important;
+                padding: 0 !important;    /* 移除 main-content 自己的 padding */
+                margin: 0 0 20px 0 !important;
+            }
+
+            .love-counter, 
+            .checkin-card, 
+            .streak-section, 
+            .insights-section, 
+            .achievements-section,
+            .header {
+                width: 100% !important;
+                margin-left: 0 !important;
+                margin-right: 0 !important;
+                margin-bottom: 15px !important;
+                box-sizing: border-box !important;
+                padding: 20px !important;
+            }
+
+            .header {
+                flex-direction: column; 
+                align-items: flex-start;
+                gap: 15px;
             }
         }
         
