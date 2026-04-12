@@ -49,6 +49,7 @@
             box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
             transition: transform 0.3s ease;
             cursor: pointer;
+            position: relative;
         }
         
         .game-card:hover {
@@ -69,6 +70,32 @@
         .game-description {
             color: #666;
             margin-bottom: 20px;
+        }
+        
+        .online-status {
+            position: absolute;
+            top: 15px;
+            right: 15px;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            font-size: 0.9em;
+            color: #666;
+        }
+        
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background-color: #ccc;
+        }
+        
+        .status-dot.online {
+            background-color: #4ecdc4;
+        }
+        
+        .status-dot.offline {
+            background-color: #ff6b6b;
         }
         
         .play-btn {
@@ -136,6 +163,10 @@
                 <div class="game-icon">{{ game.icon }}</div>
                 <h3 class="game-title">{{ game.name }}</h3>
                 <p class="game-description">{{ game.description }}</p>
+                <div class="online-status" id="status-{{ game.id }}">
+                    <div class="status-dot offline"></div>
+                    <span>离线</span>
+                </div>
                 <button class="play-btn" data-game="{{ game.id }}">开始游戏</button>
             </div>
             {% endfor %}
@@ -158,7 +189,7 @@
     </div>
 
         <script>
-        // Game navigation
+        // Game navigation and online status
         document.addEventListener('DOMContentLoaded', function() {
             const gameCards = document.querySelectorAll('.game-card');
             const playButtons = document.querySelectorAll('.play-btn');
@@ -181,9 +212,44 @@
             function startGame(gameId) {
                 if (gameId === 'canvas') {
                     window.location.href = '/game/canvas';
+                } else if (gameId === 'tank') {
+                    window.location.href = '/game/tank';
                 }
             }
+            
+            // Check online status for games
+            checkGameStatus();
+            
+            // Periodically check online status
+            setInterval(checkGameStatus, 10000);
         });
+        
+        function checkGameStatus() {
+            // For now, we'll simulate online status
+            // In a real implementation, you would check with the server
+            const games = ['canvas', 'tank'];
+            
+            games.forEach(gameId => {
+                const statusElement = document.getElementById(`status-${gameId}`);
+                if (statusElement) {
+                    // Simulate random online status for demo
+                    const isOnline = Math.random() > 0.3; // 70% chance of being online
+                    
+                    const dot = statusElement.querySelector('.status-dot');
+                    const text = statusElement.querySelector('span');
+                    
+                    if (isOnline) {
+                        dot.className = 'status-dot online';
+                        text.textContent = '在线';
+                        text.style.color = '#4ecdc4';
+                    } else {
+                        dot.className = 'status-dot offline';
+                        text.textContent = '离线';
+                        text.style.color = '#ff6b6b';
+                    }
+                }
+            });
+        }
         </script>
 </body>
 </html>

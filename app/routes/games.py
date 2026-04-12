@@ -18,6 +18,7 @@ async def games_dashboard(request: Request):
         "user_name": user_name,
         "games": [
             {"id": "canvas", "name": "同步画板", "description": "一起涂鸦创作", "icon": "🎨"},
+            {"id": "tank", "name": "双人坦克大战", "description": "实时对战游戏", "icon": "🎮"},
         ]
     }
     
@@ -60,3 +61,19 @@ async def canvas_simple(request: Request):
     }
     
     return request.app.templates.TemplateResponse("canvas_simple.html", context)
+
+async def tank_battle(request: Request):
+    """Tank Battle game page"""
+    if not request.session.get("authenticated"):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    user_id = request.session.get("user_id")
+    user_name = request.session.get("user_name")
+    
+    context = {
+        "request": request,
+        "user_name": user_name,
+        "user_id": user_id,
+    }
+    
+    return request.app.templates.TemplateResponse("tank_battle.html", context)
