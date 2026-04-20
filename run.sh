@@ -14,33 +14,22 @@ if [ ! -d ".env" ]; then
 fi
 
 # build service
-echo "[Unit]\n\
-Description=taofang server\n\
-After=network.target\n\
-\n\
-[Service]\n\
-# 确保使用 root 用户（如果你习惯用 root 运行）\n\
-User=root\n\
-Group=root\n\
-\n\
-# 关键：指定程序的运行目录，这样代码里的相对路径才不会报错\n\
-WorkingDirectory=/root/projects/taofang\n\
-\n\
-# 使用虚拟环境内的 Python 绝对路径\n\
-# 并且确保 main.py 也是绝对路径\n\
-ExecStart=$(pwd)/.venv/bin/python $(pwd)/main.py 59075\n\
-\n\
-# 允许程序自动重启\n\
-Restart=on-failure\n\
-RestartSec=5s\n\
-\n\
-# 捕捉错误日志，方便调试
-StandardOutput=inherit\n\
-StandardError=inherit\n\
-\n\
-[Install]\n\
-WantedBy=multi-user.target\n\
-" > taofang.service
+cat << EOF > /etc/systemd/system/taofang.service
+echo "[Unit]
+Description=taofang server
+After=network.target
+[Service]
+User=root
+Group=root
+WorkingDirectory=/root/projects/taofang
+ExecStart=$(pwd)/.venv/bin/python $(pwd)/main.py 59075
+Restart=on-failure
+RestartSec=5s
+StandardOutput=inherit
+StandardError=inherit
+[Install]
+WantedBy=multi-user.target
+EOF
 
 # start service
 mv taofang.service /etc/systemd/system/
