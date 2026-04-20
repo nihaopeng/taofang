@@ -811,6 +811,103 @@
             color: #666;
         }
         
+        /* Simple Check-in */
+        .simple-checkin {
+            background: var(--light-bg);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            padding: 25px;
+            margin-bottom: 20px;
+            box-shadow: var(--shadow);
+        }
+        
+        .checkin-container {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        
+        .checkin-status {
+            display: flex;
+            justify-content: space-around;
+            gap: 15px;
+        }
+        
+        .status-item {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            flex: 1;
+            padding: 15px;
+            background: rgba(255, 255, 255, 0.5);
+            border-radius: 15px;
+            min-width: 0;
+        }
+        
+        .status-icon {
+            font-size: 1.8em;
+            margin-bottom: 8px;
+        }
+        
+        .status-label {
+            font-size: 0.9em;
+            color: #666;
+            margin-bottom: 5px;
+        }
+        
+        .status-value {
+            font-size: 1.5em;
+            font-weight: bold;
+            color: var(--primary-color);
+        }
+        
+        .checkin-btn {
+            background: linear-gradient(135deg, var(--accent-color) 0%, #ff8e8e 100%);
+            color: white;
+            border: none;
+            padding: 18px 30px;
+            border-radius: 15px;
+            font-size: 1.2em;
+            font-weight: bold;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(255, 107, 107, 0.3);
+        }
+        
+        .checkin-btn:hover:not(:disabled) {
+            transform: translateY(-3px);
+            box-shadow: 0 6px 20px rgba(255, 107, 107, 0.4);
+        }
+        
+        .checkin-btn:active:not(:disabled) {
+            transform: translateY(-1px);
+        }
+        
+        .checkin-btn:disabled {
+            opacity: 0.7;
+            cursor: not-allowed;
+        }
+        
+        .checkin-icon {
+            font-size: 1.4em;
+        }
+        
+        .checkin-text {
+            font-size: 1.1em;
+        }
+        
+        .checkin-hint {
+            text-align: center;
+            color: #666;
+            font-size: 0.95em;
+            min-height: 1.5em;
+            transition: color 0.3s ease;
+        }
+        
         /* Footer */
         .footer {
             text-align: center;
@@ -895,6 +992,39 @@
                         <div class="action-name">回忆相册</div>
                         <div class="action-desc">美好瞬间</div>
                     </a>
+                </div>
+            </div>
+            
+            <!-- Simple Check-in -->
+            <div class="simple-checkin">
+                <h2 class="section-title">📅 每日签到</h2>
+                <div class="checkin-container">
+                    <div class="checkin-status">
+                        <div class="status-item">
+                            <div class="status-icon">🔥</div>
+                            <div class="status-label">连续签到</div>
+                            <div class="status-value" id="current-streak">0</div>
+                        </div>
+                        <div class="status-item">
+                            <div class="status-icon">🏆</div>
+                            <div class="status-label">最长记录</div>
+                            <div class="status-value" id="longest-streak">0</div>
+                        </div>
+                        <div class="status-item">
+                            <div class="status-icon">📅</div>
+                            <div class="status-label">总签到</div>
+                            <div class="status-value" id="total-checkins">0</div>
+                        </div>
+                    </div>
+                    
+                    <button class="checkin-btn" id="checkin-btn">
+                        <span class="checkin-icon">❤️</span>
+                        <span class="checkin-text" id="checkin-text">点击签到</span>
+                    </button>
+                    
+                    <div class="checkin-hint" id="checkin-hint">
+                        💡 每日签到，记录爱的每一天
+                    </div>
                 </div>
             </div>
             
@@ -1052,6 +1182,115 @@
                 card.style.transform = 'translateY(0)';
             });
         });
+        
+        // 签到功能
+        let checkinData = null;
+        
+        // 初始化签到功能
+        async function initCheckin() {
+            try {
+                // 获取签到数据
+                const response = await fetch('/api/checkin-stats');
+                const data = await response.json();
+                
+                if (data.error) {
+                    console.error(data.error);
+                    return;
+                }
+                
+                checkinData = data;
+                updateCheckinDisplay();
+                
+                // 检查今天是否已签到
+                const today = new Date().toISOString().split('T')[0];
+                const hasCheckedInToday = data.recent_checkins && 
+                    data.recent_checkins.some(date => date === today);
+                
+                if (hasCheckedInToday) {
+                    updateCheckinButton(true);
+                } else {
+                    updateCheckinButton(false);
+                }
+                
+            } catch (error) {
+                console.error('Error initializing checkin:', error);
+            }
+        }
+        
+        // 更新签到显示
+        function updateCheckinDisplay() {
+            if (!checkinData) return;
+            
+            document.getElementById('current-streak').textContent = checkinData.current_streak;
+            document.getElementById('longest-streak').textContent = checkinData.longest_streak;
+            document.getElementById('total-checkins').textContent = checkinData.total_checkins;
+        }
+        
+        // 更新签到按钮状态
+        function updateCheckinButton(checkedIn) {
+            const btn = document.getElementById('checkin-btn');
+            const text = document.getElementById('checkin-text');
+            const hint = document.getElementById('checkin-hint');
+            
+            if (checkedIn) {
+                btn.disabled = true;
+                btn.style.opacity = '0.7';
+                btn.style.cursor = 'not-allowed';
+                text.textContent = '今日已签到';
+                hint.textContent = '✅ 今日已签到，明天再来吧！';
+            } else {
+                btn.disabled = false;
+                btn.style.opacity = '1';
+                btn.style.cursor = 'pointer';
+                text.textContent = '点击签到';
+                hint.textContent = '💡 每日签到，记录爱的每一天';
+            }
+        }
+        
+        // 执行签到
+        async function performCheckin() {
+            try {
+                const response = await fetch('/api/checkin', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                });
+                
+                const data = await response.json();
+                
+                if (data.error) {
+                    alert(data.error);
+                    return;
+                }
+                
+                // 更新签到数据
+                checkinData = data;
+                updateCheckinDisplay();
+                updateCheckinButton(true);
+                
+                // 显示成功消息
+                const hint = document.getElementById('checkin-hint');
+                hint.textContent = `🎉 签到成功！获得 ${data.points} 积分`;
+                hint.style.color = '#51cf66';
+                
+                // 3秒后恢复提示
+                setTimeout(() => {
+                    hint.textContent = '✅ 今日已签到，明天再来吧！';
+                    hint.style.color = '';
+                }, 3000);
+                
+            } catch (error) {
+                console.error('Error performing checkin:', error);
+                alert('签到失败，请重试');
+            }
+        }
+        
+        // 绑定签到按钮事件
+        document.getElementById('checkin-btn').addEventListener('click', performCheckin);
+        
+        // 页面加载时初始化签到功能
+        window.addEventListener('DOMContentLoaded', initCheckin);
     </script>
 </body>
 </html>

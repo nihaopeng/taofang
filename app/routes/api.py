@@ -73,6 +73,20 @@ async def checkin(request: Request):
     # Record check-in
     cursor.execute("INSERT INTO daily_checkin (user_id) VALUES (?)", (user_id,))
     
+    # Award points for check-in
+    points = 10  # Base points for daily check-in
+    
+    # Bonus for streak
+    from ..database import get_user_streak
+    current_streak = get_user_streak(user_id)
+    if current_streak >= 7:
+        points += 20  # Weekly streak bonus
+    elif current_streak >= 30:
+        points += 50  # Monthly streak bonus
+    
+    # Update user points
+    cursor.execute("UPDATE users SET points = points + ? WHERE id = ?", (points, user_id))
+    
     # Check if both users have checked in today
     cursor.execute("""
     SELECT COUNT(DISTINCT user_id) FROM daily_checkin 
@@ -92,6 +106,7 @@ async def checkin(request: Request):
         "message": "Check-in recorded",
         "both_checked_in": both_checked_in,
         "timestamp": datetime.now().isoformat(),
+        "points": points
     })
 
 async def get_achievements(request: Request):
@@ -151,12 +166,35 @@ async def get_checkin_statistics(request: Request):
     if not request.session.get("authenticated"):
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     
+    user_id = request.session.get("user_id")
+    
+    from ..database import get_checkin_stats
+    stats = get_checkin_stats(user_id)
+    
     return JSONResponse({
         "stats": {
-            "total_checkins": 0,
-            "total_both_checkins": 0,
-            "monthly_stats": []
+            "total_checkins": stats["total_checkins"],
+            "total_both_checkins": stats["total_both_checkins"],
+            "monthly_stats": stats["monthly_stats"]
         },
+        "success": True
+    })
+
+async def get_checkin_stats(request: Request):
+    """Get check-in stats for dashboard display"""
+    if not request.session.get("authenticated"):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    user_id = request.session.get("user_id")
+    
+    from ..database import get_checkin_stats
+    stats = get_checkin_stats(user_id)
+    
+    return JSONResponse({
+        "total_checkins": stats["total_checkins"],
+        "current_streak": stats["current_streak"],
+        "longest_streak": stats["longest_streak"],
+        "recent_checkins": stats["recent_checkins"],
         "success": True
     })
 

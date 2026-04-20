@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 def get_connection():
-    return sqlite3.connect(os.getenv("DATABASE_URL", "app/database/heart_sync.db"), check_same_thread=False)
+    return sqlite3.connect(os.getenv("DATABASE_PATH", "app/database.db"), check_same_thread=False)
 
 def init_db():
     if not os.path.exists("app/database"):
@@ -15,14 +15,25 @@ def init_db():
     conn = get_connection()
     cursor = conn.cursor()
     
+    # Check if users table exists and has points column
+    cursor.execute("PRAGMA table_info(users)")
+    columns = cursor.fetchall()
+    column_names = [col[1] for col in columns]
+    
     # Create tables based on PRD schema
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY,
         name TEXT NOT NULL,
-        secret_key TEXT NOT NULL
+        secret_key TEXT NOT NULL,
+        points INTEGER DEFAULT 0
     )
     """)
+    
+    # If table exists but missing points column, add it
+    if columns and 'points' not in column_names:
+        print("Adding points column to users table...")
+        cursor.execute("ALTER TABLE users ADD COLUMN points INTEGER DEFAULT 0")
     
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS achievements (
@@ -266,6 +277,17 @@ def check_and_unlock_interaction_achievements(user_id: int, interaction_count: i
     if interaction_count >= 100:
         unlock_achievement(user_id, "interact_100")
 
+def check_and_unlock_achievements(user_id: int):
+    """Check and unlock all types of achievements for a user"""
+    # Check time-based achievements
+    check_and_unlock_time_achievements(user_id)
+    
+    # Check check-in based achievements
+    check_and_unlock_checkin_achievements(user_id)
+    
+    # Note: Other achievement types (game, canvas, interaction, special) 
+    # are checked in their respective contexts
+
 def check_and_unlock_special_achievements(user_id: int, event_type: str):
     """Check and unlock special event achievements"""
     if event_type == "valentine":
@@ -293,6 +315,21 @@ def check_and_unlock_special_achievements(user_id: int, event_type: str):
     
     conn.close()
 
+def check_and_unlock_checkin_achievements(user_id: int):
+    """Check and unlock check-in based achievements"""
+    today = datetime.now()
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    # Get days together from anniversary date
+    days_together = 0
+    cursor.execute("SELECT value FROM meta_config WHERE key = 'anniversary_date'")
+    anniversary_row = cursor.fetchone()
+    
+    if anniversary_row:
+        anniversary_date = datetime.strptime(anniversary_row[0], "%Y-%m-%d")
+        days_together = (today - anniversary_date).days
+    
     # Check for check-in based achievements
     if days_together >= 7:
         # Check for 7 consecutive days of both users checking in
@@ -523,6 +560,55 @@ def get_achievement_stats(user_id: int):
         "total_points": total_points,
         "category_stats": category_stats
     }
+
+def get_user_streak(user_id: int):
+    """Get current check-in streak for a user"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    # Get all check-in dates for the user, ordered by date
+    cursor.execute("""
+    SELECT DATE(checkin_time) as checkin_date
+    FROM daily_checkin
+    WHERE user_id = ?
+    ORDER BY checkin_date DESC
+    """, (user_id,))
+    
+    checkin_dates = [datetime.strptime(row[0], "%Y-%m-%d").date() for row in cursor.fetchall()]
+    conn.close()
+    
+    if not checkin_dates:
+        return 0
+    
+    # Calculate current streak
+    today = datetime.now().date()
+    streak = 0
+    
+    # Check if checked in today
+    if checkin_dates[0] == today:
+        streak = 1
+        # Check previous days
+        expected_date = today
+        for checkin_date in checkin_dates[1:]:
+            expected_date = expected_date - timedelta(days=1)
+            if checkin_date == expected_date:
+                streak += 1
+            else:
+                break
+    else:
+        # Check yesterday
+        yesterday = today - timedelta(days=1)
+        if checkin_dates[0] == yesterday:
+            streak = 1
+            expected_date = yesterday
+            for checkin_date in checkin_dates[1:]:
+                expected_date = expected_date - timedelta(days=1)
+                if checkin_date == expected_date:
+                    streak += 1
+                else:
+                    break
+    
+    return streak
 
 def get_longest_streak(user_id: int):
     """Get longest check-in streak for a user"""
