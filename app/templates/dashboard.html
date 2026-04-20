@@ -908,6 +908,54 @@
             transition: color 0.3s ease;
         }
         
+        /* New styles for partner status */
+        .status-subtitle {
+            font-size: 1.1em;
+            font-weight: bold;
+            color: var(--primary-color);
+            margin-bottom: 15px;
+            text-align: center;
+        }
+        
+        /* Horizontal layout */
+        .checkin-horizontal {
+            display: flex;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        
+        .user-checkin-status,
+        .partner-checkin-status {
+            flex: 1;
+            min-width: 0;
+        }
+        
+        .user-checkin-status .status-item {
+            background: rgba(255, 255, 255, 0.5);
+        }
+        
+        .partner-checkin-status .status-item {
+            background: rgba(255, 255, 255, 0.7);
+            border: 1px solid rgba(102, 126, 234, 0.2);
+        }
+        
+        .partner-checkin-status .status-value {
+            color: var(--secondary-color);
+        }
+        
+        /* Partner status indicators */
+        .status-ok {
+            color: #51cf66;
+        }
+        
+        .status-waiting {
+            color: #ffd43b;
+        }
+        
+        .status-missing {
+            color: #ff6b6b;
+        }
+        
         /* Footer */
         .footer {
             text-align: center;
@@ -999,24 +1047,53 @@
             <div class="simple-checkin">
                 <h2 class="section-title">📅 每日签到</h2>
                 <div class="checkin-container">
-                    <div class="checkin-status">
-                        <div class="status-item">
-                            <div class="status-icon">🔥</div>
-                            <div class="status-label">连续签到</div>
-                            <div class="status-value" id="current-streak">0</div>
+                    <div class="checkin-horizontal">
+                        <!-- 个人签到状态 -->
+                        <div class="user-checkin-status">
+                            <h3 class="status-subtitle">我的签到</h3>
+                            <div class="checkin-status">
+                                <div class="status-item">
+                                    <div class="status-icon">🔥</div>
+                                    <div class="status-label">连续签到</div>
+                                    <div class="status-value" id="current-streak">0</div>
+                                </div>
+                                <div class="status-item">
+                                    <div class="status-icon">🏆</div>
+                                    <div class="status-label">最长记录</div>
+                                    <div class="status-value" id="longest-streak">0</div>
+                                </div>
+                                <div class="status-item">
+                                    <div class="status-icon">📅</div>
+                                    <div class="status-label">总签到</div>
+                                    <div class="status-value" id="total-checkins">0</div>
+                                </div>
+                            </div>
                         </div>
-                        <div class="status-item">
-                            <div class="status-icon">🏆</div>
-                            <div class="status-label">最长记录</div>
-                            <div class="status-value" id="longest-streak">0</div>
-                        </div>
-                        <div class="status-item">
-                            <div class="status-icon">📅</div>
-                            <div class="status-label">总签到</div>
-                            <div class="status-value" id="total-checkins">0</div>
+                        
+                        <!-- 对方签到状态 -->
+                        <div class="partner-checkin-status">
+                            <h3 class="status-subtitle" id="partner-name">对方的签到</h3>
+                            <div class="checkin-status">
+                                <div class="status-item">
+                                    <div class="status-icon" id="partner-status-icon">⏳</div>
+                                    <div class="status-label">今日状态</div>
+                                    <div class="status-value" id="partner-today-status">等待中</div>
+                                </div>
+                                <div class="status-item">
+                                    <div class="status-icon">🔥</div>
+                                    <div class="status-label">连续签到</div>
+                                    <div class="status-value" id="partner-current-streak">0</div>
+                                </div>
+                                <div class="status-item">
+                                    <div class="status-icon">📅</div>
+                                    <div class="status-label">总签到</div>
+                                    <div class="status-value" id="partner-total-checkins">0</div>
+                                </div>
+                            </div>
                         </div>
                     </div>
                     
+                    <!-- 签到按钮 -->
                     <button class="checkin-btn" id="checkin-btn">
                         <span class="checkin-icon">❤️</span>
                         <span class="checkin-text" id="checkin-text">点击签到</span>
@@ -1189,7 +1266,7 @@
         // 初始化签到功能
         async function initCheckin() {
             try {
-                // 获取签到数据
+                // 获取签到数据（包含对方状态和累计数据）
                 const response = await fetch('/api/checkin-stats');
                 const data = await response.json();
                 
@@ -1203,8 +1280,8 @@
                 
                 // 检查今天是否已签到
                 const today = new Date().toISOString().split('T')[0];
-                const hasCheckedInToday = data.recent_checkins && 
-                    data.recent_checkins.some(date => date === today);
+                const hasCheckedInToday = data.user.recent_checkins && 
+                    data.user.recent_checkins.some(date => date === today);
                 
                 if (hasCheckedInToday) {
                     updateCheckinButton(true);
@@ -1221,9 +1298,44 @@
         function updateCheckinDisplay() {
             if (!checkinData) return;
             
-            document.getElementById('current-streak').textContent = checkinData.current_streak;
-            document.getElementById('longest-streak').textContent = checkinData.longest_streak;
-            document.getElementById('total-checkins').textContent = checkinData.total_checkins;
+            // 更新个人数据
+            document.getElementById('current-streak').textContent = checkinData.user.current_streak;
+            document.getElementById('longest-streak').textContent = checkinData.user.longest_streak;
+            document.getElementById('total-checkins').textContent = checkinData.user.total_checkins;
+            
+            // 更新对方数据
+            updatePartnerDisplay(checkinData.partner);
+        }
+        
+        // 更新对方显示
+        function updatePartnerDisplay(partnerData) {
+            // 更新对方今日状态
+            const statusIcon = document.getElementById('partner-status-icon');
+            const statusValue = document.getElementById('partner-today-status');
+            
+            if (partnerData.checked_in_today) {
+                statusIcon.textContent = '✅';
+                statusIcon.className = 'status-icon status-ok';
+                statusValue.textContent = '已签到';
+                statusValue.className = 'status-value status-ok';
+            } else {
+                statusIcon.textContent = '⏳';
+                statusIcon.className = 'status-icon status-waiting';
+                statusValue.textContent = '等待中';
+                statusValue.className = 'status-value status-waiting';
+            }
+            
+            // 更新对方其他数据
+            document.getElementById('partner-current-streak').textContent = partnerData.current_streak;
+            document.getElementById('partner-total-checkins').textContent = partnerData.total_checkins;
+            
+            // 更新对方名字（根据用户ID）
+            const partnerName = document.getElementById('partner-name');
+            if (partnerData.id === 1) {
+                partnerName.textContent = 'taotao的签到';
+            } else {
+                partnerName.textContent = 'fangfang的签到';
+            }
         }
         
         // 更新签到按钮状态
@@ -1237,13 +1349,22 @@
                 btn.style.opacity = '0.7';
                 btn.style.cursor = 'not-allowed';
                 text.textContent = '今日已签到';
-                hint.textContent = '✅ 今日已签到，明天再来吧！';
+                
+                // 检查对方是否也签到了
+                if (checkinData && checkinData.partner.checked_in_today) {
+                    hint.textContent = '💞 今日双人签到完成！';
+                    hint.style.color = '#51cf66';
+                } else {
+                    hint.textContent = '✅ 今日已签到，等待对方...';
+                    hint.style.color = '#ffd43b';
+                }
             } else {
                 btn.disabled = false;
                 btn.style.opacity = '1';
                 btn.style.cursor = 'pointer';
                 text.textContent = '点击签到';
                 hint.textContent = '💡 每日签到，记录爱的每一天';
+                hint.style.color = '';
             }
         }
         
@@ -1264,10 +1385,15 @@
                     return;
                 }
                 
-                // 更新签到数据
-                checkinData = data;
-                updateCheckinDisplay();
-                updateCheckinButton(true);
+                // 重新加载签到数据
+                const statsResponse = await fetch('/api/checkin-stats');
+                const statsData = await statsResponse.json();
+                
+                if (!statsData.error) {
+                    checkinData = statsData;
+                    updateCheckinDisplay();
+                    updateCheckinButton(true);
+                }
                 
                 // 显示成功消息
                 const hint = document.getElementById('checkin-hint');
@@ -1276,8 +1402,13 @@
                 
                 // 3秒后恢复提示
                 setTimeout(() => {
-                    hint.textContent = '✅ 今日已签到，明天再来吧！';
-                    hint.style.color = '';
+                    if (checkinData && checkinData.partner.checked_in_today) {
+                        hint.textContent = '💞 今日双人签到完成！';
+                        hint.style.color = '#51cf66';
+                    } else {
+                        hint.textContent = '✅ 今日已签到，等待对方...';
+                        hint.style.color = '#ffd43b';
+                    }
                 }, 3000);
                 
             } catch (error) {
@@ -1291,6 +1422,35 @@
         
         // 页面加载时初始化签到功能
         window.addEventListener('DOMContentLoaded', initCheckin);
+        
+        // 定期刷新对方状态（每30秒）
+        setInterval(async () => {
+            if (checkinData) {
+                try {
+                    const response = await fetch('/api/checkin-stats');
+                    const data = await response.json();
+                    
+                    if (!data.error) {
+                        // 只更新对方状态，不更新个人状态（避免干扰）
+                        updatePartnerDisplay(data.partner);
+                        
+                        // 如果对方签到了，更新提示
+                        if (data.partner.checked_in_today && checkinData.partner.checked_in_today !== data.partner.checked_in_today) {
+                            const hint = document.getElementById('checkin-hint');
+                            if (checkinData.user.recent_checkins && 
+                                checkinData.user.recent_checkins.some(date => date === new Date().toISOString().split('T')[0])) {
+                                hint.textContent = '💞 对方也签到了！今日双人签到完成！';
+                                hint.style.color = '#51cf66';
+                            }
+                        }
+                        
+                        checkinData.partner = data.partner;
+                    }
+                } catch (error) {
+                    console.error('Error refreshing partner status:', error);
+                }
+            }
+        }, 30000); // 30秒刷新一次
     </script>
 </body>
 </html>

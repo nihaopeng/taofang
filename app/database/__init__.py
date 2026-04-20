@@ -705,6 +705,112 @@ def get_checkin_stats(user_id: int):
         "both_checkin_dates": both_checkin_dates[-30:] if len(both_checkin_dates) > 30 else both_checkin_dates
     }
 
+def get_partner_checkin_status(current_user_id: int):
+    """Get partner's check-in status and combined statistics"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    # Determine partner ID (assuming user IDs are 1 and 2)
+    partner_id = 2 if current_user_id == 1 else 1
+    
+    # Get partner's today check-in status
+    cursor.execute("""
+    SELECT COUNT(*) FROM daily_checkin 
+    WHERE user_id = ? AND DATE(checkin_time) = DATE('now')
+    """, (partner_id,))
+    
+    partner_checked_in_today = cursor.fetchone()[0] > 0
+    
+    # Get partner's streak
+    partner_current_streak = get_user_streak(partner_id)
+    partner_longest_streak = get_longest_streak(partner_id)
+    
+    # Get partner's total checkins
+    cursor.execute("SELECT COUNT(*) FROM daily_checkin WHERE user_id = ?", (partner_id,))
+    partner_total_checkins = cursor.fetchone()[0]
+    
+    # Get combined statistics
+    # Total days both checked in
+    cursor.execute("""
+    SELECT COUNT(DISTINCT DATE(checkin_time)) 
+    FROM daily_checkin 
+    WHERE user_id IN (1, 2)
+    GROUP BY DATE(checkin_time)
+    HAVING COUNT(DISTINCT user_id) = 2
+    """)
+    
+    both_checkin_days_result = cursor.fetchone()
+    total_both_checkin_days = both_checkin_days_result[0] if both_checkin_days_result else 0
+    
+    # Current streak of both checking in
+    cursor.execute("""
+    SELECT DATE(checkin_time) as checkin_date
+    FROM daily_checkin
+    WHERE user_id IN (1, 2)
+    GROUP BY DATE(checkin_time)
+    HAVING COUNT(DISTINCT user_id) = 2
+    ORDER BY checkin_date DESC
+    """)
+    
+    both_checkin_dates = [datetime.strptime(row[0], "%Y-%m-%d").date() for row in cursor.fetchall()]
+    
+    # Calculate current both-checkin streak
+    both_current_streak = 0
+    if both_checkin_dates:
+        today = datetime.now().date()
+        
+        # Check if both checked in today
+        if both_checkin_dates[0] == today:
+            both_current_streak = 1
+            expected_date = today
+            for checkin_date in both_checkin_dates[1:]:
+                expected_date = expected_date - timedelta(days=1)
+                if checkin_date == expected_date:
+                    both_current_streak += 1
+                else:
+                    break
+        else:
+            # Check yesterday
+            yesterday = today - timedelta(days=1)
+            if both_checkin_dates[0] == yesterday:
+                both_current_streak = 1
+                expected_date = yesterday
+                for checkin_date in both_checkin_dates[1:]:
+                    expected_date = expected_date - timedelta(days=1)
+                    if checkin_date == expected_date:
+                        both_current_streak += 1
+                    else:
+                        break
+    
+    # Longest both-checkin streak
+    both_longest_streak = 1
+    if len(both_checkin_dates) >= 2:
+        current_streak = 1
+        for i in range(1, len(both_checkin_dates)):
+            days_diff = (both_checkin_dates[i] - both_checkin_dates[i-1]).days
+            if days_diff == -1:  # Dates are in descending order
+                current_streak += 1
+                both_longest_streak = max(both_longest_streak, current_streak)
+            else:
+                current_streak = 1
+    
+    conn.close()
+    
+    return {
+        "partner": {
+            "id": partner_id,
+            "checked_in_today": partner_checked_in_today,
+            "current_streak": partner_current_streak,
+            "longest_streak": partner_longest_streak,
+            "total_checkins": partner_total_checkins
+        },
+        "combined": {
+            "total_both_checkin_days": total_both_checkin_days,
+            "current_both_streak": both_current_streak,
+            "longest_both_streak": both_longest_streak
+        }
+    }
+
 def get_checkin_calendar(user_id: int, year: int = None, month: int = None):
     """Get check-in data for calendar display"""
     conn = get_connection()
