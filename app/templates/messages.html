@@ -1,0 +1,975 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>心动坐标 - 留言系统</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <style>
+        :root {
+            --primary-color: #667eea;
+            --secondary-color: #764ba2;
+            --accent-color: #ff6b6b;
+            --success-color: #51cf66;
+            --text-color: #333;
+            --light-bg: rgba(255, 255, 255, 0.9);
+            --glass-bg: rgba(255, 255, 255, 0.1);
+            --shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+        }
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Arial', sans-serif;
+            background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+            color: var(--text-color);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        
+        /* Header */
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 20px;
+            background: var(--light-bg);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            margin-bottom: 20px;
+            box-shadow: var(--shadow);
+        }
+        
+        .logo {
+            font-size: 1.8em;
+            color: var(--primary-color);
+            font-weight: bold;
+        }
+        
+        .user-info {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+        
+        .user-name {
+            font-weight: bold;
+            color: var(--secondary-color);
+        }
+        
+        .nav-links {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        
+        .nav-btn {
+            padding: 8px 16px;
+            background: var(--glass-bg);
+            color: var(--text-color);
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            text-decoration: none;
+            transition: all 0.3s ease;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        
+        .nav-btn:hover {
+            background: var(--primary-color);
+            color: white;
+            transform: translateY(-2px);
+        }
+        
+        .logout-btn {
+            padding: 8px 16px;
+            background: var(--accent-color);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            transition: transform 0.3s ease;
+            text-decoration: none;
+        }
+        
+        .logout-btn:hover {
+            transform: translateY(-2px);
+        }
+        
+        /* Back Button */
+        .back-section {
+            margin-bottom: 20px;
+        }
+        
+        .back-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            padding: 12px 24px;
+            background: var(--light-bg);
+            color: var(--text-color);
+            border: none;
+            border-radius: 15px;
+            cursor: pointer;
+            text-decoration: none;
+            font-weight: 500;
+            transition: all 0.3s ease;
+        }
+        
+        .back-btn:hover {
+            background: var(--primary-color);
+            color: white;
+            transform: translateY(-2px);
+        }
+        
+        /* Stats Overview */
+        .stats-overview {
+            background: var(--light-bg);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            padding: 25px;
+            margin-bottom: 25px;
+            box-shadow: var(--shadow);
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 15px;
+        }
+        
+        .stat-card {
+            background: var(--glass-bg);
+            border-radius: 15px;
+            padding: 20px;
+            text-align: center;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            transition: transform 0.3s ease;
+        }
+        
+        .stat-card:hover {
+            transform: translateY(-3px);
+        }
+        
+        .stat-value {
+            font-size: 2em;
+            font-weight: bold;
+            color: var(--accent-color);
+            margin-bottom: 8px;
+        }
+        
+        .stat-label {
+            font-size: 0.9em;
+            color: #666;
+        }
+        
+        /* Message Form */
+        .message-form-container {
+            background: var(--light-bg);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            padding: 30px;
+            margin-bottom: 25px;
+            box-shadow: var(--shadow);
+        }
+        
+        .form-title {
+            font-size: 1.5em;
+            color: var(--secondary-color);
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .message-form {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        
+        .form-label {
+            font-weight: bold;
+            color: var(--text-color);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .message-input {
+            width: 100%;
+            min-height: 120px;
+            padding: 15px;
+            border: 2px solid rgba(255, 255, 255, 0.2);
+            border-radius: 15px;
+            background: var(--light-bg);
+            color: var(--text-color);
+            font-family: inherit;
+            font-size: 1em;
+            resize: vertical;
+            transition: border-color 0.3s ease;
+        }
+        
+        .message-input:focus {
+            outline: none;
+            border-color: var(--primary-color);
+        }
+        
+        .privacy-options {
+            display: flex;
+            gap: 20px;
+            margin-top: 10px;
+        }
+        
+        .privacy-option {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            cursor: pointer;
+        }
+        
+        .privacy-radio {
+            width: 18px;
+            height: 18px;
+            accent-color: var(--primary-color);
+        }
+        
+        .privacy-label {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            font-size: 0.95em;
+        }
+        
+        .privacy-icon {
+            font-size: 1.1em;
+        }
+        
+        .form-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 15px;
+            margin-top: 10px;
+        }
+        
+        .submit-btn {
+            padding: 12px 30px;
+            background: var(--primary-color);
+            color: white;
+            border: none;
+            border-radius: 15px;
+            cursor: pointer;
+            font-size: 1em;
+            font-weight: bold;
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .submit-btn:hover {
+            background: var(--secondary-color);
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+        }
+        
+        .clear-btn {
+            padding: 12px 25px;
+            background: var(--glass-bg);
+            color: var(--text-color);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 15px;
+            cursor: pointer;
+            font-size: 1em;
+            transition: all 0.3s ease;
+        }
+        
+        .clear-btn:hover {
+            background: rgba(255, 255, 255, 0.2);
+        }
+        
+        /* Messages List */
+        .messages-container {
+            background: var(--light-bg);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: var(--shadow);
+        }
+        
+        .messages-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 25px;
+        }
+        
+        .messages-title {
+            font-size: 1.5em;
+            color: var(--secondary-color);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .refresh-btn {
+            padding: 8px 16px;
+            background: var(--glass-bg);
+            color: var(--text-color);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 10px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+        
+        .refresh-btn:hover {
+            background: rgba(255, 255, 255, 0.2);
+        }
+        
+        .messages-list {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        
+        .message-card {
+            background: var(--glass-bg);
+            border-radius: 15px;
+            padding: 25px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            transition: all 0.3s ease;
+            position: relative;
+            animation: fadeIn 0.5s ease;
+        }
+        
+        .message-card:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 10px 20px rgba(0, 0, 0, 0.1);
+        }
+        
+        .message-card.private {
+            border-left: 5px solid var(--accent-color);
+            background: linear-gradient(135deg, rgba(255, 107, 107, 0.05), rgba(255, 255, 255, 0.1));
+        }
+        
+        .message-card.public {
+            border-left: 5px solid var(--primary-color);
+        }
+        
+        .message-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        .message-user {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .user-avatar {
+            width: 40px;
+            height: 40px;
+            background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: bold;
+            font-size: 1.2em;
+        }
+        
+        .user-info-small {
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .user-name-small {
+            font-weight: bold;
+            color: var(--secondary-color);
+        }
+        
+        .message-meta {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            font-size: 0.9em;
+            color: #666;
+        }
+        
+        .message-time {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+        
+        .message-privacy {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-size: 0.85em;
+            font-weight: bold;
+        }
+        
+        .privacy-public {
+            background: rgba(102, 126, 234, 0.1);
+            color: var(--primary-color);
+        }
+        
+        .privacy-private {
+            background: rgba(255, 107, 107, 0.1);
+            color: var(--accent-color);
+        }
+        
+        .message-content {
+            line-height: 1.6;
+            color: var(--text-color);
+            font-size: 1.05em;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+        
+        .message-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        .action-btn {
+            padding: 6px 12px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.9em;
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+        
+        .delete-btn {
+            background: rgba(255, 107, 107, 0.1);
+            color: var(--accent-color);
+            border: 1px solid rgba(255, 107, 107, 0.2);
+        }
+        
+        .delete-btn:hover {
+            background: var(--accent-color);
+            color: white;
+        }
+        
+        .edit-btn {
+            background: rgba(102, 126, 234, 0.1);
+            color: var(--primary-color);
+            border: 1px solid rgba(102, 126, 234, 0.2);
+        }
+        
+        .edit-btn:hover {
+            background: var(--primary-color);
+            color: white;
+        }
+        
+        /* Empty State */
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: #666;
+        }
+        
+        .empty-icon {
+            font-size: 4em;
+            margin-bottom: 20px;
+            opacity: 0.5;
+        }
+        
+        .empty-text {
+            font-size: 1.2em;
+            margin-bottom: 10px;
+            color: var(--text-color);
+        }
+        
+        .empty-subtext {
+            color: #888;
+            margin-bottom: 30px;
+        }
+        
+        /* Animations */
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateX(-20px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+        
+        /* Responsive */
+        @media (max-width: 768px) {
+            .header {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 15px;
+            }
+            
+            .stats-overview {
+                grid-template-columns: 1fr;
+            }
+            
+            .message-header {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 10px;
+            }
+            
+            .message-meta {
+                flex-wrap: wrap;
+            }
+            
+            .form-actions {
+                flex-direction: column;
+            }
+            
+            .submit-btn, .clear-btn {
+                width: 100%;
+                justify-content: center;
+            }
+        }
+        
+        /* Loading State */
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #666;
+            font-style: italic;
+        }
+        
+        /* Success/Error Messages */
+        .alert {
+            padding: 15px 20px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            animation: slideIn 0.5s ease;
+        }
+        
+        .alert-success {
+            background: rgba(81, 207, 102, 0.1);
+            border: 1px solid rgba(81, 207, 102, 0.2);
+            color: #2e7d32;
+        }
+        
+        .alert-error {
+            background: rgba(255, 107, 107, 0.1);
+            border: 1px solid rgba(255, 107, 107, 0.2);
+            color: #c62828;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="logo">💌 留言系统</div>
+            <div class="user-info">
+                <span class="user-name">{{ user_name }}</span>
+                <div class="nav-links">
+                    <a href="/" class="nav-btn">🏠 首页</a>
+                    <a href="/games" class="nav-btn">🎮 游戏大厅</a>
+                    <a href="/achievements" class="nav-btn">🏆 成就</a>
+                    <a href="/logout" class="logout-btn">退出</a>
+                </div>
+            </div>
+        </header>
+        
+        <!-- Back Button -->
+        <div class="back-section">
+            <a href="/" class="back-btn">
+                ← 返回首页
+            </a>
+        </div>
+        
+        <!-- Stats Overview -->
+        <div class="stats-overview">
+            <div class="stat-card">
+                <div class="stat-value">{{ stats.total_messages }}</div>
+                <div class="stat-label">我的留言</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">{{ stats.public_messages }}</div>
+                <div class="stat-label">公开留言</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">{{ stats.private_messages }}</div>
+                <div class="stat-label">私密留言</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">{{ stats.total_all_messages }}</div>
+                <div class="stat-label">总留言数</div>
+            </div>
+        </div>
+        
+        <!-- Message Form -->
+        <div class="message-form-container">
+            <h2 class="form-title">✍️ 写下你的留言</h2>
+            <form class="message-form" id="message-form">
+                <div class="form-group">
+                    <label class="form-label">
+                        <span>📝 留言内容</span>
+                    </label>
+                    <textarea 
+                        class="message-input" 
+                        id="message-content" 
+                        placeholder="写下你想说的话...（支持换行和表情）" 
+                        required
+                        maxlength="1000"></textarea>
+                    <div style="text-align: right; font-size: 0.9em; color: #666; margin-top: 5px;">
+                        <span id="char-count">0</span>/1000 字符
+                    </div>
+                </div>
+                
+                <div class="form-group">
+                    <label class="form-label">🔒 隐私设置</label>
+                    <div class="privacy-options">
+                        <label class="privacy-option">
+                            <input type="radio" class="privacy-radio" name="privacy" value="public" checked>
+                            <span class="privacy-label">
+                                <span class="privacy-icon">🌍</span>
+                                公开留言（双方可见）
+                            </span>
+                        </label>
+                        <label class="privacy-option">
+                            <input type="radio" class="privacy-radio" name="privacy" value="private">
+                            <span class="privacy-label">
+                                <span class="privacy-icon">🔒</span>
+                                私密留言（仅自己可见）
+                            </span>
+                        </label>
+                    </div>
+                </div>
+                
+                <div class="form-actions">
+                    <button type="button" class="clear-btn" id="clear-btn">清空</button>
+                    <button type="submit" class="submit-btn">
+                        <span>发送留言</span>
+                        <span>💌</span>
+                    </button>
+                </div>
+            </form>
+        </div>
+        
+        <!-- Messages List -->
+        <div class="messages-container">
+            <div class="messages-header">
+                <h2 class="messages-title">📨 留言记录</h2>
+                <button class="refresh-btn" id="refresh-btn">
+                    <span>刷新</span>
+                    <span>🔄</span>
+                </button>
+            </div>
+            
+            <div class="messages-list" id="messages-list">
+                {% if messages %}
+                    {% for message in messages %}
+                    <div class="message-card {% if message.is_private %}private{% else %}public{% endif %}" data-id="{{ message.id }}">
+                        <div class="message-header">
+                            <div class="message-user">
+                                <div class="user-avatar">{{ message.user_name[0] }}</div>
+                                <div class="user-info-small">
+                                    <div class="user-name-small">{{ message.user_name }}</div>
+                                    <div class="message-time">
+                                        <span>🕒</span>
+                                        <span>{{ message.created_at }}</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="message-meta">
+                                <div class="message-privacy {% if message.is_private %}privacy-private{% else %}privacy-public{% endif %}">
+                                    {% if message.is_private %}
+                                    <span>🔒</span>
+                                    <span>私密</span>
+                                    {% else %}
+                                    <span>🌍</span>
+                                    <span>公开</span>
+                                    {% endif %}
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="message-content">
+                            {{ message.content }}
+                        </div>
+                        
+                        {% if message.can_delete %}
+                        <div class="message-actions">
+                            <button class="action-btn delete-btn" data-id="{{ message.id }}">
+                                <span>删除</span>
+                                <span>🗑️</span>
+                            </button>
+                        </div>
+                        {% endif %}
+                    </div>
+                    {% endfor %}
+                {% else %}
+                    <div class="empty-state">
+                        <div class="empty-icon">💭</div>
+                        <div class="empty-text">还没有留言</div>
+                        <div class="empty-subtext">写下第一条留言，开始你们的对话吧！</div>
+                    </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        // 字符计数
+        const messageInput = document.getElementById('message-content');
+        const charCount = document.getElementById('char-count');
+        
+        messageInput.addEventListener('input', () => {
+            charCount.textContent = messageInput.value.length;
+        });
+        
+        // 清空按钮
+        document.getElementById('clear-btn').addEventListener('click', () => {
+            messageInput.value = '';
+            charCount.textContent = '0';
+            messageInput.focus();
+        });
+        
+        // 提交留言
+        document.getElementById('message-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const content = messageInput.value.trim();
+            const isPrivate = document.querySelector('input[name="privacy"]:checked').value === 'private';
+            
+            if (!content) {
+                showAlert('请输入留言内容', 'error');
+                return;
+            }
+            
+            if (content.length > 1000) {
+                showAlert('留言内容不能超过1000字符', 'error');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/messages', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        content: content,
+                        is_private: isPrivate
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    showAlert('留言发送成功！', 'success');
+                    messageInput.value = '';
+                    charCount.textContent = '0';
+                    loadMessages(); // 重新加载留言列表
+                } else {
+                    showAlert(data.error || '发送失败', 'error');
+                }
+            } catch (error) {
+                console.error('Error sending message:', error);
+                showAlert('网络错误，请重试', 'error');
+            }
+        });
+        
+        // 删除留言
+        document.addEventListener('click', async (e) => {
+            if (e.target.closest('.delete-btn')) {
+                const button = e.target.closest('.delete-btn');
+                const messageId = button.dataset.id;
+                
+                if (!confirm('确定要删除这条留言吗？')) {
+                    return;
+                }
+                
+                try {
+                    const response = await fetch(`/api/messages/${messageId}`, {
+                        method: 'DELETE'
+                    });
+                    
+                    const data = await response.json();
+                    
+                    if (data.success) {
+                        showAlert('留言已删除', 'success');
+                        // 移除对应的留言卡片
+                        const messageCard = document.querySelector(`.message-card[data-id="${messageId}"]`);
+                        if (messageCard) {
+                            messageCard.style.animation = 'fadeOut 0.3s ease';
+                            setTimeout(() => messageCard.remove(), 300);
+                        }
+                    } else {
+                        showAlert(data.error || '删除失败', 'error');
+                    }
+                } catch (error) {
+                    console.error('Error deleting message:', error);
+                    showAlert('网络错误，请重试', 'error');
+                }
+            }
+        });
+        
+        // 刷新留言列表
+        document.getElementById('refresh-btn').addEventListener('click', loadMessages);
+        
+        // 加载留言列表
+        async function loadMessages() {
+            try {
+                const response = await fetch('/api/messages');
+                const data = await response.json();
+                
+                if (data.success) {
+                    renderMessages(data.messages);
+                }
+            } catch (error) {
+                console.error('Error loading messages:', error);
+            }
+        }
+        
+        // 渲染留言列表
+        function renderMessages(messages) {
+            const messagesList = document.getElementById('messages-list');
+            
+            if (messages.length === 0) {
+                messagesList.innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-icon">💭</div>
+                        <div class="empty-text">还没有留言</div>
+                        <div class="empty-subtext">写下第一条留言，开始你们的对话吧！</div>
+                    </div>
+                `;
+                return;
+            }
+            
+            let html = '';
+            messages.forEach(message => {
+                const privacyClass = message.is_private ? 'private' : 'public';
+                const privacyIcon = message.is_private ? '🔒' : '🌍';
+                const privacyText = message.is_private ? '私密' : '公开';
+                
+                html += `
+                    <div class="message-card ${privacyClass}" data-id="${message.id}">
+                        <div class="message-header">
+                            <div class="message-user">
+                                <div class="user-avatar">${message.user_name[0]}</div>
+                                <div class="user-info-small">
+                                    <div class="user-name-small">${message.user_name}</div>
+                                    <div class="message-time">
+                                        <span>🕒</span>
+                                        <span>${message.created_at}</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="message-meta">
+                                <div class="message-privacy ${message.is_private ? 'privacy-private' : 'privacy-public'}">
+                                    <span>${privacyIcon}</span>
+                                    <span>${privacyText}</span>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="message-content">
+                            ${escapeHtml(message.content)}
+                        </div>
+                        
+                        ${message.can_delete ? `
+                        <div class="message-actions">
+                            <button class="action-btn delete-btn" data-id="${message.id}">
+                                <span>删除</span>
+                                <span>🗑️</span>
+                            </button>
+                        </div>
+                        ` : ''}
+                    </div>
+                `;
+            });
+            
+            messagesList.innerHTML = html;
+        }
+        
+        // 显示提示消息
+        function showAlert(message, type) {
+            // 移除现有的提示
+            const existingAlert = document.querySelector('.alert');
+            if (existingAlert) {
+                existingAlert.remove();
+            }
+            
+            // 创建新的提示
+            const alert = document.createElement('div');
+            alert.className = `alert alert-${type}`;
+            alert.textContent = message;
+            alert.style.cssText = `
+                position: fixed;
+                top: 20px;
+                right: 20px;
+                z-index: 1000;
+                max-width: 300px;
+            `;
+            
+            document.body.appendChild(alert);
+            
+            // 3秒后自动移除
+            setTimeout(() => {
+                alert.style.animation = 'slideIn 0.5s ease reverse';
+                setTimeout(() => alert.remove(), 500);
+            }, 3000);
+        }
+        
+        // HTML转义
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+        
+        // 添加淡出动画
+        const style = document.createElement('style');
+        style.textContent = `
+            @keyframes fadeOut {
+                from { opacity: 1; transform: translateY(0); }
+                to { opacity: 0; transform: translateY(20px); }
+            }
+        `;
+        document.head.appendChild(style);
+        
+        // 页面加载时初始化字符计数
+        charCount.textContent = messageInput.value.length;
+        
+        // 自动聚焦到输入框
+        messageInput.focus();
+    </script>
+</body>
+</html>

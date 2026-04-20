@@ -1,0 +1,706 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>心动坐标 - 成就系统</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <style>
+        :root {
+            --primary-color: #667eea;
+            --secondary-color: #764ba2;
+            --accent-color: #ff6b6b;
+            --success-color: #51cf66;
+            --text-color: #333;
+            --light-bg: rgba(255, 255, 255, 0.9);
+            --glass-bg: rgba(255, 255, 255, 0.1);
+            --shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+        }
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Arial', sans-serif;
+            background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+            color: var(--text-color);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        
+        /* Header */
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 20px;
+            background: var(--light-bg);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            margin-bottom: 20px;
+            box-shadow: var(--shadow);
+        }
+        
+        .logo {
+            font-size: 1.8em;
+            color: var(--primary-color);
+            font-weight: bold;
+        }
+        
+        .user-info {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+        
+        .user-name {
+            font-weight: bold;
+            color: var(--secondary-color);
+        }
+        
+        .nav-links {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        
+        .nav-btn {
+            padding: 8px 16px;
+            background: var(--glass-bg);
+            color: var(--text-color);
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            text-decoration: none;
+            transition: all 0.3s ease;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        
+        .nav-btn:hover {
+            background: var(--primary-color);
+            color: white;
+            transform: translateY(-2px);
+        }
+        
+        .logout-btn {
+            padding: 8px 16px;
+            background: var(--accent-color);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            transition: transform 0.3s ease;
+            text-decoration: none;
+        }
+        
+        .logout-btn:hover {
+            transform: translateY(-2px);
+        }
+        
+        /* Stats Overview */
+        .stats-overview {
+            background: var(--light-bg);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            padding: 30px;
+            margin-bottom: 30px;
+            box-shadow: var(--shadow);
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+        }
+        
+        .stat-card {
+            background: var(--glass-bg);
+            border-radius: 15px;
+            padding: 25px;
+            text-align: center;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            transition: transform 0.3s ease;
+        }
+        
+        .stat-card:hover {
+            transform: translateY(-5px);
+        }
+        
+        .stat-value {
+            font-size: 2.5em;
+            font-weight: bold;
+            color: var(--accent-color);
+            margin-bottom: 10px;
+        }
+        
+        .stat-label {
+            font-size: 1em;
+            color: #666;
+            margin-bottom: 15px;
+        }
+        
+        .stat-icon {
+            font-size: 2em;
+            opacity: 0.8;
+        }
+        
+        .progress-bar {
+            height: 10px;
+            background: rgba(0, 0, 0, 0.1);
+            border-radius: 5px;
+            margin-top: 15px;
+            overflow: hidden;
+        }
+        
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, var(--primary-color), var(--secondary-color));
+            border-radius: 5px;
+            transition: width 1s ease;
+        }
+        
+        /* Achievement Categories */
+        .achievement-categories {
+            margin-bottom: 30px;
+        }
+        
+        .category-tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+        
+        .category-tab {
+            padding: 12px 24px;
+            background: var(--glass-bg);
+            border: none;
+            border-radius: 25px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-weight: 500;
+            color: var(--text-color);
+        }
+        
+        .category-tab:hover {
+            background: rgba(255, 255, 255, 0.2);
+        }
+        
+        .category-tab.active {
+            background: var(--primary-color);
+            color: white;
+        }
+        
+        .category-content {
+            display: none;
+        }
+        
+        .category-content.active {
+            display: block;
+            animation: fadeIn 0.5s ease;
+        }
+        
+        /* Achievements Grid */
+        .achievements-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 20px;
+        }
+        
+        .achievement-card {
+            background: var(--light-bg);
+            border-radius: 15px;
+            padding: 25px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            transition: all 0.3s ease;
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .achievement-card.unlocked {
+            border-left: 5px solid var(--success-color);
+        }
+        
+        .achievement-card.locked {
+            opacity: 0.7;
+            filter: grayscale(0.5);
+        }
+        
+        .achievement-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 15px 30px rgba(0, 0, 0, 0.15);
+        }
+        
+        .achievement-header {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            margin-bottom: 15px;
+        }
+        
+        .achievement-icon {
+            font-size: 2.5em;
+            width: 60px;
+            height: 60px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: var(--glass-bg);
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+        
+        .achievement-info {
+            flex-grow: 1;
+        }
+        
+        .achievement-name {
+            font-weight: bold;
+            font-size: 1.2em;
+            color: var(--secondary-color);
+            margin-bottom: 5px;
+        }
+        
+        .achievement-points {
+            display: inline-block;
+            padding: 3px 10px;
+            background: linear-gradient(135deg, #ffd166, #ff9e6d);
+            color: #333;
+            border-radius: 12px;
+            font-size: 0.9em;
+            font-weight: bold;
+        }
+        
+        .achievement-description {
+            color: #666;
+            line-height: 1.5;
+            margin-bottom: 15px;
+            font-size: 0.95em;
+        }
+        
+        .achievement-footer {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-top: 15px;
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        .achievement-date {
+            font-size: 0.9em;
+            color: #888;
+        }
+        
+        .achievement-status {
+            font-size: 0.9em;
+            padding: 5px 12px;
+            border-radius: 15px;
+            font-weight: bold;
+        }
+        
+        .status-unlocked {
+            background: var(--success-color);
+            color: white;
+        }
+        
+        .status-locked {
+            background: #ccc;
+            color: #666;
+        }
+        
+        .lock-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.7);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+        
+        .achievement-card.locked:hover .lock-overlay {
+            opacity: 1;
+        }
+        
+        .lock-icon {
+            font-size: 2em;
+            color: white;
+        }
+        
+        /* Category Headers */
+        .category-header {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 2px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        .category-icon {
+            font-size: 2em;
+            width: 60px;
+            height: 60px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: var(--glass-bg);
+            border-radius: 50%;
+        }
+        
+        .category-title {
+            font-size: 1.5em;
+            color: var(--secondary-color);
+            font-weight: bold;
+        }
+        
+        .category-count {
+            margin-left: auto;
+            font-size: 1.1em;
+            color: var(--text-color);
+        }
+        
+        /* Back Button */
+        .back-section {
+            margin-bottom: 20px;
+        }
+        
+        .back-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            padding: 12px 24px;
+            background: var(--light-bg);
+            color: var(--text-color);
+            border: none;
+            border-radius: 15px;
+            cursor: pointer;
+            text-decoration: none;
+            font-weight: 500;
+            transition: all 0.3s ease;
+        }
+        
+        .back-btn:hover {
+            background: var(--primary-color);
+            color: white;
+            transform: translateY(-2px);
+        }
+        
+        /* Animations */
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+        }
+        
+        .pulse {
+            animation: pulse 2s infinite;
+        }
+        
+        /* Responsive */
+        @media (max-width: 768px) {
+            .header {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 15px;
+            }
+            
+            .achievements-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .stats-overview {
+                grid-template-columns: 1fr;
+            }
+            
+            .category-tabs {
+                justify-content: center;
+            }
+        }
+        
+        /* Empty State */
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: #666;
+        }
+        
+        .empty-icon {
+            font-size: 4em;
+            margin-bottom: 20px;
+            opacity: 0.5;
+        }
+        
+        .empty-text {
+            font-size: 1.2em;
+            margin-bottom: 10px;
+        }
+        
+        .empty-subtext {
+            color: #888;
+            margin-bottom: 30px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="logo">🏆 成就系统</div>
+            <div class="user-info">
+                <span class="user-name">{{ user_name }}</span>
+                <div class="nav-links">
+                    <a href="/" class="nav-btn">🏠 首页</a>
+                    <a href="/games" class="nav-btn">🎮 游戏大厅</a>
+                    <a href="/logout" class="logout-btn">退出</a>
+                </div>
+            </div>
+        </header>
+        
+        <!-- Back Button -->
+        <div class="back-section">
+            <a href="/" class="back-btn">
+                ← 返回首页
+            </a>
+        </div>
+        
+        <!-- Stats Overview -->
+        <div class="stats-overview">
+            <div class="stat-card">
+                <div class="stat-value">{{ stats.total_unlocked }}</div>
+                <div class="stat-label">已解锁成就</div>
+                <div class="stat-icon">🏆</div>
+                <div class="progress-bar">
+                    <div class="progress-fill" style="width: {{ stats.completion_rate }}%"></div>
+                </div>
+                <div class="stat-label">{{ stats.completion_rate }}% 完成度</div>
+            </div>
+            
+            <div class="stat-card">
+                <div class="stat-value">{{ stats.total_points }}</div>
+                <div class="stat-label">成就点数</div>
+                <div class="stat-icon">⭐</div>
+            </div>
+            
+            <div class="stat-card">
+                <div class="stat-value">{{ stats.total_achievements }}</div>
+                <div class="stat-label">总成就数</div>
+                <div class="stat-icon">📊</div>
+            </div>
+            
+            <div class="stat-card">
+                <div class="stat-value">{{ category_count }}</div>
+                <div class="stat-label">成就类别</div>
+                <div class="stat-icon">🏷️</div>
+            </div>
+        </div>
+        
+        <!-- Category Tabs -->
+        <div class="achievement-categories">
+            <div class="category-tabs" id="category-tabs">
+                <button class="category-tab active" data-category="all">全部成就</button>
+                {% for category in categories %}
+                <button class="category-tab" data-category="{{ category }}">
+                    {{ category_names.get(category, category) }}
+                    ({{ achievements_by_category[category]|length }})
+                </button>
+                {% endfor %}
+            </div>
+            
+            <!-- All Achievements -->
+            <div class="category-content active" id="category-all">
+                {% if total_achievements == 0 %}
+                <div class="empty-state">
+                    <div class="empty-icon">🏆</div>
+                    <div class="empty-text">还没有成就</div>
+                    <div class="empty-subtext">开始互动，解锁你的第一个成就吧！</div>
+                </div>
+                {% else %}
+                    {% for category, achievements in achievements_by_category.items() %}
+                    <div class="category-section">
+                        <div class="category-header">
+                            <div class="category-icon">{{ category_icons.get(category, '🏆') }}</div>
+                            <div class="category-title">{{ category_names.get(category, category) }}</div>
+                            <div class="category-count">
+                                {{ achievements|selectattr('unlocked')|list|length }}/{{ achievements|length }}
+                            </div>
+                        </div>
+                        
+                        <div class="achievements-grid">
+                            {% for achievement in achievements %}
+                            <div class="achievement-card {% if achievement.unlocked %}unlocked{% else %}locked{% endif %}">
+                                <div class="achievement-header">
+                                    <div class="achievement-icon">{{ achievement.icon }}</div>
+                                    <div class="achievement-info">
+                                        <div class="achievement-name">{{ achievement.name }}</div>
+                                        <div class="achievement-points">{{ achievement.points }} 点</div>
+                                    </div>
+                                </div>
+                                
+                                <div class="achievement-description">
+                                    {{ achievement.description }}
+                                </div>
+                                
+                                <div class="achievement-footer">
+                                    <div class="achievement-date">
+                                        {% if achievement.unlocked and achievement.date %}
+                                        解锁于 {{ achievement.date }}
+                                        {% elif not achievement.unlocked %}
+                                        等待解锁
+                                        {% endif %}
+                                    </div>
+                                    <div class="achievement-status {% if achievement.unlocked %}status-unlocked{% else %}status-locked{% endif %}">
+                                        {% if achievement.unlocked %}已解锁{% else %}未解锁{% endif %}
+                                    </div>
+                                </div>
+                                
+                                {% if not achievement.unlocked %}
+                                <div class="lock-overlay">
+                                    <div class="lock-icon">🔒</div>
+                                </div>
+                                {% endif %}
+                            </div>
+                            {% endfor %}
+                        </div>
+                    </div>
+                    {% endfor %}
+                {% endif %}
+            </div>
+            
+            <!-- Category-specific content -->
+            {% for category in categories %}
+            <div class="category-content" id="category-{{ category }}">
+                <div class="category-header">
+                    <div class="category-icon">{{ category_icons.get(category, '🏆') }}</div>
+                    <div class="category-title">{{ category_names.get(category, category) }}</div>
+                    <div class="category-count">
+                        {{ achievements_by_category[category]|selectattr('unlocked')|list|length }}/{{ achievements_by_category[category]|length }}
+                    </div>
+                </div>
+                
+                <div class="achievements-grid">
+                    {% for achievement in achievements_by_category[category] %}
+                    <div class="achievement-card {% if achievement.unlocked %}unlocked{% else %}locked{% endif %}">
+                        <div class="achievement-header">
+                            <div class="achievement-icon">{{ achievement.icon }}</div>
+                            <div class="achievement-info">
+                                <div class="achievement-name">{{ achievement.name }}</div>
+                                <div class="achievement-points">{{ achievement.points }} 点</div>
+                            </div>
+                        </div>
+                        
+                        <div class="achievement-description">
+                            {{ achievement.description }}
+                        </div>
+                        
+                        <div class="achievement-footer">
+                            <div class="achievement-date">
+                                {% if achievement.unlocked and achievement.date %}
+                                解锁于 {{ achievement.date }}
+                                {% elif not achievement.unlocked %}
+                                等待解锁
+                                {% endif %}
+                            </div>
+                            <div class="achievement-status {% if achievement.unlocked %}status-unlocked{% else %}status-locked{% endif %}">
+                                {% if achievement.unlocked %}已解锁{% else %}未解锁{% endif %}
+                            </div>
+                        </div>
+                        
+                        {% if not achievement.unlocked %}
+                        <div class="lock-overlay">
+                            <div class="lock-icon">🔒</div>
+                        </div>
+                        {% endif %}
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+    
+    <script>
+        // Category tab switching
+        document.querySelectorAll('.category-tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                // Remove active class from all tabs
+                document.querySelectorAll('.category-tab').forEach(t => {
+                    t.classList.remove('active');
+                });
+                
+                // Remove active class from all content
+                document.querySelectorAll('.category-content').forEach(c => {
+                    c.classList.remove('active');
+                });
+                
+                // Add active class to clicked tab
+                tab.classList.add('active');
+                
+                // Show corresponding content
+                const category = tab.dataset.category;
+                document.getElementById(`category-${category}`).classList.add('active');
+            });
+        });
+        
+        // Add hover effects to achievement cards
+        document.querySelectorAll('.achievement-card').forEach(card => {
+            card.addEventListener('mouseenter', () => {
+                if (!card.classList.contains('locked')) {
+                    card.style.transform = 'translateY(-5px)';
+                    card.style.boxShadow = '0 15px 30px rgba(0, 0, 0, 0.15)';
+                }
+            });
+            
+            card.addEventListener('mouseleave', () => {
+                card.style.transform = '';
+                card.style.boxShadow = '';
+            });
+        });
+        
+        // Add pulse animation to newly unlocked achievements
+        document.querySelectorAll('.achievement-card.unlocked').forEach((card, index) => {
+            // Add delay based on index for staggered animation
+            setTimeout(() => {
+                card.classList.add('pulse');
+                setTimeout(() => {
+                    card.classList.remove('pulse');
+                }, 2000);
+            }, index * 200);
+        });
+        
+        // Smooth scroll to category
+        function scrollToCategory(category) {
+            const element = document.getElementById(`category-${category}`);
+            if (element) {
+                element.scrollIntoView({ behavior: 'smooth' });
+            }
+        }
+        
+        // Check URL hash for category
+        window.addEventListener('load', () => {
+            const hash = window.location.hash.substring(1);
+            if (hash && hash.startsWith('category-')) {
+                const category = hash.replace('category-', '');
+                const tab = document.querySelector(`.category-tab[data-category="${category}"]`);
+                if (tab) {
+                    tab.click();
+                    setTimeout(() => scrollToCategory(category), 100);
+                }
+            }
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>心动坐标 - 回忆相册</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <style>
+        :root {
+            --primary-color: #667eea;
+            --secondary-color: #764ba2;
+            --accent-color: #ff6b6b;
+            --success-color: #51cf66;
+            --text-color: #333;
+            --light-bg: rgba(255, 255, 255, 0.9);
+            --glass-bg: rgba(255, 255, 255, 0.1);
+            --shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+        }
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Arial', sans-serif;
+            background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+            color: var(--text-color);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        
+        /* Header */
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 20px;
+            background: var(--light-bg);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            margin-bottom: 20px;
+            box-shadow: var(--shadow);
+        }
+        
+        .logo {
+            font-size: 1.8em;
+            color: var(--primary-color);
+            font-weight: bold;
+        }
+        
+        .user-info {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+        
+        .user-name {
+            font-weight: bold;
+            color: var(--secondary-color);
+        }
+        
+        .nav-links {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        
+        .nav-btn {
+            padding: 8px 16px;
+            background: var(--glass-bg);
+            color: var(--text-color);
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            text-decoration: none;
+            transition: all 0.3s ease;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        
+        .nav-btn:hover {
+            background: var(--primary-color);
+            color: white;
+            transform: translateY(-2px);
+        }
+        
+        .logout-btn {
+            padding: 8px 16px;
+            background: var(--accent-color);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            transition: transform 0.3s ease;
+            text-decoration: none;
+        }
+        
+        .logout-btn:hover {
+            transform: translateY(-2px);
+        }
+        
+        /* Back Button */
+        .back-section {
+            margin-bottom: 20px;
+        }
+        
+        .back-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            padding: 12px 24px;
+            background: var(--light-bg);
+            color: var(--text-color);
+            border: none;
+            border-radius: 15px;
+            cursor: pointer;
+            text-decoration: none;
+            font-weight: 500;
+            transition: all 0.3s ease;
+        }
+        
+        .back-btn:hover {
+            background: var(--primary-color);
+            color: white;
+            transform: translateY(-2px);
+        }
+        
+        /* Main Content */
+        .main-content {
+            background: var(--light-bg);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            padding: 40px;
+            box-shadow: var(--shadow);
+            text-align: center;
+        }
+        
+        .content-icon {
+            font-size: 4em;
+            margin-bottom: 20px;
+            opacity: 0.8;
+        }
+        
+        .content-title {
+            font-size: 2em;
+            color: var(--secondary-color);
+            margin-bottom: 15px;
+        }
+        
+        .content-subtitle {
+            font-size: 1.2em;
+            color: #666;
+            margin-bottom: 30px;
+            line-height: 1.6;
+        }
+        
+        .features-list {
+            max-width: 600px;
+            margin: 0 auto 30px;
+            text-align: left;
+        }
+        
+        .feature-item {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            margin-bottom: 15px;
+            padding: 15px;
+            background: var(--glass-bg);
+            border-radius: 10px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        .feature-icon {
+            font-size: 1.5em;
+            width: 40px;
+            height: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+            color: white;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+        
+        .feature-text {
+            flex-grow: 1;
+        }
+        
+        .feature-title {
+            font-weight: bold;
+            margin-bottom: 5px;
+            color: var(--text-color);
+        }
+        
+        .feature-desc {
+            color: #666;
+            font-size: 0.95em;
+        }
+        
+        .coming-soon {
+            background: linear-gradient(135deg, #ffd166, #ff9e6d);
+            color: #333;
+            padding: 15px 30px;
+            border-radius: 25px;
+            font-weight: bold;
+            display: inline-block;
+            margin-top: 20px;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+        }
+        
+        /* Responsive */
+        @media (max-width: 768px) {
+            .header {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 15px;
+            }
+            
+            .main-content {
+                padding: 25px;
+            }
+            
+            .content-title {
+                font-size: 1.6em;
+            }
+            
+            .feature-item {
+                flex-direction: column;
+                text-align: center;
+            }
+        }
+        
+        /* Animations */
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        .fade-in {
+            animation: fadeIn 0.8s ease;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="logo">📸 回忆相册</div>
+            <div class="user-info">
+                <span class="user-name">{{ user_name }}</span>
+                <div class="nav-links">
+                    <a href="/" class="nav-btn">🏠 首页</a>
+                    <a href="/games" class="nav-btn">🎮 游戏大厅</a>
+                    <a href="/achievements" class="nav-btn">🏆 成就</a>
+                    <a href="/messages" class="nav-btn">💌 留言</a>
+                    <a href="/logout" class="logout-btn">退出</a>
+                </div>
+            </div>
+        </header>
+        
+        <!-- Back Button -->
+        <div class="back-section">
+            <a href="/" class="back-btn">
+                ← 返回首页
+            </a>
+        </div>
+        
+        <!-- Main Content -->
+        <div class="main-content fade-in">
+            <div class="content-icon">📸</div>
+            <h1 class="content-title">回忆相册</h1>
+            <p class="content-subtitle">
+                记录美好瞬间，珍藏共同回忆<br>
+                功能开发中，敬请期待！
+            </p>
+            
+            <div class="features-list">
+                <div class="feature-item">
+                    <div class="feature-icon">📷</div>
+                    <div class="feature-text">
+                        <div class="feature-title">照片上传</div>
+                        <div class="feature-desc">上传你们的合照，记录美好时刻</div>
+                    </div>
+                </div>
+                
+                <div class="feature-item">
+                    <div class="feature-icon">🏷️</div>
+                    <div class="feature-text">
+                        <div class="feature-title">标签分类</div>
+                        <div class="feature-desc">按日期、地点、事件分类管理照片</div>
+                    </div>
+                </div>
+                
+                <div class="feature-item">
+                    <div class="feature-icon">💬</div>
+                    <div class="feature-text">
+                        <div class="feature-title">照片评论</div>
+                        <div class="feature-desc">为每张照片添加回忆和感想</div>
+                    </div>
+                </div>
+                
+                <div class="feature-item">
+                    <div class="feature-icon">🎨</div>
+                    <div class="feature-text">
+                        <div class="feature-title">相册美化</div>
+                        <div class="feature-desc">自定义相册封面和布局</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="coming-soon">
+                🚀 即将上线，敬请期待！
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        // 添加简单的交互效果
+        document.querySelectorAll('.feature-item').forEach((item, index) => {
+            item.style.animationDelay = `${index * 0.1}s`;
+            item.classList.add('fade-in');
+            
+            item.addEventListener('mouseenter', () => {
+                item.style.transform = 'translateY(-5px)';
+                item.style.boxShadow = '0 10px 20px rgba(0, 0, 0, 0.1)';
+            });
+            
+            item.addEventListener('mouseleave', () => {
+                item.style.transform = '';
+                item.style.boxShadow = '';
+            });
+        });
+    </script>
+</body>
+</html>

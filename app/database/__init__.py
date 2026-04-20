@@ -1,11 +1,12 @@
 import sqlite3
 import os
 from datetime import datetime, timedelta
+from dotenv import load_dotenv
 
-DATABASE_PATH = "app/database/heartsync.db"
+load_dotenv()
 
 def get_connection():
-    return sqlite3.connect(DATABASE_PATH)
+    return sqlite3.connect(os.getenv("DATABASE_URL", "app/database/heart_sync.db"), check_same_thread=False)
 
 def init_db():
     if not os.path.exists("app/database"):
@@ -27,8 +28,14 @@ def init_db():
     CREATE TABLE IF NOT EXISTS achievements (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER NOT NULL,
+        ach_id TEXT NOT NULL,
         ach_name TEXT NOT NULL,
+        ach_description TEXT,
+        ach_icon TEXT,
+        ach_category TEXT,
+        ach_points INTEGER DEFAULT 0,
         unlock_date DATE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (user_id) REFERENCES users(id)
     )
     """)
@@ -60,6 +67,18 @@ def init_db():
     
     # Create canvas drawings table
     cursor.execute("""
+    CREATE TABLE IF NOT EXISTS messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        user_name TEXT NOT NULL,
+        content TEXT NOT NULL,
+        is_private BOOLEAN DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id)
+    )
+    """)
+    
+    cursor.execute("""
     CREATE TABLE IF NOT EXISTS canvas_drawings (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         session_id TEXT NOT NULL,
@@ -70,7 +89,7 @@ def init_db():
         to_x REAL NOT NULL,
         to_y REAL NOT NULL,
         color TEXT NOT NULL,
-        brush_size REAL NOT NULL,
+        brush_size INTEGER NOT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (user_id) REFERENCES users(id)
     )
@@ -84,43 +103,120 @@ def init_db():
     cursor.execute("SELECT COUNT(*) FROM users")
     if cursor.fetchone()[0] == 0:
         # Create the two users as specified in PRD
-        cursor.execute("INSERT INTO users (id, name, secret_key) VALUES (1, 'User_A', 'first-love')")
-        cursor.execute("INSERT INTO users (id, name, secret_key) VALUES (2, 'User_B', 'first-love')")
+        cursor.execute("INSERT INTO users (id, name, secret_key) VALUES (1, ?, ?)", (os.getenv("USER_A_NAME"), os.getenv("USER_A_PASSPHRASE")))
+        cursor.execute("INSERT INTO users (id, name, secret_key) VALUES (2, ?, ?)", (os.getenv("USER_B_NAME"), os.getenv("USER_B_PASSPHRASE")))
         
         # Set anniversary date (default to today for demo)
         anniversary_date = datetime.now().strftime("%Y-%m-%d")
         cursor.execute("INSERT OR REPLACE INTO meta_config (key, value) VALUES ('anniversary_date', ?)", (anniversary_date,))
         
-        # Initialize achievement milestones
-        achievements = [
-            (1, "萌芽", "相识 1 天"),
-            (2, "默契初现", "连续双人打卡 7 天"),
-            (3, "百日维新", "相识 100 天"),
-            (4, "半载同行", "相识 182 天"),
-            (5, "岁月如歌", "相识 365 天"),
-            # Streak-based achievements
-            (6, "签到新星", "连续签到 3 天"),
-            (7, "签到达人", "连续签到 7 天"),
-            (8, "签到王者", "连续签到 30 天"),
-            (9, "百日签到", "累计签到 100 天"),
-            (10, "周年签到", "累计签到 365 天"),
+        # Initialize achievement definitions
+        achievement_definitions = [
+            # 恋爱时间成就
+            ("time_7days", "一周之约", "恋爱7天", "❤️", "time", 10),
+            ("time_30days", "满月之喜", "恋爱30天", "🌕", "time", 30),
+            ("time_100days", "百日纪念", "恋爱100天", "💯", "time", 50),
+            ("time_365days", "周年庆典", "恋爱1周年", "🎂", "time", 100),
+            ("time_1000days", "千日之恋", "恋爱1000天", "🌟", "time", 200),
+            
+            # 游戏成就
+            ("game_first_play", "初次游戏", "第一次玩游戏", "🎮", "game", 10),
+            ("game_pingpong_win", "乒乓球高手", "赢得乒乓球游戏", "🏓", "game", 30),
+            ("game_canvas_draw", "艺术大师", "在画板上绘画", "🎨", "game", 20),
+            ("game_collaborate", "默契搭档", "一起完成游戏", "🤝", "game", 40),
+            
+            # 互动成就
+            ("interact_first", "初次互动", "第一次互动", "👋", "interaction", 10),
+            ("interact_10", "活跃伙伴", "完成10次互动", "💬", "interaction", 30),
+            ("interact_50", "亲密无间", "完成50次互动", "💕", "interaction", 60),
+            ("interact_100", "心有灵犀", "完成100次互动", "✨", "interaction", 100),
+            
+            # 特殊时刻成就
+            ("special_first_month", "第一个月", "度过第一个月", "📅", "special", 20),
+            ("special_first_year", "第一年", "度过第一年", "🎉", "special", 80),
+            ("special_valentine", "情人节", "一起过情人节", "💘", "special", 50),
+            ("special_birthday", "生日祝福", "为对方庆生", "🎁", "special", 40),
+            
+            # 里程碑成就
+            ("milestone_first_photo", "第一张照片", "上传第一张照片", "📸", "milestone", 30),
+            ("milestone_first_note", "第一篇日记", "写下第一篇日记", "📝", "milestone", 20),
+            ("milestone_10_photos", "回忆满满", "上传10张照片", "📷", "milestone", 50),
+            ("milestone_10_notes", "日记达人", "写下10篇日记", "📚", "milestone", 40),
         ]
         
-        for ach_id, name, description in achievements:
+        for ach_id, name, description, icon, category, points in achievement_definitions:
             cursor.execute("""
-            INSERT OR IGNORE INTO meta_config (key, value) 
+            INSERT OR IGNORE INTO meta_config (key, value)
             VALUES (?, ?)
-            """, (f"achievement_{ach_id}", f"{name}|{description}"))
+            """, (f"achievement_def_{ach_id}", f"{name}|{description}|{icon}|{category}|{points}"))
     
     conn.commit()
     conn.close()
 
-def check_and_unlock_achievements(user_id: int):
-    """Check and unlock achievements based on conditions"""
+def unlock_achievement(user_id: int, achievement_id: str, achievement_data: dict = None):
+    """Unlock a specific achievement for a user"""
     conn = get_connection()
     cursor = conn.cursor()
+    today = datetime.now()
     
-    # Get anniversary date
+    # Check if achievement already unlocked
+    cursor.execute("""
+    SELECT COUNT(*) FROM achievements 
+    WHERE user_id = ? AND ach_id = ?
+    """, (user_id, achievement_id))
+    
+    if cursor.fetchone()[0] > 0:
+        conn.close()
+        return False
+    
+    # Get achievement definition
+    cursor.execute("""
+    SELECT value FROM meta_config 
+    WHERE key = ?
+    """, (f"achievement_def_{achievement_id}",))
+    
+    row = cursor.fetchone()
+    if not row:
+        # If no definition found, use provided data or default
+        if achievement_data:
+            name = achievement_data.get("name", "成就")
+            description = achievement_data.get("description", "")
+            icon = achievement_data.get("icon", "🏆")
+            category = achievement_data.get("category", "general")
+            points = achievement_data.get("points", 0)
+        else:
+            name = "成就"
+            description = ""
+            icon = "🏆"
+            category = "general"
+            points = 0
+    else:
+        # Parse definition
+        parts = row[0].split('|')
+        name = parts[0] if len(parts) > 0 else "成就"
+        description = parts[1] if len(parts) > 1 else ""
+        icon = parts[2] if len(parts) > 2 else "🏆"
+        category = parts[3] if len(parts) > 3 else "general"
+        points = int(parts[4]) if len(parts) > 4 else 0
+    
+    # Insert achievement
+    cursor.execute("""
+    INSERT INTO achievements 
+    (user_id, ach_id, ach_name, ach_description, ach_icon, ach_category, ach_points, unlock_date)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, (user_id, achievement_id, name, description, icon, category, points, today.strftime("%Y-%m-%d")))
+    
+    conn.commit()
+    conn.close()
+    return True
+
+def check_and_unlock_time_achievements(user_id: int):
+    """Check and unlock time-based achievements"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    today = datetime.now()
+    
+    # Get user's anniversary date
     cursor.execute("SELECT value FROM meta_config WHERE key = 'anniversary_date'")
     anniversary_row = cursor.fetchone()
     
@@ -129,32 +225,74 @@ def check_and_unlock_achievements(user_id: int):
         return
     
     anniversary_date = datetime.strptime(anniversary_row[0], "%Y-%m-%d")
-    today = datetime.now()
     days_together = (today - anniversary_date).days
     
-    # Check for day-based achievements
-    day_achievements = {
-        1: "萌芽",
-        100: "百日维新",
-        182: "半载同行",
-        365: "岁月如歌",
+    # Time-based achievements
+    time_achievements = {
+        7: "time_7days",
+        30: "time_30days",
+        100: "time_100days",
+        365: "time_365days",
+        1000: "time_1000days"
     }
     
-    for days_required, achievement_name in day_achievements.items():
+    for days_required, achievement_id in time_achievements.items():
         if days_together >= days_required:
-            # Check if already unlocked
-            cursor.execute("""
-            SELECT COUNT(*) FROM achievements 
-            WHERE user_id = ? AND ach_name = ?
-            """, (user_id, achievement_name))
-            
-            if cursor.fetchone()[0] == 0:
-                # Unlock achievement
-                cursor.execute("""
-                INSERT INTO achievements (user_id, ach_name, unlock_date)
-                VALUES (?, ?, ?)
-                """, (user_id, achievement_name, today.strftime("%Y-%m-%d")))
+            unlock_achievement(user_id, achievement_id)
     
+    conn.close()
+
+def check_and_unlock_game_achievements(user_id: int, game_type: str, result: dict = None):
+    """Check and unlock game-based achievements"""
+    # Game-based achievements
+    if game_type == "ping_pong":
+        if result and result.get("winner") == user_id:
+            unlock_achievement(user_id, "game_pingpong_win")
+    
+    unlock_achievement(user_id, "game_first_play")
+
+def check_and_unlock_canvas_achievements(user_id: int):
+    """Check and unlock canvas-based achievements"""
+    unlock_achievement(user_id, "game_canvas_draw")
+
+def check_and_unlock_interaction_achievements(user_id: int, interaction_count: int):
+    """Check and unlock interaction-based achievements"""
+    if interaction_count >= 1:
+        unlock_achievement(user_id, "interact_first")
+    if interaction_count >= 10:
+        unlock_achievement(user_id, "interact_10")
+    if interaction_count >= 50:
+        unlock_achievement(user_id, "interact_50")
+    if interaction_count >= 100:
+        unlock_achievement(user_id, "interact_100")
+
+def check_and_unlock_special_achievements(user_id: int, event_type: str):
+    """Check and unlock special event achievements"""
+    if event_type == "valentine":
+        unlock_achievement(user_id, "special_valentine")
+    elif event_type == "birthday":
+        unlock_achievement(user_id, "special_birthday")
+    
+    # Check month/year milestones
+    today = datetime.now()
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT value FROM meta_config WHERE key = 'anniversary_date'")
+    anniversary_row = cursor.fetchone()
+    
+    if anniversary_row:
+        anniversary_date = datetime.strptime(anniversary_row[0], "%Y-%m-%d")
+        months_together = (today.year - anniversary_date.year) * 12 + today.month - anniversary_date.month
+        years_together = today.year - anniversary_date.year
+        
+        if months_together >= 1:
+            unlock_achievement(user_id, "special_first_month")
+        if years_together >= 1:
+            unlock_achievement(user_id, "special_first_year")
+    
+    conn.close()
+
     # Check for check-in based achievements
     if days_together >= 7:
         # Check for 7 consecutive days of both users checking in
@@ -228,54 +366,163 @@ def check_and_unlock_achievements(user_id: int):
     conn.commit()
     conn.close()
 
-def get_user_streak(user_id: int):
-    """Get current check-in streak for a user"""
+def get_recent_achievements(user_id: int, limit: int = 5):
+    """Get recent achievements for a user with full details"""
     conn = get_connection()
     cursor = conn.cursor()
     
-    # Get all check-in dates for the user, ordered by date
     cursor.execute("""
-    SELECT DATE(checkin_time) as checkin_date
-    FROM daily_checkin
-    WHERE user_id = ?
-    ORDER BY checkin_date DESC
+    SELECT 
+        a.ach_id,
+        a.ach_name,
+        a.ach_description,
+        a.ach_icon,
+        a.ach_category,
+        a.ach_points,
+        a.unlock_date
+    FROM achievements a
+    WHERE a.user_id = ?
+    ORDER BY a.unlock_date DESC, a.created_at DESC
+    LIMIT ?
+    """, (user_id, limit))
+    
+    achievements = []
+    for row in cursor.fetchall():
+        achievements.append({
+            "id": row[0],
+            "name": row[1],
+            "description": row[2] or "",
+            "icon": row[3] or "🏆",
+            "category": row[4] or "general",
+            "points": row[5] or 0,
+            "date": row[6] or ""
+        })
+    
+    conn.close()
+    return achievements
+
+def get_all_achievements(user_id: int):
+    """Get all achievements for a user, grouped by category"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+    SELECT 
+        a.ach_id,
+        a.ach_name,
+        a.ach_description,
+        a.ach_icon,
+        a.ach_category,
+        a.ach_points,
+        a.unlock_date
+    FROM achievements a
+    WHERE a.user_id = ?
+    ORDER BY a.ach_category, a.unlock_date DESC
     """, (user_id,))
     
-    checkin_dates = [datetime.strptime(row[0], "%Y-%m-%d").date() for row in cursor.fetchall()]
+    achievements_by_category = {}
+    for row in cursor.fetchall():
+        category = row[4] or "general"
+        if category not in achievements_by_category:
+            achievements_by_category[category] = []
+        
+        achievements_by_category[category].append({
+            "id": row[0],
+            "name": row[1],
+            "description": row[2] or "",
+            "icon": row[3] or "🏆",
+            "category": category,
+            "points": row[5] or 0,
+            "date": row[6] or "",
+            "unlocked": True
+        })
+    
+    # Get all achievement definitions to show locked achievements
+    cursor.execute("""
+    SELECT key, value FROM meta_config 
+    WHERE key LIKE 'achievement_def_%'
+    """)
+    
+    all_definitions = {}
+    for row in cursor.fetchall():
+        parts = row[1].split('|')
+        if len(parts) >= 5:
+            ach_id = row[0].replace('achievement_def_', '')
+            all_definitions[ach_id] = {
+                "id": ach_id,
+                "name": parts[0],
+                "description": parts[1],
+                "icon": parts[2],
+                "category": parts[3],
+                "points": int(parts[4])
+            }
+    
     conn.close()
     
-    if not checkin_dates:
-        return 0
+    # Add locked achievements
+    unlocked_ids = set()
+    for category_achievements in achievements_by_category.values():
+        for ach in category_achievements:
+            unlocked_ids.add(ach["id"])
     
-    # Calculate current streak
-    today = datetime.now().date()
-    streak = 0
+    for ach_id, ach_def in all_definitions.items():
+        if ach_id not in unlocked_ids:
+            category = ach_def["category"]
+            if category not in achievements_by_category:
+                achievements_by_category[category] = []
+            
+            achievements_by_category[category].append({
+                **ach_def,
+                "date": "",
+                "unlocked": False
+            })
     
-    # Check if checked in today
-    if checkin_dates[0] == today:
-        streak = 1
-        # Check previous days
-        expected_date = today
-        for checkin_date in checkin_dates[1:]:
-            expected_date = expected_date - timedelta(days=1)
-            if checkin_date == expected_date:
-                streak += 1
-            else:
-                break
-    else:
-        # Check yesterday
-        yesterday = today - timedelta(days=1)
-        if checkin_dates[0] == yesterday:
-            streak = 1
-            expected_date = yesterday
-            for checkin_date in checkin_dates[1:]:
-                expected_date = expected_date - timedelta(days=1)
-                if checkin_date == expected_date:
-                    streak += 1
-                else:
-                    break
+    return achievements_by_category
+
+def get_achievement_stats(user_id: int):
+    """Get achievement statistics for a user"""
+    conn = get_connection()
+    cursor = conn.cursor()
     
-    return streak
+    # Get total achievements unlocked
+    cursor.execute("""
+    SELECT COUNT(*) FROM achievements WHERE user_id = ?
+    """, (user_id,))
+    total_unlocked = cursor.fetchone()[0]
+    
+    # Get total points
+    cursor.execute("""
+    SELECT SUM(ach_points) FROM achievements WHERE user_id = ?
+    """, (user_id,))
+    total_points = cursor.fetchone()[0] or 0
+    
+    # Get achievements by category
+    cursor.execute("""
+    SELECT ach_category, COUNT(*) 
+    FROM achievements 
+    WHERE user_id = ?
+    GROUP BY ach_category
+    """, (user_id,))
+    
+    category_stats = {}
+    for row in cursor.fetchall():
+        category_stats[row[0]] = row[1]
+    
+    # Get total achievement definitions
+    cursor.execute("""
+    SELECT COUNT(*) FROM meta_config WHERE key LIKE 'achievement_def_%'
+    """)
+    total_achievements = cursor.fetchone()[0]
+    
+    conn.close()
+    
+    return {
+        "total_unlocked": total_unlocked,
+        "total_achievements": total_achievements,
+        "completion_rate": round((total_unlocked / total_achievements * 100), 1) if total_achievements > 0 else 0,
+        "total_points": total_points,
+        "category_stats": category_stats
+    }
 
 def get_longest_streak(user_id: int):
     """Get longest check-in streak for a user"""
@@ -487,44 +734,198 @@ def clear_canvas_drawings(session_id: str):
     
     return deleted_count
 
+# ==================== 留言系统函数 ====================
+
+def add_message(user_id: int, user_name: str, content: str, is_private: bool = False):
+    """Add a new message"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+    INSERT INTO messages (user_id, user_name, content, is_private)
+    VALUES (?, ?, ?, ?)
+    """, (user_id, user_name, content, 1 if is_private else 0))
+    
+    conn.commit()
+    message_id = cursor.lastrowid
+    
+    # 解锁留言相关成就
+    from datetime import datetime
+    today = datetime.now()
+    
+    # 获取用户留言数量
+    cursor.execute("SELECT COUNT(*) FROM messages WHERE user_id = ?", (user_id,))
+    message_count = cursor.fetchone()[0]
+    
+    # 检查成就
+    if message_count >= 1:
+        cursor.execute("SELECT COUNT(*) FROM achievements WHERE user_id = ? AND ach_id = ?", 
+                      (user_id, "milestone_first_note"))
+        if cursor.fetchone()[0] == 0:
+            cursor.execute("""
+            INSERT INTO achievements 
+            (user_id, ach_id, ach_name, ach_description, ach_icon, ach_category, ach_points, unlock_date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (user_id, "milestone_first_note", "第一篇日记", "写下第一篇日记", "📝", "milestone", 20, today.strftime("%Y-%m-%d")))
+    
+    if message_count >= 10:
+        cursor.execute("SELECT COUNT(*) FROM achievements WHERE user_id = ? AND ach_id = ?", 
+                      (user_id, "milestone_10_notes"))
+        if cursor.fetchone()[0] == 0:
+            cursor.execute("""
+            INSERT INTO achievements 
+            (user_id, ach_id, ach_name, ach_description, ach_icon, ach_category, ach_points, unlock_date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (user_id, "milestone_10_notes", "日记达人", "写下10篇日记", "📚", "milestone", 40, today.strftime("%Y-%m-%d")))
+    
+    conn.commit()
+    conn.close()
+    return message_id
+
+def get_messages(user_id: int, include_private: bool = True, limit: int = 50):
+    """Get messages for a user"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    if include_private:
+        # 获取所有公开消息和用户自己的私密消息
+        cursor.execute("""
+        SELECT 
+            m.id, m.user_id, m.user_name, m.content, m.is_private, m.created_at,
+            CASE WHEN m.user_id = ? THEN 1 ELSE 0 END as is_own
+        FROM messages m
+        WHERE m.is_private = 0 OR m.user_id = ?
+        ORDER BY m.created_at DESC
+        LIMIT ?
+        """, (user_id, user_id, limit))
+    else:
+        # 只获取公开消息
+        cursor.execute("""
+        SELECT 
+            m.id, m.user_id, m.user_name, m.content, m.is_private, m.created_at,
+            0 as is_own
+        FROM messages m
+        WHERE m.is_private = 0
+        ORDER BY m.created_at DESC
+        LIMIT ?
+        """, (limit,))
+    
+    messages = []
+    for row in cursor.fetchall():
+        messages.append({
+            "id": row[0],
+            "user_id": row[1],
+            "user_name": row[2],
+            "content": row[3],
+            "is_private": bool(row[4]),
+            "created_at": row[5],
+            "is_own": bool(row[6]),
+            "can_delete": row[1] == user_id  # 只有自己的消息可以删除
+        })
+    
+    conn.close()
+    return messages
+
+def delete_message(message_id: int, user_id: int):
+    """Delete a message (only if user owns it)"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    # 检查消息是否存在且属于该用户
+    cursor.execute("SELECT user_id FROM messages WHERE id = ?", (message_id,))
+    row = cursor.fetchone()
+    
+    if not row:
+        conn.close()
+        return False
+    
+    if row[0] != user_id:
+        conn.close()
+        return False
+    
+    # 删除消息
+    cursor.execute("DELETE FROM messages WHERE id = ?", (message_id,))
+    conn.commit()
+    conn.close()
+    return True
+
+def get_message_stats(user_id: int):
+    """Get message statistics for a user"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    # 获取用户的消息统计
+    cursor.execute("""
+    SELECT 
+        COUNT(*) as total_messages,
+        SUM(CASE WHEN is_private = 1 THEN 1 ELSE 0 END) as private_messages,
+        MIN(created_at) as first_message,
+        MAX(created_at) as last_message
+    FROM messages
+    WHERE user_id = ?
+    """, (user_id,))
+    
+    row = cursor.fetchone()
+    
+    # 获取总消息数
+    cursor.execute("SELECT COUNT(*) FROM messages")
+    total_all_messages = cursor.fetchone()[0]
+    
+    conn.close()
+    print(f"User {user_id} message stats: {row}")
+    if row:
+        total_messages, private_messages, first_message, last_message = row
+        private_messages = private_messages or 0  # Handle NULL case
+        return {
+            "total_messages": total_messages,
+            "private_messages": private_messages,
+            "public_messages": total_messages - private_messages,
+            "first_message": first_message,
+            "last_message": last_message,
+            "total_all_messages": total_all_messages
+        }
+    
+    return {
+        "total_messages": 0,
+        "private_messages": 0,
+        "public_messages": 0,
+        "first_message": None,
+        "last_message": None,
+        "total_all_messages": total_all_messages
+    }
+
+# ==================== 画板函数 ====================
+
 def get_canvas_stats(session_id: str):
     """Get statistics for a canvas session"""
     conn = get_connection()
     cursor = conn.cursor()
     
-    # Total drawings count
     cursor.execute("""
-    SELECT COUNT(*) FROM canvas_drawings
+    SELECT 
+        COUNT(*) as total_drawings,
+        COUNT(DISTINCT user_id) as unique_users,
+        MIN(created_at) as first_drawing,
+        MAX(created_at) as last_drawing
+    FROM canvas_drawings
     WHERE session_id = ?
     """, (session_id,))
-    total_drawings = cursor.fetchone()[0]
     
-    # Unique users count
-    cursor.execute("""
-    SELECT COUNT(DISTINCT user_id) FROM canvas_drawings
-    WHERE session_id = ?
-    """, (session_id,))
-    unique_users = cursor.fetchone()[0]
-    
-    # First drawing date
-    cursor.execute("""
-    SELECT MIN(created_at) FROM canvas_drawings
-    WHERE session_id = ?
-    """, (session_id,))
-    first_drawing = cursor.fetchone()[0]
-    
-    # Last drawing date
-    cursor.execute("""
-    SELECT MAX(created_at) FROM canvas_drawings
-    WHERE session_id = ?
-    """, (session_id,))
-    last_drawing = cursor.fetchone()[0]
-    
+    row = cursor.fetchone()
     conn.close()
     
+    if row:
+        total_drawings, unique_users, first_drawing, last_drawing = row
+        return {
+            "total_drawings": total_drawings,
+            "unique_users": unique_users,
+            "first_drawing": first_drawing,
+            "last_drawing": last_drawing
+        }
+    
     return {
-        "total_drawings": total_drawings,
-        "unique_users": unique_users,
-        "first_drawing": first_drawing,
-        "last_drawing": last_drawing
+        "total_drawings": 0,
+        "unique_users": 0,
+        "first_drawing": None,
+        "last_drawing": None
     }

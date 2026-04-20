@@ -14,7 +14,7 @@ from starlette.middleware.cors import CORSMiddleware
 import os
 
 from .database import init_db
-from .routes import auth, dashboard, api, websocket, games
+from .routes import auth, dashboard, api, websocket, games, achievements, messages, memories
 
 async def not_found(request, exc):
     """Custom 404 handler that redirects to gate"""
@@ -38,6 +38,8 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
         
         # 此时 SessionMiddleware 已经在它外层运行过了，这里可以安全访问
         if not request.session.get("authenticated"):
+            # 保存用户原本想访问的路径
+            request.session["redirect_after_login"] = str(request.url.path)
             return RedirectResponse(url="/gate", status_code=303)
         
         return await call_next(request)
@@ -72,6 +74,12 @@ def create_app():
             Route("/game/pingpong", games.ping_pong, name="ping_pong"),
             Route("/game/mobile-test", games.mobile_test, name="mobile_test"),
             Route("/game/canvas-simple", games.canvas_simple, name="canvas_simple"),
+            Route("/achievements", achievements.achievements_page, name="achievements"),
+            Route("/messages", messages.messages_page, name="messages"),
+            Route("/api/messages", messages.api_get_messages, name="api_get_messages"),
+            Route("/api/messages", messages.api_add_message, methods=["POST"], name="api_add_message"),
+            Route("/api/messages/{message_id:int}", messages.api_delete_message, methods=["DELETE"], name="api_delete_message"),
+            Route("/memories", memories.memories_page, name="memories"),
 
             WebSocketRoute("/ws", websocket.websocket_endpoint, name="websocket"),
             Mount("/static", app=StaticFiles(directory="app/static"), name="static"),

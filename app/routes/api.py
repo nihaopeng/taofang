@@ -1,6 +1,6 @@
 from starlette.responses import JSONResponse
 from starlette.requests import Request
-from ..database import get_connection, get_user_streak, get_longest_streak, get_checkin_stats, get_checkin_calendar
+from ..database import get_connection
 from datetime import datetime
 import json
 
@@ -140,15 +140,10 @@ async def get_streak_info(request: Request):
     if not request.session.get("authenticated"):
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     
-    user_id = request.session.get("user_id")
-    
-    current_streak = get_user_streak(user_id)
-    longest_streak = get_longest_streak(user_id)
-    
     return JSONResponse({
-        "current_streak": current_streak,
-        "longest_streak": longest_streak,
-        "user_id": user_id,
+        "current_streak": 0,
+        "longest_streak": 0,
+        "success": True
     })
 
 async def get_checkin_statistics(request: Request):
@@ -156,67 +151,69 @@ async def get_checkin_statistics(request: Request):
     if not request.session.get("authenticated"):
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     
-    user_id = request.session.get("user_id")
-    
-    stats = get_checkin_stats(user_id)
-    
-    return JSONResponse(stats)
+    return JSONResponse({
+        "stats": {
+            "total_checkins": 0,
+            "total_both_checkins": 0,
+            "monthly_stats": []
+        },
+        "success": True
+    })
 
 async def get_checkin_calendar_data(request: Request):
     """Get check-in data for calendar display"""
     if not request.session.get("authenticated"):
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     
-    user_id = request.session.get("user_id")
+    today = datetime.now()
     
-    # Get year and month from query parameters
-    query_params = dict(request.query_params)
-    year = int(query_params.get("year", datetime.now().year))
-    month = int(query_params.get("month", datetime.now().month))
-    
-    calendar_data = get_checkin_calendar(user_id, year, month)
-    
-    return JSONResponse(calendar_data)
+    return JSONResponse({
+        "user_checkins": [],
+        "both_checkins": [],
+        "year": today.year,
+        "month": today.month,
+        "success": True
+    })
 
 async def get_checkin_insights(request: Request):
-    """Get check-in patterns and insights"""
+    """Get check-in patterns and insights (simplified)"""
     if not request.session.get("authenticated"):
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     
-    user_id = request.session.get("user_id")
+    # Simplified insights for the new interface
+    insights = [
+        {
+            "type": "achievement",
+            "icon": "🌟",
+            "title": "欢迎回来",
+            "content": "简化界面，专注重要时刻"
+        }
+    ]
     
-    conn = get_connection()
-    cursor = conn.cursor()
-    
-    # Get check-in patterns by day of week
-    cursor.execute("""
-    SELECT 
-        strftime('%w', checkin_time) as weekday,
-        COUNT(*) as count
-    FROM daily_checkin
-    WHERE user_id = ?
-    GROUP BY weekday
-    ORDER BY weekday
-    """, (user_id,))
-    
-    weekday_stats = cursor.fetchall()
+    # Weekday patterns (empty for now)
     weekdays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
     weekday_data = []
-    total_weekday = sum(row[1] for row in weekday_stats)
-    
-    for i, weekday in enumerate(weekdays):
-        count = 0
-        for row in weekday_stats:
-            if int(row[0]) == i:
-                count = row[1]
-                break
-        
-        percentage = (count / total_weekday * 100) if total_weekday > 0 else 0
+    for weekday in weekdays:
         weekday_data.append({
             "day": weekday,
-            "count": count,
-            "percentage": round(percentage, 1)
+            "count": 0,
+            "percentage": 0
         })
+    
+    # Hour patterns (empty for now)
+    hour_data = []
+    for hour in range(24):
+        hour_data.append({
+            "hour": f"{hour:02d}:00",
+            "count": 0
+        })
+    
+    return JSONResponse({
+        "weekday_patterns": weekday_data,
+        "hour_patterns": hour_data,
+        "insights": insights,
+        "success": True
+    })
     
     # Get check-in patterns by hour
     cursor.execute("""

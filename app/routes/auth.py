@@ -45,7 +45,10 @@ async def login(request: Request):
             """, (user_id,))
             
             conn.commit()
-            return RedirectResponse(url="/", status_code=303)
+            
+            # 重定向到原始路径或首页
+            redirect_path = request.session.pop("redirect_after_login", "/")
+            return RedirectResponse(url=redirect_path, status_code=303)
         else:
             # Return error for wrong passphrase
             return JSONResponse(
