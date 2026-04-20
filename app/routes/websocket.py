@@ -2,6 +2,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 import json
 import uuid
 from datetime import datetime
+from app.database import save_canvas_drawing, get_canvas_drawings, clear_canvas_drawings, get_canvas_stats
 
 # Store active connections with user info
 active_connections = {}  # websocket: {"user_id": id, "user_name": name}
@@ -32,19 +33,19 @@ class GameWebSocketHandler:
     async def handle_canvas_message(self, websocket, message, user_id, user_info):
         """Handle canvas drawing messages"""
         message_type = message.get("type")
+        session_id = message.get("session_id", "default_canvas")
+        user_name = user_info.get("user_name", "User")
         
         if message_type == "canvas_join":
             # Join or create canvas session
-            session_id = message.get("session_id", "default_canvas")
             if session_id not in self.canvas_sessions:
                 self.canvas_sessions[session_id] = {
                     "users": {},
-                    "drawings": [],
                     "created_at": datetime.now().isoformat()
                 }
             
             self.canvas_sessions[session_id]["users"][user_id] = {
-                "name": user_info.get("user_name", "User"),
+                "name": user_name,
                 "joined_at": datetime.now().isoformat(),
                 "color": message.get("color", "#ff6b6b")
             }
@@ -52,14 +53,21 @@ class GameWebSocketHandler:
             # Store user's socket for this session
             self.user_sockets[user_id] = websocket
             
+            # Get existing drawings from database
+            existing_drawings = get_canvas_drawings(session_id, limit=1000)
+            
+            # Get canvas statistics
+            canvas_stats = get_canvas_stats(session_id)
+            
             # Send join confirmation with existing drawings
             await websocket.send_json({
                 "type": "canvas_joined",
                 "session_id": session_id,
                 "user_count": len(self.canvas_sessions[session_id]["users"]),
                 "users": list(self.canvas_sessions[session_id]["users"].values()),
-                "existing_drawings": self.canvas_sessions[session_id]["drawings"][-100:],  # Last 100 drawings
-                "your_color": self.canvas_sessions[session_id]["users"][user_id]["color"]
+                "existing_drawings": existing_drawings,
+                "your_color": self.canvas_sessions[session_id]["users"][user_id]["color"],
+                "canvas_stats": canvas_stats
             })
             
             # Notify other users in the session
@@ -76,54 +84,95 @@ class GameWebSocketHandler:
                         pass
         
         elif message_type == "canvas_draw":
-            session_id = message.get("session_id")
-            print(f"Received canvas_draw message for session {session_id}")
-            if session_id in self.canvas_sessions:
-                # 简单粗暴：直接把收到的整个 message 转发给所有人
-                for uid, ws_conn in self.user_sockets.items():
-                    print(f"Attempting to send canvas_draw message to user {uid}")
-                    if uid != user_id:
-                        try:
-                            await ws_conn.send_json(message)
-                        except:
-                            pass
+            # Save drawing to database
+            drawing_data = {
+                "from_x": message.get("from_x"),
+                "from_y": message.get("from_y"),
+                "to_x": message.get("to_x"),
+                "to_y": message.get("to_y"),
+                "color": message.get("color"),
+                "brush_size": message.get("brush_size")
+            }
+            
+            # Validate drawing data
+            if all(key in drawing_data for key in ["from_x", "from_y", "to_x", "to_y", "color", "brush_size"]):
+                try:
+                    # Save to database
+                    save_canvas_drawing(
+                        session_id=session_id,
+                        user_id=user_id,
+                        user_name=user_name,
+                        from_x=drawing_data["from_x"],
+                        from_y=drawing_data["from_y"],
+                        to_x=drawing_data["to_x"],
+                        to_y=drawing_data["to_y"],
+                        color=drawing_data["color"],
+                        brush_size=drawing_data["brush_size"]
+                    )
+                    
+                    # Forward drawing to other users in the session
+                    if session_id in self.canvas_sessions:
+                        for uid in self.canvas_sessions[session_id]["users"]:
+                            if uid != user_id and uid in self.user_sockets:
+                                 try:
+                                     await self.user_sockets[uid].send_json(message)
+                                 except:
+                                     pass
+                    
+                    print(f"Saved canvas drawing for session {session_id} by user {user_name}")
+                except Exception as e:
+                    print(f"Error saving canvas drawing: {e}")
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": f"保存绘画失败: {str(e)}"
+                    })
+            else:
+                print(f"Invalid canvas drawing data: {drawing_data}")
         
         elif message_type == "canvas_clear":
-            # Clear canvas
-            session_id = message.get("session_id")
-            if session_id in self.canvas_sessions:
-                self.canvas_sessions[session_id]["drawings"] = []
+            # Clear canvas drawings from database
+            try:
+                deleted_count = clear_canvas_drawings(session_id)
                 
                 # Notify all users in session
-                for uid in self.canvas_sessions[session_id]["users"]:
-                    if uid in self.user_sockets:
-                        try:
-                            await self.user_sockets[uid].send_json({
-                                "type": "canvas_cleared",
-                                "session_id": session_id,
-                                "by_user": user_info.get("user_name", "User")
-                            })
-                        except:
-                            pass
+                if session_id in self.canvas_sessions:
+                    for uid in self.canvas_sessions[session_id]["users"]:
+                         if uid in self.user_sockets:
+                             try:
+                                 await self.user_sockets[uid].send_json({
+                                     "type": "canvas_cleared",
+                                     "session_id": session_id,
+                                     "by_user": user_name,
+                                     "deleted_count": deleted_count
+                                 })
+                             except:
+                                 pass
+                
+                print(f"Cleared {deleted_count} drawings from session {session_id} by user {user_name}")
+            except Exception as e:
+                print(f"Error clearing canvas drawings: {e}")
+                await websocket.send_json({
+                    "type": "error",
+                    "message": f"清空画板失败: {str(e)}"
+                })
         
         elif message_type == "canvas_leave":
             # Leave canvas session
-            session_id = message.get("session_id")
             if session_id in self.canvas_sessions and user_id in self.canvas_sessions[session_id]["users"]:
                 del self.canvas_sessions[session_id]["users"][user_id]
                 
                 # Notify other users
                 for uid in self.canvas_sessions[session_id]["users"]:
-                    if uid in self.user_sockets:
-                        try:
-                            await self.user_sockets[uid].send_json({
-                                "type": "canvas_user_left",
-                                "session_id": session_id,
-                                "user_name": user_info.get("user_name", "User"),
-                                "user_count": len(self.canvas_sessions[session_id]["users"])
-                            })
-                        except:
-                            pass
+                         if uid in self.user_sockets:
+                             try:
+                                 await self.user_sockets[uid].send_json({
+                                     "type": "canvas_user_left",
+                                     "session_id": session_id,
+                                     "user_name": user_name,
+                                     "user_count": len(self.canvas_sessions[session_id]["users"])
+                                 })
+                             except:
+                                 pass
     
     async def handle_pong_message(self, websocket, message, user_id, user_info):
         """Handle ping pong game messages"""
@@ -173,7 +222,7 @@ class GameWebSocketHandler:
                         pass
         
         elif message_type in ["pong_key", "pong_serve", "pong_collision", "pong_score", 
-                             "pong_game_start", "pong_game_pause", "pong_game_reset", "pong_game_over"]:
+                            "pong_game_start", "pong_game_pause", "pong_game_reset", "pong_game_over"]:
             # Forward game messages to other users in the session
             session_id = message.get("session_id")
             if session_id in self.pong_sessions:

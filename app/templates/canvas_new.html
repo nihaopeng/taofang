@@ -720,9 +720,28 @@
         
         function handleWebSocketMessage(message) {
             switch (message.type) {
-                case 'canvas_users_update':
-                    updateUsersList(message.users);
-                    break;
+                 case 'canvas_joined':
+                     // 处理加入画板响应，包含现有绘画
+                     updateUsersList(message.users);
+                     updateStatus('connected', `✅ 已连接到画板 (${message.user_count}人在线)`);
+                     
+                     // 绘制现有的绘画内容
+                     if (message.existing_drawings && message.existing_drawings.length > 0) {
+                         logEvent(`加载了 ${message.existing_drawings.length} 个现有绘画`);
+                         drawExistingDrawings(message.existing_drawings);
+                     }
+                     
+                     // 显示画板统计信息
+                     if (message.canvas_stats) {
+                         logEvent(`画板统计: ${message.canvas_stats.total_drawings}个绘画, ${message.canvas_stats.total_users}个用户`);
+                     }
+                     break;
+                     
+                 case 'canvas_user_joined':
+                     // 用户加入通知
+                     updateUsersList(message.users);
+                     logEvent(`伙伴加入: ${message.user.name}`);
+                     break;
                     
                 case 'canvas_draw':
                     // 绘制伙伴的绘画
@@ -737,14 +756,14 @@
                     }
                     break;
                     
-                case 'canvas_cleared':
-                    // 伙伴清空了画板
-                    if (message.user_id !== userId) {
-                        ctx.fillStyle = 'white';
-                        ctx.fillRect(0, 0, canvas.width, canvas.height);
-                        logEvent(`伙伴清空了画板: ${message.user_name}`);
-                    }
-                    break;
+                 case 'canvas_cleared':
+                     // 伙伴清空了画板
+                     if (message.by_user !== userName) {
+                         ctx.fillStyle = 'white';
+                         ctx.fillRect(0, 0, canvas.width, canvas.height);
+                         logEvent(`伙伴清空了画板: ${message.by_user} (删除了${message.deleted_count}个绘画)`);
+                     }
+                     break;
                     
                 case 'pong':
                     // 心跳响应
@@ -755,33 +774,62 @@
             }
         }
         
-        function updateUsersList(users) {
-            const usersSection = document.getElementById('users-section');
-            usersSection.innerHTML = '';
-            
-            Object.values(users).forEach(user => {
-                const userBadge = document.createElement('div');
-                userBadge.className = 'user-badge';
-                userBadge.innerHTML = `
-                    <div class="user-color" style="background-color: ${user.color};"></div>
-                    <span style="font-weight: bold;">${user.name}</span>
-                    <span style="font-size: 0.9em; color: #4ecdc4;">● 在线</span>
-                `;
-                usersSection.appendChild(userBadge);
-            });
-            
-            // 更新伙伴状态
-            const partnerStatus = document.getElementById('partner-status');
-            const userCount = Object.keys(users).length;
-            
-            if (userCount > 1) {
-                partnerStatus.textContent = ` 👥 ${userCount-1} 位伙伴在线`;
-                partnerStatus.style.color = '#4ecdc4';
-            } else {
-                partnerStatus.textContent = ' ⏳ 等待伙伴加入...';
-                partnerStatus.style.color = '#ff6b6b';
-            }
-        }
+         // ==================== 绘制现有绘画 ====================
+         function drawExistingDrawings(drawings) {
+             // 保存当前绘制状态
+             const originalStrokeStyle = ctx.strokeStyle;
+             const originalLineWidth = ctx.lineWidth;
+             
+             drawings.forEach(drawing => {
+                 // 设置绘画属性
+                 ctx.strokeStyle = drawing.color;
+                 ctx.lineWidth = drawing.brush_size;
+                 
+                 // 绘制线条
+                 ctx.beginPath();
+                 ctx.moveTo(drawing.from_x, drawing.from_y);
+                 ctx.lineTo(drawing.to_x, drawing.to_y);
+                 ctx.stroke();
+             });
+             
+             // 恢复原始绘制状态
+             ctx.strokeStyle = originalStrokeStyle;
+             ctx.lineWidth = originalLineWidth;
+         }
+         
+         function updateUsersList(users) {
+             const usersSection = document.getElementById('users-section');
+             usersSection.innerHTML = '';
+             
+             // 处理用户列表（可能是数组或对象）
+             let userArray = users;
+             if (!Array.isArray(users)) {
+                 userArray = Object.values(users);
+             }
+             
+             userArray.forEach(user => {
+                 const userBadge = document.createElement('div');
+                 userBadge.className = 'user-badge';
+                 userBadge.innerHTML = `
+                     <div class="user-color" style="background-color: ${user.color};"></div>
+                     <span style="font-weight: bold;">${user.name}</span>
+                     <span style="font-size: 0.9em; color: #4ecdc4;">● 在线</span>
+                 `;
+                 usersSection.appendChild(userBadge);
+             });
+             
+             // 更新伙伴状态
+             const partnerStatus = document.getElementById('partner-status');
+             const userCount = userArray.length;
+             
+             if (userCount > 1) {
+                 partnerStatus.textContent = ` 👥 ${userCount-1} 位伙伴在线`;
+                 partnerStatus.style.color = '#4ecdc4';
+             } else {
+                 partnerStatus.textContent = ' ⏳ 等待伙伴加入...';
+                 partnerStatus.style.color = '#ff6b6b';
+             }
+         }
         
         function updateStatus(status, text) {
             const statusElement = document.getElementById('status-text');
