@@ -32,7 +32,7 @@ WantedBy=multi-user.target
 EOF
 
 # open double stack
-if ! grep -q "net.ipv6.bindv6only=0" /etc/sysctl.conf; then
+if ! grep -q "net.ipv6.bindv6only=0" /etc/sysctl.conf || ! grep -q "net.ipv6.bindv6only = 0" /etc/sysctl.conf; then
     echo "Enabling dual-stack support..."
     echo "net.ipv6.bindv6only=0" >> /etc/sysctl.conf
 fi
