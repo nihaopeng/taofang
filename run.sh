@@ -9,7 +9,7 @@ pip install -r requirements.txt
 
 # check if env exists
 if [ ! -d ".env" ]; then
-    mv .env.example .env
+    cp .env.example .env
     vim .env
 fi
 
@@ -32,7 +32,6 @@ WantedBy=multi-user.target
 EOF
 
 # start service
-mv taofang.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable taofang.service
 systemctl start taofang.service
