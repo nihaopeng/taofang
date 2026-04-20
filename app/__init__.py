@@ -69,7 +69,7 @@ def create_app():
             Route("/api/checkin-insights", api.get_checkin_insights, name="checkin_insights"),
             Route("/games", games.games_dashboard, name="games_dashboard"),
             Route("/game/canvas", games.canvas_game, name="canvas_game"),
-            Route("/game/tank", games.tank_battle, name="tank_battle"),
+            Route("/game/pingpong", games.ping_pong, name="ping_pong"),
             Route("/game/mobile-test", games.mobile_test, name="mobile_test"),
             Route("/game/canvas-simple", games.canvas_simple, name="canvas_simple"),
 

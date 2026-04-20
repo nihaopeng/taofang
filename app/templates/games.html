@@ -212,8 +212,8 @@
             function startGame(gameId) {
                 if (gameId === 'canvas') {
                     window.location.href = '/game/canvas';
-                } else if (gameId === 'tank') {
-                    window.location.href = '/game/tank';
+                } else if (gameId === 'pingpong') {
+                    window.location.href = '/game/pingpong';
                 }
             }
             
@@ -227,7 +227,7 @@
         function checkGameStatus() {
             // For now, we'll simulate online status
             // In a real implementation, you would check with the server
-            const games = ['canvas', 'tank'];
+            const games = ['canvas', 'pingpong'];
             
             games.forEach(gameId => {
                 const statusElement = document.getElementById(`status-${gameId}`);

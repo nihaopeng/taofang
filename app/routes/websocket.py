@@ -12,7 +12,7 @@ class GameWebSocketHandler:
     
     def __init__(self):
         self.canvas_sessions = {}
-        self.tank_sessions = {}
+        self.pong_sessions = {}
         self.user_sockets = {}  # user_id: websocket
     
     async def handle_message(self, websocket, message, user_info):
@@ -22,8 +22,8 @@ class GameWebSocketHandler:
         
         if message_type.startswith("canvas_"):
             await self.handle_canvas_message(websocket, message, user_id, user_info)
-        elif message_type.startswith("tank_"):
-            await self.handle_tank_message(websocket, message, user_id, user_info)
+        elif message_type.startswith("pong_"):
+            await self.handle_pong_message(websocket, message, user_id, user_info)
         elif message_type == "mood_update":
             await self.handle_mood_message(websocket, message, user_info)
         elif message_type == "ping":
@@ -125,22 +125,22 @@ class GameWebSocketHandler:
                         except:
                             pass
     
-    async def handle_tank_message(self, websocket, message, user_id, user_info):
-        """Handle tank battle messages"""
+    async def handle_pong_message(self, websocket, message, user_id, user_info):
+        """Handle ping pong game messages"""
         message_type = message.get("type")
         
-        if message_type == "tank_join":
-            # Join or create tank battle session
-            session_id = message.get("session_id", "tank_battle_default")
+        if message_type == "pong_join":
+            # Join or create ping pong session
+            session_id = message.get("session_id", "ping_pong_default")
             is_player1 = message.get("is_player1", False)
             
-            if session_id not in self.tank_sessions:
-                self.tank_sessions[session_id] = {
+            if session_id not in self.pong_sessions:
+                self.pong_sessions[session_id] = {
                     "users": {},
                     "created_at": datetime.now().isoformat()
                 }
             
-            self.tank_sessions[session_id]["users"][user_id] = {
+            self.pong_sessions[session_id]["users"][user_id] = {
                 "name": user_info.get("user_name", "User"),
                 "joined_at": datetime.now().isoformat(),
                 "color": message.get("color", "#ff6b6b"),
@@ -152,53 +152,53 @@ class GameWebSocketHandler:
             
             # Send join confirmation
             await websocket.send_json({
-                "type": "tank_joined",
+                "type": "pong_joined",
                 "session_id": session_id,
-                "user_count": len(self.tank_sessions[session_id]["users"]),
-                "users": list(self.tank_sessions[session_id]["users"].values()),
+                "user_count": len(self.pong_sessions[session_id]["users"]),
+                "users": list(self.pong_sessions[session_id]["users"].values()),
                 "your_role": "player1" if is_player1 else "player2"
             })
             
             # Notify other users in the session
-            for uid, user_data in self.tank_sessions[session_id]["users"].items():
+            for uid, user_data in self.pong_sessions[session_id]["users"].items():
                 if uid != user_id and uid in self.user_sockets:
                     try:
                         await self.user_sockets[uid].send_json({
-                            "type": "tank_users_update",
+                            "type": "pong_users_update",
                             "session_id": session_id,
-                            "users": self.tank_sessions[session_id]["users"],
-                            "new_user": self.tank_sessions[session_id]["users"][user_id]
+                            "users": self.pong_sessions[session_id]["users"],
+                            "new_user": self.pong_sessions[session_id]["users"][user_id]
                         })
                     except:
                         pass
         
-        elif message_type in ["tank_key", "tank_fire", "tank_hit", "tank_game_start", 
-                             "tank_game_pause", "tank_game_reset", "tank_game_over"]:
+        elif message_type in ["pong_key", "pong_serve", "pong_collision", "pong_score", 
+                             "pong_game_start", "pong_game_pause", "pong_game_reset", "pong_game_over"]:
             # Forward game messages to other users in the session
             session_id = message.get("session_id")
-            if session_id in self.tank_sessions:
-                for uid in self.tank_sessions[session_id]["users"]:
+            if session_id in self.pong_sessions:
+                for uid in self.pong_sessions[session_id]["users"]:
                     if uid != user_id and uid in self.user_sockets:
                         try:
                             await self.user_sockets[uid].send_json(message)
                         except:
                             pass
         
-        elif message_type == "tank_leave":
-            # Leave tank battle session
+        elif message_type == "pong_leave":
+            # Leave ping pong session
             session_id = message.get("session_id")
-            if session_id in self.tank_sessions and user_id in self.tank_sessions[session_id]["users"]:
-                del self.tank_sessions[session_id]["users"][user_id]
+            if session_id in self.pong_sessions and user_id in self.pong_sessions[session_id]["users"]:
+                del self.pong_sessions[session_id]["users"][user_id]
                 
                 # Notify other users
-                for uid in self.tank_sessions[session_id]["users"]:
+                for uid in self.pong_sessions[session_id]["users"]:
                     if uid in self.user_sockets:
                         try:
                             await self.user_sockets[uid].send_json({
-                                "type": "tank_user_left",
+                                "type": "pong_user_left",
                                 "session_id": session_id,
                                 "user_name": user_info.get("user_name", "User"),
-                                "user_count": len(self.tank_sessions[session_id]["users"])
+                                "user_count": len(self.pong_sessions[session_id]["users"])
                             })
                         except:
                             pass

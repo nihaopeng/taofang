@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>心动坐标 - 双人坦克大战</title>
+    <title>心动坐标 - 双人乒乓球</title>
     <link rel="stylesheet" href="/static/css/style.css">
     <style>
         * {
@@ -114,7 +114,7 @@
         @media (min-width: 769px) {
             #game-canvas {
                 width: 800px;
-                height: 600px;
+                height: 500px;
             }
         }
         
@@ -122,8 +122,8 @@
         @media (max-width: 768px) {
             #game-canvas {
                 width: 100%;
-                height: 60vh;
-                max-height: 500px;
+                height: 50vh;
+                max-height: 400px;
             }
             
             .game-header h1 {
@@ -155,32 +155,9 @@
         }
         
         .player-score {
-            font-size: 2em;
+            font-size: 3em;
             color: #ffd166;
             margin: 10px 0;
-        }
-        
-        .player-health {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 10px;
-            margin-top: 10px;
-        }
-        
-        .health-bar {
-            width: 100px;
-            height: 10px;
-            background: rgba(255, 255, 255, 0.2);
-            border-radius: 5px;
-            overflow: hidden;
-        }
-        
-        .health-fill {
-            height: 100%;
-            background: linear-gradient(90deg, #ff6b6b 0%, #4ecdc4 100%);
-            border-radius: 5px;
-            transition: width 0.3s ease;
         }
         
         .controls-section {
@@ -368,17 +345,17 @@
         
         .mobile-buttons {
             display: grid;
-            grid-template-columns: repeat(3, 1fr);
+            grid-template-columns: repeat(2, 1fr);
             gap: 10px;
         }
         
         .mobile-btn {
-            padding: 15px;
+            padding: 20px;
             background: rgba(255, 255, 255, 0.2);
             border: none;
             border-radius: 10px;
             color: white;
-            font-size: 1.2em;
+            font-size: 1.5em;
             font-weight: bold;
             cursor: pointer;
             touch-action: manipulation;
@@ -421,14 +398,22 @@
         .debug-btn:hover {
             background: #2c3e50;
         }
+        
+        .game-state {
+            text-align: center;
+            margin: 10px 0;
+            font-size: 1.2em;
+            color: #ffd166;
+            font-weight: bold;
+        }
     </style>
 </head>
 <body>
     <div class="game-container">
         <!-- Header -->
         <div class="game-header">
-            <h1>🎮 双人坦克大战</h1>
-            <p>欢迎，{{ user_name }}！与你的另一半一起战斗吧！</p>
+            <h1>🏓 双人乒乓球</h1>
+            <p>欢迎，{{ user_name }}！与你的另一半一起对战吧！</p>
             <a href="/games" class="back-btn">← 返回游戏大厅</a>
         </div>
         
@@ -436,6 +421,11 @@
         <div class="connection-status" id="connection-status">
             <span id="status-text">正在连接服务器...</span>
             <span id="partner-status"></span>
+        </div>
+        
+        <!-- Game State -->
+        <div class="game-state" id="game-state">
+            等待开始...
         </div>
         
         <!-- Game Area -->
@@ -449,23 +439,13 @@
                 <div class="player-info">
                     <div class="player-name" id="player1-name">玩家1</div>
                     <div class="player-score" id="player1-score">0</div>
-                    <div class="player-health">
-                        <span>生命值:</span>
-                        <div class="health-bar">
-                            <div class="health-fill" id="player1-health" style="width: 100%"></div>
-                        </div>
-                    </div>
+                    <div>左侧球拍</div>
                 </div>
                 
                 <div class="player-info">
                     <div class="player-name" id="player2-name">玩家2</div>
                     <div class="player-score" id="player2-score">0</div>
-                    <div class="player-health">
-                        <span>生命值:</span>
-                        <div class="health-bar">
-                            <div class="health-fill" id="player2-health" style="width: 100%"></div>
-                        </div>
-                    </div>
+                    <div>右侧球拍</div>
                 </div>
             </div>
             
@@ -473,12 +453,12 @@
             <div class="controls-section">
                 <div class="controls-title">🎮 游戏控制</div>
                 <div class="keyboard-controls">
-                    <div class="control-key">W/A/S/D</div>
-                    <div class="control-key">方向键</div>
+                    <div class="control-key">W/S</div>
+                    <div class="control-key">↑/↓</div>
                     <div class="control-key">空格键</div>
                     <div class="control-desc">玩家1移动</div>
                     <div class="control-desc">玩家2移动</div>
-                    <div class="control-desc">发射炮弹</div>
+                    <div class="control-desc">发球/暂停</div>
                 </div>
                 
                 <div class="action-buttons">
@@ -493,12 +473,13 @@
         <div class="mobile-controls" id="mobile-controls">
             <h4>📱 移动端控制</h4>
             <div class="mobile-buttons">
-                <button class="mobile-btn" id="mobile-up">↑</button>
-                <button class="mobile-btn" id="mobile-fire">💥</button>
-                <button class="mobile-btn" id="mobile-up2">↑</button>
-                <button class="mobile-btn" id="mobile-left">←</button>
-                <button class="mobile-btn" id="mobile-down">↓</button>
-                <button class="mobile-btn" id="mobile-right">→</button>
+                <button class="mobile-btn" id="mobile-up">↑ 上移</button>
+                <button class="mobile-btn" id="mobile-down">↓ 下移</button>
+                <button class="mobile-btn" id="mobile-up2">↑ 上移</button>
+                <button class="mobile-btn" id="mobile-down2">↓ 下移</button>
+            </div>
+            <div style="margin-top: 10px;">
+                <button class="mobile-btn" id="mobile-serve" style="grid-column: span 2;">🎾 发球</button>
             </div>
         </div>
         
@@ -514,28 +495,29 @@
                 <div class="instruction-card">
                     <h4>游戏目标</h4>
                     <ul>
-                        <li>控制你的坦克击败对手</li>
-                        <li>每击中对手一次得1分</li>
-                        <li>生命值归零则游戏结束</li>
-                        <li>先达到10分者获胜</li>
+                        <li>控制球拍击打乒乓球</li>
+                        <li>让球越过对手的球拍得分</li>
+                        <li>每局先得11分者获胜</li>
+                        <li>赢得3局者获得比赛胜利</li>
                     </ul>
                 </div>
                 
                 <div class="instruction-card">
                     <h4>游戏规则</h4>
                     <ul>
-                        <li>坦克可以在地图上自由移动</li>
-                        <li>发射炮弹攻击对手</li>
-                        <li>躲避对手的炮弹</li>
-                        <li>利用障碍物进行掩护</li>
+                        <li>球碰到球拍会反弹</li>
+                        <li>球碰到墙壁会反弹</li>
+                        <li>球出界则对手得分</li>
+                        <li>每5分交换发球权</li>
                     </ul>
                 </div>
                 
                 <div class="instruction-card">
                     <h4>操作说明</h4>
                     <ul>
-                        <li>玩家1: W/A/S/D 移动，空格键发射</li>
-                        <li>玩家2: 方向键移动，回车键发射</li>
+                        <li>玩家1: W/S 键移动球拍</li>
+                        <li>玩家2: 上/下方向键移动球拍</li>
+                        <li>空格键: 发球/暂停游戏</li>
                         <li>移动端: 使用屏幕按钮控制</li>
                         <li>需要两人同时在线才能开始游戏</li>
                     </ul>
@@ -550,6 +532,6 @@
         <div class="log" id="event-log"></div>
     </div>
     
-    <script src="/static/js/tank_battle.js"></script>
+    <script src="/static/js/ping_pong.js"></script>
 </body>
 </html>

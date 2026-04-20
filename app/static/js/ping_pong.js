@@ -8,40 +8,48 @@ let gameState = {
     paused: false,
     gameOver: false,
     winner: null,
-    sessionId: 'tank_battle_default',
+    sessionId: 'ping_pong_default',
     player1: {
         id: 'player1',
         name: '玩家1',
         score: 0,
-        health: 100,
         color: '#ff6b6b',
-        position: { x: 100, y: 300 },
-        direction: 0, // 角度，0表示向右
-        speed: 3,
-        lastFire: 0,
-        fireRate: 500 // 发射间隔(ms)
+        paddle: {
+            x: 50,
+            y: 200,
+            width: 15,
+            height: 100,
+            speed: 8
+        }
     },
     player2: {
         id: 'player2',
         name: '玩家2',
         score: 0,
-        health: 100,
         color: '#4ecdc4',
-        position: { x: 700, y: 300 },
-        direction: Math.PI, // 向左
-        speed: 3,
-        lastFire: 0,
-        fireRate: 500
+        paddle: {
+            x: 735,
+            y: 200,
+            width: 15,
+            height: 100,
+            speed: 8
+        }
     },
-    bullets: [],
-    obstacles: [
-        { x: 300, y: 200, width: 100, height: 50 },
-        { x: 400, y: 400, width: 100, height: 50 },
-        { x: 200, y: 400, width: 50, height: 100 },
-        { x: 550, y: 200, width: 50, height: 100 }
-    ],
+    ball: {
+        x: 400,
+        y: 250,
+        radius: 10,
+        speed: 5,
+        velocityX: 5,
+        velocityY: 5,
+        color: '#ffd166',
+        serving: true,
+        serveTo: 'player1' // 谁发球
+    },
     keys: {},
-    lastUpdate: Date.now()
+    lastUpdate: Date.now(),
+    maxScore: 11,
+    gamesWon: { player1: 0, player2: 0 }
 };
 
 // WebSocket连接
@@ -89,12 +97,18 @@ function initGame() {
     if (deviceInfo.isMobile) {
         // 移动端：自适应宽度
         canvas.width = Math.min(containerWidth, 800);
-        canvas.height = Math.min(containerWidth * 0.7, 500);
+        canvas.height = Math.min(containerWidth * 0.7, 400);
     } else {
         // PC端：固定尺寸
         canvas.width = 800;
-        canvas.height = 600;
+        canvas.height = 500;
     }
+    
+    // 调整球拍位置
+    gameState.player1.paddle.x = 50;
+    gameState.player1.paddle.y = canvas.height / 2 - 50;
+    gameState.player2.paddle.x = canvas.width - 65;
+    gameState.player2.paddle.y = canvas.height / 2 - 50;
     
     logEvent(`游戏画布尺寸: ${canvas.width}x${canvas.height}`);
     
@@ -133,7 +147,7 @@ function setupEventListeners() {
     });
     
     // 移动端按钮事件
-    const mobileButtons = ['mobile-up', 'mobile-left', 'mobile-down', 'mobile-right', 'mobile-fire', 'mobile-up2'];
+    const mobileButtons = ['mobile-up', 'mobile-down', 'mobile-up2', 'mobile-down2', 'mobile-serve'];
     mobileButtons.forEach(btnId => {
         const btn = document.getElementById(btnId);
         if (btn) {
@@ -166,7 +180,7 @@ function handleKeyPress(key, pressed) {
     // 发送按键消息给伙伴
     if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({
-            type: 'tank_key',
+            type: 'pong_key',
             session_id: gameState.sessionId,
             key: key,
             pressed: pressed,
@@ -176,15 +190,14 @@ function handleKeyPress(key, pressed) {
     }
     
     // 本地处理按键
-    const player = isPlayer1 ? gameState.player1 : gameState.player2;
-    
     if (pressed) {
         switch(key) {
             case ' ':
-                if (isPlayer1) fireBullet(player);
-                break;
-            case 'Enter':
-                if (!isPlayer1) fireBullet(player);
+                if (gameState.ball.serving) {
+                    serveBall();
+                } else {
+                    togglePause();
+                }
                 break;
         }
     }
@@ -195,11 +208,10 @@ function handleMobileButton(buttonId, pressed) {
     
     const keyMap = {
         'mobile-up': isPlayer1 ? 'w' : 'ArrowUp',
-        'mobile-left': isPlayer1 ? 'a' : 'ArrowLeft',
         'mobile-down': isPlayer1 ? 's' : 'ArrowDown',
-        'mobile-right': isPlayer1 ? 'd' : 'ArrowRight',
-        'mobile-fire': isPlayer1 ? ' ' : 'Enter',
-        'mobile-up2': isPlayer1 ? 'ArrowUp' : 'w'
+        'mobile-up2': isPlayer1 ? 'ArrowUp' : 'w',
+        'mobile-down2': isPlayer1 ? 'ArrowDown' : 's',
+        'mobile-serve': ' '
     };
     
     const key = keyMap[buttonId];
@@ -217,16 +229,20 @@ function startGame() {
     gameState.paused = false;
     gameState.gameOver = false;
     
+    // 重置球的位置
+    resetBall();
+    
     // 发送游戏开始消息
     if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({
-            type: 'tank_game_start',
+            type: 'pong_game_start',
             session_id: gameState.sessionId,
             user_id: userId,
             user_name: userName
         }));
     }
     
+    updateGameStateText('游戏开始！');
     logEvent('游戏开始！');
 }
 
@@ -237,7 +253,7 @@ function togglePause() {
     
     if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({
-            type: 'tank_game_pause',
+            type: 'pong_game_pause',
             session_id: gameState.sessionId,
             paused: gameState.paused,
             user_id: userId,
@@ -245,22 +261,17 @@ function togglePause() {
         }));
     }
     
+    updateGameStateText(gameState.paused ? '游戏暂停' : '游戏继续');
     logEvent(gameState.paused ? '游戏暂停' : '游戏继续');
 }
 
 function resetGame() {
     // 重置游戏状态
     gameState.player1.score = 0;
-    gameState.player1.health = 100;
-    gameState.player1.position = { x: 100, y: 300 };
-    gameState.player1.direction = 0;
-    
     gameState.player2.score = 0;
-    gameState.player2.health = 100;
-    gameState.player2.position = { x: 700, y: 300 };
-    gameState.player2.direction = Math.PI;
+    gameState.gamesWon = { player1: 0, player2: 0 };
     
-    gameState.bullets = [];
+    resetBall();
     gameState.running = false;
     gameState.paused = false;
     gameState.gameOver = false;
@@ -268,11 +279,12 @@ function resetGame() {
     
     // 更新UI
     updateUI();
+    updateGameStateText('等待开始...');
     
     // 发送重置消息
     if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({
-            type: 'tank_game_reset',
+            type: 'pong_game_reset',
             session_id: gameState.sessionId,
             user_id: userId,
             user_name: userName
@@ -282,36 +294,42 @@ function resetGame() {
     logEvent('游戏已重置');
 }
 
-function fireBullet(player) {
-    const now = Date.now();
-    if (now - player.lastFire < player.fireRate) return;
+function resetBall() {
+    gameState.ball.x = canvas.width / 2;
+    gameState.ball.y = canvas.height / 2;
+    gameState.ball.serving = true;
     
-    player.lastFire = now;
+    // 随机决定发球方向
+    gameState.ball.velocityX = (Math.random() > 0.5 ? 1 : -1) * gameState.ball.speed;
+    gameState.ball.velocityY = (Math.random() * 2 - 1) * gameState.ball.speed;
     
-    const bullet = {
-        x: player.position.x + Math.cos(player.direction) * 25,
-        y: player.position.y + Math.sin(player.direction) * 25,
-        vx: Math.cos(player.direction) * 8,
-        vy: Math.sin(player.direction) * 8,
-        owner: player.id,
-        color: player.color,
-        createdAt: now
-    };
+    // 决定谁发球
+    gameState.ball.serveTo = (gameState.player1.score + gameState.player2.score) % 2 === 0 ? 'player1' : 'player2';
     
-    gameState.bullets.push(bullet);
+    if (gameState.ball.serveTo === 'player1') {
+        gameState.ball.x = gameState.player1.paddle.x + gameState.player1.paddle.width + 20;
+    } else {
+        gameState.ball.x = gameState.player2.paddle.x - 20;
+        gameState.ball.velocityX = -gameState.ball.velocityX;
+    }
+}
+
+function serveBall() {
+    if (!gameState.ball.serving) return;
     
-    // 发送发射消息
+    gameState.ball.serving = false;
+    
+    // 发送发球消息
     if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({
-            type: 'tank_fire',
+            type: 'pong_serve',
             session_id: gameState.sessionId,
-            bullet: bullet,
             user_id: userId,
             user_name: userName
         }));
     }
     
-    logEvent(`${player.name} 发射了炮弹`);
+    logEvent('发球！');
 }
 
 function updateGame() {
@@ -321,152 +339,180 @@ function updateGame() {
     const deltaTime = now - gameState.lastUpdate;
     gameState.lastUpdate = now;
     
-    // 更新玩家1位置
-    updatePlayerPosition(gameState.player1);
+    // 更新球拍位置
+    updatePaddlePosition(gameState.player1);
+    updatePaddlePosition(gameState.player2);
     
-    // 更新玩家2位置
-    updatePlayerPosition(gameState.player2);
-    
-    // 更新炮弹位置
-    for (let i = gameState.bullets.length - 1; i >= 0; i--) {
-        const bullet = gameState.bullets[i];
-        bullet.x += bullet.vx;
-        bullet.y += bullet.vy;
+    // 如果球在发球状态，不移动
+    if (!gameState.ball.serving) {
+        // 更新球的位置
+        gameState.ball.x += gameState.ball.velocityX;
+        gameState.ball.y += gameState.ball.velocityY;
         
-        // 边界检查
-        if (bullet.x < 0 || bullet.x > canvas.width || 
-            bullet.y < 0 || bullet.y > canvas.height ||
-            now - bullet.createdAt > 3000) {
-            gameState.bullets.splice(i, 1);
-            continue;
+        // 球与上下墙壁碰撞
+        if (gameState.ball.y - gameState.ball.radius < 0 || 
+            gameState.ball.y + gameState.ball.radius > canvas.height) {
+            gameState.ball.velocityY = -gameState.ball.velocityY;
         }
         
-        // 碰撞检测
-        checkBulletCollision(bullet, i);
-    }
-    
-    // 检查游戏结束条件
-    if (gameState.player1.health <= 0 || gameState.player2.health <= 0) {
-        gameState.gameOver = true;
-        gameState.winner = gameState.player1.health > 0 ? gameState.player1 : gameState.player2;
+        // 球与球拍碰撞
+        checkPaddleCollision(gameState.player1);
+        checkPaddleCollision(gameState.player2);
         
-        if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({
-                type: 'tank_game_over',
-                session_id: gameState.sessionId,
-                winner: gameState.winner.id,
-                user_id: userId,
-                user_name: userName
-            }));
-        }
-        
-        logEvent(`游戏结束！${gameState.winner.name} 获胜！`);
+        // 检查得分
+        checkScore();
     }
     
     // 更新UI
     updateUI();
 }
 
-function updatePlayerPosition(player) {
-    // 根据按键更新方向
-    const keys = gameState.keys;
-    let moveX = 0, moveY = 0;
+function updatePaddlePosition(player) {
+    const paddle = player.paddle;
+    let moveY = 0;
     
     if (player.id === 'player1') {
-        if (keys['w'] || keys['W']) moveY -= 1;
-        if (keys['s'] || keys['S']) moveY += 1;
-        if (keys['a'] || keys['A']) moveX -= 1;
-        if (keys['d'] || keys['D']) moveX += 1;
+        if (gameState.keys['w'] || gameState.keys['W']) moveY -= 1;
+        if (gameState.keys['s'] || gameState.keys['S']) moveY += 1;
     } else {
-        if (keys['ArrowUp']) moveY -= 1;
-        if (keys['ArrowDown']) moveY += 1;
-        if (keys['ArrowLeft']) moveX -= 1;
-        if (keys['ArrowRight']) moveX += 1;
+        if (gameState.keys['ArrowUp']) moveY -= 1;
+        if (gameState.keys['ArrowDown']) moveY += 1;
     }
     
-    // 更新方向
-    if (moveX !== 0 || moveY !== 0) {
-        player.direction = Math.atan2(moveY, moveX);
-    }
-    
-    // 计算新位置
-    const newX = player.position.x + Math.cos(player.direction) * player.speed;
-    const newY = player.position.y + Math.sin(player.direction) * player.speed;
+    // 更新位置
+    paddle.y += moveY * paddle.speed;
     
     // 边界检查
-    if (newX >= 20 && newX <= canvas.width - 20) {
-        player.position.x = newX;
-    }
-    if (newY >= 20 && newY <= canvas.height - 20) {
-        player.position.y = newY;
-    }
+    if (paddle.y < 0) paddle.y = 0;
+    if (paddle.y + paddle.height > canvas.height) paddle.y = canvas.height - paddle.height;
+}
+
+function checkPaddleCollision(player) {
+    const paddle = player.paddle;
+    const ball = gameState.ball;
     
-    // 障碍物碰撞检测
-    for (const obstacle of gameState.obstacles) {
-        if (checkCollision(player.position.x, player.position.y, 20, obstacle)) {
-            // 如果碰撞，回退到之前的位置
-            player.position.x -= Math.cos(player.direction) * player.speed;
-            player.position.y -= Math.sin(player.direction) * player.speed;
-            break;
+    // 检查碰撞
+    if (ball.x - ball.radius < paddle.x + paddle.width &&
+        ball.x + ball.radius > paddle.x &&
+        ball.y - ball.radius < paddle.y + paddle.height &&
+        ball.y + ball.radius > paddle.y) {
+        
+        // 计算碰撞点
+        let collidePoint = (ball.y - (paddle.y + paddle.height / 2));
+        collidePoint = collidePoint / (paddle.height / 2);
+        
+        // 计算反弹角度
+        let angleRad = collidePoint * (Math.PI / 4);
+        
+        // 计算方向
+        let direction = (ball.x < canvas.width / 2) ? 1 : -1;
+        
+        // 更新球的速度
+        ball.velocityX = direction * ball.speed * Math.cos(angleRad);
+        ball.velocityY = ball.speed * Math.sin(angleRad);
+        
+        // 增加球速
+        ball.speed += 0.2;
+        
+        // 发送碰撞消息
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({
+                type: 'pong_collision',
+                session_id: gameState.sessionId,
+                player: player.id,
+                ball: gameState.ball,
+                user_id: userId,
+                user_name: userName
+            }));
         }
+        
+        logEvent(`${player.name} 击中了球`);
     }
 }
 
-function checkBulletCollision(bullet, bulletIndex) {
-    // 检查与玩家的碰撞
-    const players = [gameState.player1, gameState.player2];
-    for (const player of players) {
-        if (bullet.owner === player.id) continue; // 不能打自己
+function checkScore() {
+    const ball = gameState.ball;
+    
+    // 玩家2得分
+    if (ball.x - ball.radius < 0) {
+        gameState.player2.score++;
+        resetBall();
         
-        const dx = bullet.x - player.position.x;
-        const dy = bullet.y - player.position.y;
-        const distance = Math.sqrt(dx * dx + dy * dy);
-        
-        if (distance < 25) { // 碰撞半径
-            // 击中玩家
-            player.health -= 10;
-            if (player.health < 0) player.health = 0;
-            
-            // 给发射者加分
-            const shooter = bullet.owner === 'player1' ? gameState.player1 : gameState.player2;
-            shooter.score += 1;
-            
-            // 移除炮弹
-            gameState.bullets.splice(bulletIndex, 1);
-            
-            // 发送击中消息
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({
-                    type: 'tank_hit',
-                    session_id: gameState.sessionId,
-                    shooter: shooter.id,
-                    target: player.id,
-                    damage: 10,
-                    user_id: userId,
-                    user_name: userName
-                }));
-            }
-            
-            logEvent(`${shooter.name} 击中了 ${player.name}`);
-            return;
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({
+                type: 'pong_score',
+                session_id: gameState.sessionId,
+                player: 'player2',
+                score: gameState.player2.score,
+                user_id: userId,
+                user_name: userName
+            }));
         }
+        
+        logEvent(`玩家2得分！当前比分: ${gameState.player1.score}-${gameState.player2.score}`);
     }
     
-    // 检查与障碍物的碰撞
-    for (const obstacle of gameState.obstacles) {
-        if (checkCollision(bullet.x, bullet.y, 5, obstacle)) {
-            gameState.bullets.splice(bulletIndex, 1);
-            return;
+    // 玩家1得分
+    if (ball.x + ball.radius > canvas.width) {
+        gameState.player1.score++;
+        resetBall();
+        
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({
+                type: 'pong_score',
+                session_id: gameState.sessionId,
+                player: 'player1',
+                score: gameState.player1.score,
+                user_id: userId,
+                user_name: userName
+            }));
         }
+        
+        logEvent(`玩家1得分！当前比分: ${gameState.player1.score}-${gameState.player2.score}`);
+    }
+    
+    // 检查游戏结束
+    if (gameState.player1.score >= gameState.maxScore || gameState.player2.score >= gameState.maxScore) {
+        endGame();
     }
 }
 
-function checkCollision(x, y, radius, rect) {
-    const closestX = Math.max(rect.x, Math.min(x, rect.x + rect.width));
-    const closestY = Math.max(rect.y, Math.min(y, rect.y + rect.height));
-    const distanceX = x - closestX;
-    const distanceY = y - closestY;
-    return (distanceX * distanceX + distanceY * distanceY) < (radius * radius);
+function endGame() {
+    gameState.gameOver = true;
+    gameState.winner = gameState.player1.score > gameState.player2.score ? gameState.player1 : gameState.player2;
+    
+    // 更新获胜局数
+    gameState.gamesWon[gameState.winner.id]++;
+    
+    // 检查比赛结束（赢得3局）
+    if (gameState.gamesWon.player1 >= 3 || gameState.gamesWon.player2 >= 3) {
+        updateGameStateText(`比赛结束！${gameState.winner.name} 赢得比赛！`);
+    } else {
+        updateGameStateText(`第${gameState.gamesWon.player1 + gameState.gamesWon.player2}局结束！${gameState.winner.name} 获胜！`);
+        
+        // 3秒后开始下一局
+        setTimeout(() => {
+            gameState.player1.score = 0;
+            gameState.player2.score = 0;
+            resetBall();
+            gameState.gameOver = false;
+            gameState.running = true;
+            updateGameStateText('新的一局开始！');
+        }, 3000);
+    }
+    
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+            type: 'pong_game_over',
+            session_id: gameState.sessionId,
+            winner: gameState.winner.id,
+            games_won: gameState.gamesWon,
+            user_id: userId,
+            user_name: userName
+        }));
+    }
+    
+    logEvent(`游戏结束！${gameState.winner.name} 获胜！`);
 }
 
 // ==================== 渲染函数 ====================
@@ -475,33 +521,22 @@ function render() {
     ctx.fillStyle = '#0f3460';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     
-    // 绘制障碍物
-    ctx.fillStyle = '#555';
-    gameState.obstacles.forEach(obstacle => {
-        ctx.fillRect(obstacle.x, obstacle.y, obstacle.width, obstacle.height);
-        ctx.strokeStyle = '#333';
-        ctx.strokeRect(obstacle.x, obstacle.y, obstacle.width, obstacle.height);
-    });
+    // 绘制中线
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([10, 10]);
+    ctx.beginPath();
+    ctx.moveTo(canvas.width / 2, 0);
+    ctx.lineTo(canvas.width / 2, canvas.height);
+    ctx.stroke();
+    ctx.setLineDash([]);
     
-    // 绘制玩家
-    renderPlayer(gameState.player1);
-    renderPlayer(gameState.player2);
+    // 绘制球拍
+    renderPaddle(gameState.player1);
+    renderPaddle(gameState.player2);
     
-    // 绘制炮弹
-    gameState.bullets.forEach(bullet => {
-        ctx.fillStyle = bullet.color;
-        ctx.beginPath();
-        ctx.arc(bullet.x, bullet.y, 5, 0, Math.PI * 2);
-        ctx.fill();
-        
-        // 炮弹轨迹
-        ctx.strokeStyle = bullet.color + '80';
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.moveTo(bullet.x - bullet.vx * 2, bullet.y - bullet.vy * 2);
-        ctx.lineTo(bullet.x, bullet.y);
-        ctx.stroke();
-    });
+    // 绘制球
+    renderBall();
     
     // 绘制游戏状态
     if (gameState.gameOver) {
@@ -519,50 +554,75 @@ function render() {
         
         ctx.fillStyle = '#ff6b6b';
         ctx.font = '24px Arial';
-        ctx.fillText('点击"重新开始"按钮再来一局', canvas.width / 2, canvas.height / 2 + 80);
+        ctx.fillText(`局分: ${gameState.gamesWon.player1}-${gameState.gamesWon.player2}`, canvas.width / 2, canvas.height / 2 + 80);
     }
 }
 
-function renderPlayer(player) {
-    // 绘制坦克车身
-    ctx.save();
-    ctx.translate(player.position.x, player.position.y);
-    ctx.rotate(player.direction);
+function renderPaddle(player) {
+    const paddle = player.paddle;
     
-    // 车身
+    // 绘制球拍
     ctx.fillStyle = player.color;
-    ctx.fillRect(-20, -15, 40, 30);
+    ctx.fillRect(paddle.x, paddle.y, paddle.width, paddle.height);
     
-    // 炮管
-    ctx.fillStyle = '#333';
-    ctx.fillRect(0, -5, 30, 10);
-    
-    // 履带
-    ctx.fillStyle = '#222';
-    ctx.fillRect(-25, -20, 50, 5);
-    ctx.fillRect(-25, 15, 50, 5);
-    
-    ctx.restore();
+    // 绘制边框
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(paddle.x, paddle.y, paddle.width, paddle.height);
     
     // 绘制玩家名称
     ctx.fillStyle = player.color;
     ctx.font = 'bold 16px Arial';
     ctx.textAlign = 'center';
-    ctx.fillText(player.name, player.position.x, player.position.y - 30);
+    
+    if (player.id === 'player1') {
+        ctx.fillText(player.name, paddle.x + paddle.width / 2, paddle.y - 10);
+    } else {
+        ctx.fillText(player.name, paddle.x + paddle.width / 2, paddle.y - 10);
+    }
+}
+
+function renderBall() {
+    const ball = gameState.ball;
+    
+    // 绘制球
+    ctx.fillStyle = ball.color;
+    ctx.beginPath();
+    ctx.arc(ball.x, ball.y, ball.radius, 0, Math.PI * 2);
+    ctx.fill();
+    
+    // 绘制球的高光
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+    ctx.beginPath();
+    ctx.arc(ball.x - ball.radius * 0.3, ball.y - ball.radius * 0.3, ball.radius * 0.4, 0, Math.PI * 2);
+    ctx.fill();
+    
+    // 如果正在发球，显示发球指示
+    if (ball.serving) {
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.3)';
+        ctx.font = 'bold 20px Arial';
+        ctx.textAlign = 'center';
+        ctx.fillText('按空格键发球', canvas.width / 2, canvas.height - 30);
+    }
 }
 
 function updateUI() {
-    // 更新玩家1信息
+    // 更新玩家分数
     document.getElementById('player1-score').textContent = gameState.player1.score;
-    document.getElementById('player1-health').style.width = `${gameState.player1.health}%`;
-    
-    // 更新玩家2信息
     document.getElementById('player2-score').textContent = gameState.player2.score;
-    document.getElementById('player2-health').style.width = `${gameState.player2.health}%`;
     
     // 更新按钮状态
     document.getElementById('start-game').disabled = gameState.running;
     document.getElementById('pause-game').disabled = !gameState.running;
+    
+    // 更新游戏状态文本
+    if (gameState.ball.serving && gameState.running) {
+        updateGameStateText(`${gameState.ball.serveTo === 'player1' ? gameState.player1.name : gameState.player2.name} 发球`);
+    }
+}
+
+function updateGameStateText(text) {
+    document.getElementById('game-state').textContent = text;
 }
 
 // ==================== 游戏循环 ====================
@@ -590,9 +650,9 @@ function connectWebSocket() {
             user_name: userName
         }));
 
-        // 加入坦克大战会话
+        // 加入乒乓球会话
         ws.send(JSON.stringify({
-            type: 'tank_join',
+            type: 'pong_join',
             session_id: gameState.sessionId,
             user_id: userId,
             user_name: userName,
@@ -626,11 +686,11 @@ function connectWebSocket() {
 
 function handleWebSocketMessage(message) {
     switch (message.type) {
-        case 'tank_users_update':
+        case 'pong_users_update':
             updateUsersList(message.users);
             break;
             
-        case 'tank_key':
+        case 'pong_key':
             // 处理伙伴的按键
             if (message.user_id !== userId) {
                 gameState.keys[message.key] = message.pressed;
@@ -638,37 +698,42 @@ function handleWebSocketMessage(message) {
             }
             break;
             
-        case 'tank_fire':
-            // 处理伙伴发射的炮弹
+        case 'pong_serve':
+            // 处理伙伴发球
             if (message.user_id !== userId) {
-                gameState.bullets.push(message.bullet);
-                logEvent(`伙伴发射了炮弹`);
+                gameState.ball.serving = false;
+                logEvent('伙伴发球了');
             }
             break;
             
-        case 'tank_hit':
-            // 处理伙伴击中事件
+        case 'pong_collision':
+            // 处理伙伴击球
             if (message.user_id !== userId) {
-                const shooter = message.shooter === 'player1' ? gameState.player1 : gameState.player2;
-                const target = message.target === 'player1' ? gameState.player1 : gameState.player2;
-                
-                target.health -= message.damage;
-                if (target.health < 0) target.health = 0;
-                shooter.score += 1;
-                
-                logEvent(`伙伴击中: ${shooter.name} → ${target.name}`);
+                gameState.ball = message.ball;
+                logEvent(`伙伴击中了球`);
             }
             break;
             
-        case 'tank_game_start':
+        case 'pong_score':
+            // 处理伙伴得分
+            if (message.user_id !== userId) {
+                const player = message.player === 'player1' ? gameState.player1 : gameState.player2;
+                player.score = message.score;
+                resetBall();
+                logEvent(`伙伴得分: ${player.name} ${player.score}分`);
+            }
+            break;
+            
+        case 'pong_game_start':
             if (message.user_id !== userId) {
                 gameState.running = true;
                 gameState.paused = false;
+                resetBall();
                 logEvent('伙伴开始了游戏');
             }
             break;
             
-        case 'tank_game_pause':
+        case 'pong_game_pause':
             if (message.user_id !== userId) {
                 gameState.paused = message.paused;
                 document.getElementById('pause-game').textContent = 
@@ -677,17 +742,18 @@ function handleWebSocketMessage(message) {
             }
             break;
             
-        case 'tank_game_reset':
+        case 'pong_game_reset':
             if (message.user_id !== userId) {
                 resetGame();
                 logEvent('伙伴重置了游戏');
             }
             break;
             
-        case 'tank_game_over':
+        case 'pong_game_over':
             if (message.user_id !== userId) {
                 gameState.gameOver = true;
                 gameState.winner = message.winner === 'player1' ? gameState.player1 : gameState.player2;
+                gameState.gamesWon = message.games_won;
                 logEvent(`伙伴宣布游戏结束: ${gameState.winner.name} 获胜`);
             }
             break;
@@ -766,7 +832,7 @@ window.addEventListener('load', function() {
     const deviceInfo = detectDevice();
     if (deviceInfo.isMobile) {
         setTimeout(() => {
-            alert('🎮 双人坦克大战已就绪！\n\n使用屏幕按钮控制坦克移动和发射炮弹。\n\n需要两人同时在线才能开始游戏。');
+            alert('🏓 双人乒乓球已就绪！\n\n使用屏幕按钮控制球拍移动和发球。\n\n需要两人同时在线才能开始游戏。');
         }, 1000);
     }
 });
