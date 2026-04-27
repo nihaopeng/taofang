@@ -41,8 +41,8 @@ fi
 
 # start service
 systemctl daemon-reload
-systemctl enable taofang.service
-systemctl start taofang.service
+systemctl enable --now taofang.service
+systemctl restart taofang.service
 echo "taofang service started successfully."
 
 # show info
