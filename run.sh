@@ -1,5 +1,7 @@
 #!/bin/bash
 
+port=80
+
 # env install
 if [ ! -d ".venv" ]; then
     python3 -m venv .venv
@@ -22,7 +24,7 @@ After=network.target
 User=root
 Group=root
 WorkingDirectory=/root/projects/taofang
-ExecStart=$(pwd)/.venv/bin/python $(pwd)/main.py 80
+ExecStart=$(pwd)/.venv/bin/python $(pwd)/main.py $port
 Restart=on-failure
 RestartSec=5s
 StandardOutput=inherit
@@ -44,4 +46,4 @@ systemctl start taofang.service
 echo "taofang service started successfully."
 
 # show info
-echo "service run on port 59075, you can check the status with: systemctl status taofang.service"
+echo "service run on port $port, you can check the status with: systemctl status taofang.service"
