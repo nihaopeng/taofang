@@ -19,7 +19,6 @@ async def achievements_page(request: Request):
     # Category names and icons
     category_names = {
         "time": "恋爱时间",
-        "game": "游戏成就", 
         "interaction": "互动成就",
         "special": "特殊时刻",
         "milestone": "里程碑",
@@ -28,7 +27,6 @@ async def achievements_page(request: Request):
     
     category_icons = {
         "time": "⏰",
-        "game": "🎮",
         "interaction": "💬",
         "special": "🎉",
         "milestone": "🏅",

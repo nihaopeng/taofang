@@ -16,13 +16,7 @@
             --glass-bg: rgba(255, 255, 255, 0.1);
             --shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
         }
-        
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        
+        * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: 'Arial', sans-serif;
             background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
@@ -30,312 +24,262 @@
             min-height: 100vh;
             padding: 20px;
         }
-        
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-        }
-        
-        /* Header */
+        .container { max-width: 1200px; margin: 0 auto; }
         .header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 20px;
-            background: var(--light-bg);
-            backdrop-filter: blur(10px);
-            border-radius: 20px;
-            margin-bottom: 20px;
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 20px; background: var(--light-bg);
+            backdrop-filter: blur(10px); border-radius: 20px; margin-bottom: 20px;
             box-shadow: var(--shadow);
         }
-        
-        .logo {
-            font-size: 1.8em;
-            color: var(--primary-color);
-            font-weight: bold;
-        }
-        
-        .user-info {
-            display: flex;
-            align-items: center;
-            gap: 15px;
-        }
-        
-        .user-name {
-            font-weight: bold;
-            color: var(--secondary-color);
-        }
-        
-        .nav-links {
-            display: flex;
-            gap: 10px;
-            align-items: center;
-        }
-        
+        .logo { font-size: 1.8em; color: var(--primary-color); font-weight: bold; }
+        .user-info { display: flex; align-items: center; gap: 15px; }
+        .user-name { font-weight: bold; color: var(--secondary-color); }
+        .nav-links { display: flex; gap: 10px; align-items: center; }
         .nav-btn {
-            padding: 8px 16px;
-            background: var(--glass-bg);
-            color: var(--text-color);
-            border: none;
-            border-radius: 10px;
-            cursor: pointer;
-            text-decoration: none;
-            transition: all 0.3s ease;
-            border: 1px solid rgba(255, 255, 255, 0.2);
+            padding: 8px 16px; background: var(--glass-bg); color: var(--text-color);
+            border-radius: 10px; cursor: pointer; text-decoration: none;
+            transition: all 0.3s ease; border: 1px solid rgba(255,255,255,0.2);
         }
-        
-        .nav-btn:hover {
-            background: var(--primary-color);
-            color: white;
-            transform: translateY(-2px);
-        }
-        
+        .nav-btn:hover { background: var(--primary-color); color: white; transform: translateY(-2px); }
         .logout-btn {
-            padding: 8px 16px;
-            background: var(--accent-color);
-            color: white;
-            border: none;
-            border-radius: 10px;
-            cursor: pointer;
-            transition: transform 0.3s ease;
-            text-decoration: none;
+            padding: 8px 16px; background: var(--accent-color); color: white;
+            border: none; border-radius: 10px; cursor: pointer;
+            transition: transform 0.3s ease; text-decoration: none;
         }
-        
-        .logout-btn:hover {
-            transform: translateY(-2px);
+        .logout-btn:hover { transform: translateY(-2px); }
+
+        .upload-card {
+            background: var(--light-bg); border-radius: 20px; padding: 30px;
+            margin-bottom: 20px; box-shadow: var(--shadow);
         }
-        
-        /* Back Button */
-        .back-section {
-            margin-bottom: 20px;
+        .upload-area {
+            border: 2px dashed var(--primary-color); border-radius: 15px;
+            padding: 40px; text-align: center; cursor: pointer;
+            transition: all 0.3s; position: relative;
         }
-        
-        .back-btn {
-            display: inline-flex;
-            align-items: center;
-            gap: 10px;
-            padding: 12px 24px;
-            background: var(--light-bg);
-            color: var(--text-color);
-            border: none;
-            border-radius: 15px;
-            cursor: pointer;
-            text-decoration: none;
-            font-weight: 500;
-            transition: all 0.3s ease;
+        .upload-area:hover { background: rgba(102,126,234,0.05); border-color: var(--secondary-color); }
+        .upload-area.dragover { background: rgba(102,126,234,0.1); border-color: var(--accent-color); }
+        .upload-icon { font-size: 3em; margin-bottom: 10px; }
+        .upload-text { color: #666; font-size: 1em; margin-bottom: 15px; }
+        .upload-hint { color: #999; font-size: 0.85em; }
+        #photo-input { display: none; }
+        .upload-row {
+            display: flex; gap: 15px; align-items: center; margin-top: 15px;
         }
-        
-        .back-btn:hover {
-            background: var(--primary-color);
-            color: white;
-            transform: translateY(-2px);
+        .upload-row input[type="text"] {
+            flex: 1; padding: 12px 16px; border: 1px solid #ddd; border-radius: 10px;
+            font-size: 14px; outline: none;
         }
-        
-        /* Main Content */
-        .main-content {
-            background: var(--light-bg);
-            backdrop-filter: blur(10px);
-            border-radius: 20px;
-            padding: 40px;
-            box-shadow: var(--shadow);
-            text-align: center;
+        .upload-row input[type="text"]:focus { border-color: var(--primary-color); }
+        .upload-btn {
+            padding: 12px 24px; background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+            color: white; border: none; border-radius: 10px; cursor: pointer;
+            font-size: 14px; font-weight: bold; transition: all 0.3s; white-space: nowrap;
         }
-        
-        .content-icon {
-            font-size: 4em;
-            margin-bottom: 20px;
-            opacity: 0.8;
+        .upload-btn:hover { transform: translateY(-2px); box-shadow: 0 5px 15px rgba(102,126,234,0.3); }
+        .upload-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+        .gallery {
+            display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 20px;
         }
-        
-        .content-title {
-            font-size: 2em;
-            color: var(--secondary-color);
-            margin-bottom: 15px;
+        .memory-card {
+            background: var(--light-bg); border-radius: 15px; overflow: hidden;
+            box-shadow: var(--shadow); transition: all 0.3s;
+            animation: fadeIn 0.5s ease;
         }
-        
-        .content-subtitle {
-            font-size: 1.2em;
-            color: #666;
-            margin-bottom: 30px;
-            line-height: 1.6;
+        .memory-card:hover { transform: translateY(-5px); box-shadow: 0 12px 40px rgba(0,0,0,0.15); }
+        .memory-photo {
+            width: 100%; height: 220px; object-fit: cover; display: block;
+            background: #eee;
         }
-        
-        .features-list {
-            max-width: 600px;
-            margin: 0 auto 30px;
-            text-align: left;
+        .memory-info { padding: 15px 18px; }
+        .memory-user {
+            font-size: 0.85em; color: var(--secondary-color); margin-bottom: 5px;
+            display: flex; align-items: center; gap: 6px;
         }
-        
-        .feature-item {
-            display: flex;
-            align-items: center;
-            gap: 15px;
-            margin-bottom: 15px;
-            padding: 15px;
-            background: var(--glass-bg);
-            border-radius: 10px;
-            border: 1px solid rgba(255, 255, 255, 0.1);
+        .memory-caption {
+            font-size: 0.95em; color: #555; line-height: 1.5;
+            word-break: break-word;
         }
-        
-        .feature-icon {
-            font-size: 1.5em;
-            width: 40px;
-            height: 40px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
-            color: white;
-            border-radius: 50%;
-            flex-shrink: 0;
+        .memory-meta {
+            display: flex; justify-content: space-between; align-items: center;
+            margin-top: 10px; padding-top: 10px; border-top: 1px solid #eee;
         }
-        
-        .feature-text {
-            flex-grow: 1;
+        .memory-date { font-size: 0.8em; color: #999; }
+        .delete-btn {
+            background: none; border: none; color: var(--accent-color);
+            cursor: pointer; font-size: 0.85em; padding: 4px 8px;
+            border-radius: 6px; transition: all 0.2s;
         }
-        
-        .feature-title {
-            font-weight: bold;
-            margin-bottom: 5px;
-            color: var(--text-color);
+        .delete-btn:hover { background: rgba(255,107,107,0.1); }
+
+        .empty-state {
+            grid-column: 1 / -1; text-align: center; padding: 60px 20px;
+            background: var(--light-bg); border-radius: 20px;
         }
-        
-        .feature-desc {
-            color: #666;
-            font-size: 0.95em;
+        .empty-icon { font-size: 4em; margin-bottom: 15px; }
+        .empty-text { color: #666; font-size: 1.1em; }
+
+        #notif {
+            position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+            background: rgba(0,0,0,0.85); color: white; padding: 12px 28px;
+            border-radius: 20px; font-size: 14px; z-index: 9999;
+            opacity: 0; transition: opacity 0.3s; backdrop-filter: blur(8px);
+            border: 1px solid rgba(255,255,255,0.1);
         }
-        
-        .coming-soon {
-            background: linear-gradient(135deg, #ffd166, #ff9e6d);
-            color: #333;
-            padding: 15px 30px;
-            border-radius: 25px;
-            font-weight: bold;
-            display: inline-block;
-            margin-top: 20px;
-            border: 2px solid rgba(255, 255, 255, 0.3);
-        }
-        
-        /* Responsive */
-        @media (max-width: 768px) {
-            .header {
-                flex-direction: column;
-                align-items: flex-start;
-                gap: 15px;
-            }
-            
-            .main-content {
-                padding: 25px;
-            }
-            
-            .content-title {
-                font-size: 1.6em;
-            }
-            
-            .feature-item {
-                flex-direction: column;
-                text-align: center;
-            }
-        }
-        
-        /* Animations */
+        #notif.show { opacity: 1; }
+
         @keyframes fadeIn {
             from { opacity: 0; transform: translateY(20px); }
             to { opacity: 1; transform: translateY(0); }
         }
-        
-        .fade-in {
-            animation: fadeIn 0.8s ease;
+
+        @media (max-width: 768px) {
+            .header { flex-direction: column; align-items: flex-start; gap: 15px; }
+            .gallery { grid-template-columns: 1fr; }
+            .upload-row { flex-direction: column; }
+            .upload-row input[type="text"] { width: 100%; }
+            .upload-btn { width: 100%; text-align: center; }
         }
     </style>
 </head>
 <body>
+    <div id="notif"></div>
     <div class="container">
-        <!-- Header -->
         <header class="header">
             <div class="logo">📸 回忆相册</div>
             <div class="user-info">
                 <span class="user-name">{{ user_name }}</span>
                 <div class="nav-links">
                     <a href="/" class="nav-btn">🏠 首页</a>
-                    <a href="/games" class="nav-btn">🎮 游戏大厅</a>
+                    <a href="/farm" class="nav-btn">🌾 农场</a>
                     <a href="/achievements" class="nav-btn">🏆 成就</a>
                     <a href="/messages" class="nav-btn">💌 留言</a>
                     <a href="/logout" class="logout-btn">退出</a>
                 </div>
             </div>
         </header>
-        
-        <!-- Back Button -->
-        <div class="back-section">
-            <a href="/" class="back-btn">
-                ← 返回首页
-            </a>
+
+        <div class="upload-card">
+            <div class="upload-area" id="upload-area">
+                <div class="upload-icon">📷</div>
+                <div class="upload-text">点击选择照片或拖拽照片到此处</div>
+                <div class="upload-hint">支持 JPG、PNG、GIF 格式</div>
+                <input type="file" id="photo-input" accept="image/*">
+            </div>
+            <div class="upload-row">
+                <input type="text" id="caption-input" placeholder="添加一段描述..." maxlength="200">
+                <button class="upload-btn" id="submit-btn" disabled>上传回忆</button>
+            </div>
         </div>
-        
-        <!-- Main Content -->
-        <div class="main-content fade-in">
-            <div class="content-icon">📸</div>
-            <h1 class="content-title">回忆相册</h1>
-            <p class="content-subtitle">
-                记录美好瞬间，珍藏共同回忆<br>
-                功能开发中，敬请期待！
-            </p>
-            
-            <div class="features-list">
-                <div class="feature-item">
-                    <div class="feature-icon">📷</div>
-                    <div class="feature-text">
-                        <div class="feature-title">照片上传</div>
-                        <div class="feature-desc">上传你们的合照，记录美好时刻</div>
-                    </div>
-                </div>
-                
-                <div class="feature-item">
-                    <div class="feature-icon">🏷️</div>
-                    <div class="feature-text">
-                        <div class="feature-title">标签分类</div>
-                        <div class="feature-desc">按日期、地点、事件分类管理照片</div>
-                    </div>
-                </div>
-                
-                <div class="feature-item">
-                    <div class="feature-icon">💬</div>
-                    <div class="feature-text">
-                        <div class="feature-title">照片评论</div>
-                        <div class="feature-desc">为每张照片添加回忆和感想</div>
-                    </div>
-                </div>
-                
-                <div class="feature-item">
-                    <div class="feature-icon">🎨</div>
-                    <div class="feature-text">
-                        <div class="feature-title">相册美化</div>
-                        <div class="feature-desc">自定义相册封面和布局</div>
+
+        <div class="gallery" id="gallery">
+            {% if memories %}
+            {% for m in memories %}
+            <div class="memory-card" data-id="{{ m.id }}">
+                <img class="memory-photo" src="{{ m.photo_path }}" alt="回忆照片" loading="lazy">
+                <div class="memory-info">
+                    <div class="memory-user">{{ '❤️' if m.user_id == user_id else '💙' }} {{ m.user_name }}</div>
+                    {% if m.caption %}
+                    <div class="memory-caption">{{ m.caption }}</div>
+                    {% endif %}
+                    <div class="memory-meta">
+                        <span class="memory-date">{{ m.created_at[:10] }}</span>
+                        {% if m.user_id == user_id %}
+                        <button class="delete-btn" onclick="deleteMemory({{ m.id }})">🗑️ 删除</button>
+                        {% endif %}
                     </div>
                 </div>
             </div>
-            
-            <div class="coming-soon">
-                🚀 即将上线，敬请期待！
+            {% endfor %}
+            {% else %}
+            <div class="empty-state">
+                <div class="empty-icon">📸</div>
+                <div class="empty-text">还没有回忆照片，上传第一张吧！</div>
             </div>
+            {% endif %}
         </div>
     </div>
-    
+
     <script>
-        // 添加简单的交互效果
-        document.querySelectorAll('.feature-item').forEach((item, index) => {
-            item.style.animationDelay = `${index * 0.1}s`;
-            item.classList.add('fade-in');
-            
-            item.addEventListener('mouseenter', () => {
-                item.style.transform = 'translateY(-5px)';
-                item.style.boxShadow = '0 10px 20px rgba(0, 0, 0, 0.1)';
+        const uploadArea = document.getElementById('upload-area');
+        const photoInput = document.getElementById('photo-input');
+        const captionInput = document.getElementById('caption-input');
+        const submitBtn = document.getElementById('submit-btn');
+        let selectedFile = null;
+
+        function showNotif(msg, isGood) {
+            const el = document.getElementById('notif');
+            el.textContent = msg;
+            el.style.background = isGood ? 'rgba(81,207,102,0.9)' : 'rgba(255,107,107,0.9)';
+            el.classList.add('show');
+            clearTimeout(el._timer);
+            el._timer = setTimeout(() => el.classList.remove('show'), 2500);
+        }
+
+        uploadArea.addEventListener('click', () => photoInput.click());
+        uploadArea.addEventListener('dragover', (e) => { e.preventDefault(); uploadArea.classList.add('dragover'); });
+        uploadArea.addEventListener('dragleave', () => uploadArea.classList.remove('dragover'));
+        uploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadArea.classList.remove('dragover');
+            if (e.dataTransfer.files.length) {
+                photoInput.files = e.dataTransfer.files;
+                handleFileSelect();
+            }
+        });
+        photoInput.addEventListener('change', handleFileSelect);
+
+        function handleFileSelect() {
+            const file = photoInput.files[0];
+            if (!file) { submitBtn.disabled = true; return; }
+            if (!file.type.startsWith('image/')) { showNotf('请选择图片文件', false); return; }
+            selectedFile = file;
+            submitBtn.disabled = false;
+            uploadArea.querySelector('.upload-text').textContent = `已选择: ${file.name}`;
+        }
+
+        submitBtn.addEventListener('click', async () => {
+            if (!selectedFile) return;
+            submitBtn.disabled = true;
+            submitBtn.textContent = '上传中...';
+
+            const formData = new FormData();
+            formData.append('photo', selectedFile);
+            formData.append('caption', captionInput.value.trim());
+
+            try {
+                const r = await fetch('/api/memories', { method: 'POST', body: formData });
+                const data = await r.json();
+                if (data.error) { showNotif(data.error, false); return; }
+                showNotif('📸 上传成功！', true);
+                setTimeout(() => location.reload(), 1000);
+            } catch (e) {
+                showNotif('上传失败，请重试', false);
+                submitBtn.disabled = false;
+                submitBtn.textContent = '上传回忆';
+            }
+        });
+
+        async function deleteMemory(id) {
+            if (!confirm('确定要删除这张照片吗？')) return;
+            const r = await fetch(`/api/memories/${id}`, { method: 'DELETE' });
+            const data = await r.json();
+            if (data.error) { showNotif(data.error, false); return; }
+            const card = document.querySelector(`.memory-card[data-id="${id}"]`);
+            if (card) card.style.display = 'none';
+            showNotif('已删除', true);
+        }
+
+        document.querySelectorAll('.memory-card').forEach(card => {
+            card.addEventListener('mouseenter', () => {
+                card.style.transform = 'translateY(-5px)';
+                card.style.boxShadow = '0 12px 40px rgba(0,0,0,0.15)';
             });
-            
-            item.addEventListener('mouseleave', () => {
-                item.style.transform = '';
-                item.style.boxShadow = '';
+            card.addEventListener('mouseleave', () => {
+                card.style.transform = '';
+                card.style.boxShadow = '';
             });
         });
     </script>

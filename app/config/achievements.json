@@ -1,0 +1,43 @@
+{
+    "time": {
+        "name": "恋爱时间",
+        "icon": "⏰",
+        "achievements": [
+            {"id": "time_7days", "name": "一周之约", "description": "恋爱7天", "icon": "❤️", "points": 10},
+            {"id": "time_30days", "name": "满月之喜", "description": "恋爱30天", "icon": "🌕", "points": 30},
+            {"id": "time_100days", "name": "百日纪念", "description": "恋爱100天", "icon": "💯", "points": 50},
+            {"id": "time_365days", "name": "周年庆典", "description": "恋爱1周年", "icon": "🎂", "points": 100},
+            {"id": "time_1000days", "name": "千日之恋", "description": "恋爱1000天", "icon": "🌟", "points": 200}
+        ]
+    },
+    "interaction": {
+        "name": "互动成就",
+        "icon": "💬",
+        "achievements": [
+            {"id": "interact_first", "name": "初次互动", "description": "第一次互动", "icon": "👋", "points": 10},
+            {"id": "interact_10", "name": "活跃伙伴", "description": "完成10次互动", "icon": "💬", "points": 30},
+            {"id": "interact_50", "name": "亲密无间", "description": "完成50次互动", "icon": "💕", "points": 60},
+            {"id": "interact_100", "name": "心有灵犀", "description": "完成100次互动", "icon": "✨", "points": 100}
+        ]
+    },
+    "special": {
+        "name": "特殊时刻",
+        "icon": "🎉",
+        "achievements": [
+            {"id": "special_first_month", "name": "第一个月", "description": "度过第一个月", "icon": "📅", "points": 20},
+            {"id": "special_first_year", "name": "第一年", "description": "度过第一年", "icon": "🎉", "points": 80},
+            {"id": "special_valentine", "name": "情人节", "description": "一起过情人节", "icon": "💘", "points": 50},
+            {"id": "special_birthday", "name": "生日祝福", "description": "为对方庆生", "icon": "🎁", "points": 40}
+        ]
+    },
+    "milestone": {
+        "name": "里程碑",
+        "icon": "🏅",
+        "achievements": [
+            {"id": "milestone_first_photo", "name": "第一张照片", "description": "上传第一张照片", "icon": "📸", "points": 30},
+            {"id": "milestone_first_note", "name": "第一篇日记", "description": "写下第一篇日记", "icon": "📝", "points": 20},
+            {"id": "milestone_10_photos", "name": "回忆满满", "description": "上传10张照片", "icon": "📷", "points": 50},
+            {"id": "milestone_10_notes", "name": "日记达人", "description": "写下10篇日记", "icon": "📚", "points": 40}
+        ]
+    }
+}

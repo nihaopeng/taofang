@@ -4,6 +4,34 @@ from ..database import get_connection, get_recent_achievements
 from ..utils.notifications import get_all_notifications, create_notification_display
 from datetime import datetime
 
+async def placeholder(request: Request):
+    """Placeholder page for future features"""
+    if not request.session.get("authenticated"):
+        return RedirectResponse(url="/gate", status_code=303)
+    user_name = request.session.get("user_name")
+    html = f"""<!DOCTYPE html><html lang="zh-CN"><head>
+    <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+    <title>建设中 - 心动坐标</title>
+    <style>
+        *{{margin:0;padding:0;box-sizing:border-box;}}
+        body{{font-family:Arial,sans-serif;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);min-height:100vh;display:flex;justify-content:center;align-items:center;padding:20px;}}
+        .card{{background:rgba(255,255,255,0.95);border-radius:20px;padding:60px 40px;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,0.1);max-width:400px;width:100%;}}
+        .icon{{font-size:80px;margin-bottom:20px;animation:float 3s ease-in-out infinite;}}
+        h1{{font-size:28px;color:#333;margin-bottom:15px;}}
+        p{{color:#666;margin-bottom:25px;line-height:1.6;font-size:15px;}}
+        .btn{{display:inline-block;padding:12px 30px;background:linear-gradient(135deg,#667eea,#764ba2);color:white;border-radius:25px;text-decoration:none;font-weight:bold;transition:all 0.3s;}}
+        .btn:hover{{transform:translateY(-2px);box-shadow:0 5px 15px rgba(102,126,234,0.4);}}
+        @keyframes float{{0%,100%{{transform:translateY(0);}}50%{{transform:translateY(-15px);}}}}
+    </style></head><body>
+    <div class="card">
+        <div class="icon">🚧</div>
+        <h1>🌾 心动农场</h1>
+        <p>亲爱的 {user_name}，<br>农场正在建设中，敬请期待～<br>很快就可以一起种田啦！</p>
+        <a href="/" class="btn">返回首页</a>
+    </div></body></html>"""
+    from starlette.responses import Response
+    return Response(html, media_type="text/html")
+
 async def home(request: Request):
     """Main dashboard page"""
     # Check authentication

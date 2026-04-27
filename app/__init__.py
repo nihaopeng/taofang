@@ -14,7 +14,7 @@ from starlette.middleware.cors import CORSMiddleware
 import os
 
 from .database import init_db
-from .routes import auth, dashboard, api, websocket, games, achievements, messages, memories
+from .routes import auth, dashboard, api, websocket, achievements, messages, memories
 
 async def not_found(request, exc):
     """Custom 404 handler that redirects to gate"""
@@ -70,17 +70,16 @@ def create_app():
             Route("/api/checkin-statistics", api.get_checkin_statistics, name="checkin_stats"),
             Route("/api/checkin-calendar", api.get_checkin_calendar_data, name="checkin_calendar"),
             Route("/api/checkin-insights", api.get_checkin_insights, name="checkin_insights"),
-            Route("/games", games.games_dashboard, name="games_dashboard"),
-            Route("/game/canvas", games.canvas_game, name="canvas_game"),
-            Route("/game/pingpong", games.ping_pong, name="ping_pong"),
-            Route("/game/mobile-test", games.mobile_test, name="mobile_test"),
-            Route("/game/canvas-simple", games.canvas_simple, name="canvas_simple"),
+            Route("/farm", dashboard.placeholder, name="farm_placeholder"),
             Route("/achievements", achievements.achievements_page, name="achievements"),
             Route("/messages", messages.messages_page, name="messages"),
             Route("/api/messages", messages.api_get_messages, name="api_get_messages"),
             Route("/api/messages", messages.api_add_message, methods=["POST"], name="api_add_message"),
             Route("/api/messages/{message_id:int}", messages.api_delete_message, methods=["DELETE"], name="api_delete_message"),
             Route("/memories", memories.memories_page, name="memories"),
+            Route("/api/memories", memories.api_get_memories, name="api_get_memories"),
+            Route("/api/memories", memories.api_add_memory, methods=["POST"], name="api_add_memory"),
+            Route("/api/memories/{memory_id:int}", memories.api_delete_memory, methods=["DELETE"], name="api_delete_memory"),
 
             WebSocketRoute("/ws", websocket.websocket_endpoint, name="websocket"),
             Mount("/static", app=StaticFiles(directory="app/static"), name="static"),

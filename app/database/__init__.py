@@ -89,27 +89,6 @@ def init_db():
     )
     """)
     
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS canvas_drawings (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_id TEXT NOT NULL,
-        user_id INTEGER NOT NULL,
-        user_name TEXT NOT NULL,
-        from_x REAL NOT NULL,
-        from_y REAL NOT NULL,
-        to_x REAL NOT NULL,
-        to_y REAL NOT NULL,
-        color TEXT NOT NULL,
-        brush_size INTEGER NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (user_id) REFERENCES users(id)
-    )
-    """)
-    
-    # Create index for faster queries
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_canvas_session ON canvas_drawings(session_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_canvas_created ON canvas_drawings(created_at)")
-    
     # Insert initial data if tables are empty
     cursor.execute("SELECT COUNT(*) FROM users")
     if cursor.fetchone()[0] == 0:
@@ -129,12 +108,6 @@ def init_db():
             ("time_100days", "百日纪念", "恋爱100天", "💯", "time", 50),
             ("time_365days", "周年庆典", "恋爱1周年", "🎂", "time", 100),
             ("time_1000days", "千日之恋", "恋爱1000天", "🌟", "time", 200),
-            
-            # 游戏成就
-            ("game_first_play", "初次游戏", "第一次玩游戏", "🎮", "game", 10),
-            ("game_pingpong_win", "乒乓球高手", "赢得乒乓球游戏", "🏓", "game", 30),
-            ("game_canvas_draw", "艺术大师", "在画板上绘画", "🎨", "game", 20),
-            ("game_collaborate", "默契搭档", "一起完成游戏", "🤝", "game", 40),
             
             # 互动成就
             ("interact_first", "初次互动", "第一次互动", "👋", "interaction", 10),
@@ -252,19 +225,6 @@ def check_and_unlock_time_achievements(user_id: int):
             unlock_achievement(user_id, achievement_id)
     
     conn.close()
-
-def check_and_unlock_game_achievements(user_id: int, game_type: str, result: dict = None):
-    """Check and unlock game-based achievements"""
-    # Game-based achievements
-    if game_type == "ping_pong":
-        if result and result.get("winner") == user_id:
-            unlock_achievement(user_id, "game_pingpong_win")
-    
-    unlock_achievement(user_id, "game_first_play")
-
-def check_and_unlock_canvas_achievements(user_id: int):
-    """Check and unlock canvas-based achievements"""
-    unlock_achievement(user_id, "game_canvas_draw")
 
 def check_and_unlock_interaction_achievements(user_id: int, interaction_count: int):
     """Check and unlock interaction-based achievements"""
@@ -859,73 +819,6 @@ def get_checkin_calendar(user_id: int, year: int = None, month: int = None):
         "month": month
     }
 
-# ==================== Canvas Drawing Functions ====================
-
-def save_canvas_drawing(session_id: str, user_id: int, user_name: str, 
-                       from_x: float, from_y: float, to_x: float, to_y: float,
-                       color: str, brush_size: float):
-    """Save a canvas drawing stroke to database"""
-    conn = get_connection()
-    cursor = conn.cursor()
-    
-    cursor.execute("""
-    INSERT INTO canvas_drawings 
-    (session_id, user_id, user_name, from_x, from_y, to_x, to_y, color, brush_size)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (session_id, user_id, user_name, from_x, from_y, to_x, to_y, color, brush_size))
-    
-    conn.commit()
-    conn.close()
-    
-    return cursor.lastrowid
-
-def get_canvas_drawings(session_id: str, limit: int = 1000):
-    """Get all drawings for a canvas session"""
-    conn = get_connection()
-    cursor = conn.cursor()
-    
-    cursor.execute("""
-    SELECT id, user_id, user_name, from_x, from_y, to_x, to_y, color, brush_size, created_at
-    FROM canvas_drawings
-    WHERE session_id = ?
-    ORDER BY created_at ASC
-    LIMIT ?
-    """, (session_id, limit))
-    
-    drawings = []
-    for row in cursor.fetchall():
-        drawings.append({
-            "id": row[0],
-            "user_id": row[1],
-            "user_name": row[2],
-            "from_x": row[3],
-            "from_y": row[4],
-            "to_x": row[5],
-            "to_y": row[6],
-            "color": row[7],
-            "brush_size": row[8],
-            "created_at": row[9]
-        })
-    
-    conn.close()
-    return drawings
-
-def clear_canvas_drawings(session_id: str):
-    """Clear all drawings for a canvas session"""
-    conn = get_connection()
-    cursor = conn.cursor()
-    
-    cursor.execute("""
-    DELETE FROM canvas_drawings
-    WHERE session_id = ?
-    """, (session_id,))
-    
-    deleted_count = cursor.rowcount
-    conn.commit()
-    conn.close()
-    
-    return deleted_count
-
 # ==================== 留言系统函数 ====================
 
 def add_message(user_id: int, user_name: str, content: str, is_private: bool = False):
@@ -1086,38 +979,77 @@ def get_message_stats(user_id: int):
         "total_all_messages": total_all_messages
     }
 
-# ==================== 画板函数 ====================
+# ==================== 回忆相册函数 ====================
 
-def get_canvas_stats(session_id: str):
-    """Get statistics for a canvas session"""
+def add_memory(user_id: int, user_name: str, photo_path: str, caption: str = ""):
+    """Add a new memory"""
     conn = get_connection()
     cursor = conn.cursor()
     
     cursor.execute("""
-    SELECT 
-        COUNT(*) as total_drawings,
-        COUNT(DISTINCT user_id) as unique_users,
-        MIN(created_at) as first_drawing,
-        MAX(created_at) as last_drawing
-    FROM canvas_drawings
-    WHERE session_id = ?
-    """, (session_id,))
+    INSERT INTO memories (user_id, user_name, photo_path, caption)
+    VALUES (?, ?, ?, ?)
+    """, (user_id, user_name, photo_path, caption))
     
+    conn.commit()
+    memory_id = cursor.lastrowid
+    conn.close()
+    return memory_id
+
+def get_memories(limit: int = 50):
+    """Get all memories"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+    SELECT m.id, m.user_id, m.user_name, m.photo_path, m.caption, m.created_at
+    FROM memories m
+    ORDER BY m.created_at DESC
+    LIMIT ?
+    """, (limit,))
+    
+    memories = []
+    for row in cursor.fetchall():
+        memories.append({
+            "id": row[0],
+            "user_id": row[1],
+            "user_name": row[2],
+            "photo_path": row[3],
+            "caption": row[4],
+            "created_at": row[5]
+        })
+    
+    conn.close()
+    return memories
+
+def delete_memory(memory_id: int, user_id: int):
+    """Delete a memory (only if user owns it)"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT user_id, photo_path FROM memories WHERE id = ?", (memory_id,))
     row = cursor.fetchone()
+    
+    if not row:
+        conn.close()
+        return False
+    
+    if row[0] != user_id:
+        conn.close()
+        return False
+    
+    photo_path = row[1]
+    cursor.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
+    conn.commit()
     conn.close()
     
-    if row:
-        total_drawings, unique_users, first_drawing, last_drawing = row
-        return {
-            "total_drawings": total_drawings,
-            "unique_users": unique_users,
-            "first_drawing": first_drawing,
-            "last_drawing": last_drawing
-        }
+    if os.path.exists(photo_path):
+        try:
+            os.remove(photo_path)
+        except:
+            pass
     
-    return {
-        "total_drawings": 0,
-        "unique_users": 0,
-        "first_drawing": None,
-        "last_drawing": None
-    }
+    return True
+
+# ==================== 画板函数 ====================
+
