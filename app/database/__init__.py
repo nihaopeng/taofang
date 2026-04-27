@@ -305,16 +305,15 @@ def check_and_unlock_checkin_achievements(user_id: int):
         
         consecutive_days = cursor.fetchall()
         if len(consecutive_days) >= 7:
-            # Check if "默契初现" is already unlocked
             cursor.execute("""
             SELECT COUNT(*) FROM achievements 
-            WHERE user_id = ? AND ach_name = '默契初现'
+            WHERE user_id = ? AND ach_id = 'checkin_both_7'
             """, (user_id,))
             
             if cursor.fetchone()[0] == 0:
                 cursor.execute("""
-                INSERT INTO achievements (user_id, ach_name, unlock_date)
-                VALUES (?, '默契初现', ?)
+                INSERT INTO achievements (user_id, ach_id, ach_name, unlock_date)
+                VALUES (?, 'checkin_both_7', '默契初现', ?)
                 """, (user_id, today.strftime("%Y-%m-%d")))
     
     # Check for streak-based achievements
@@ -329,17 +328,18 @@ def check_and_unlock_checkin_achievements(user_id: int):
     }
     
     for streak_required, achievement_name in streak_achievements.items():
+        ach_id = f"streak_{streak_required}"
         if current_streak >= streak_required:
             cursor.execute("""
             SELECT COUNT(*) FROM achievements 
-            WHERE user_id = ? AND ach_name = ?
-            """, (user_id, achievement_name))
+            WHERE user_id = ? AND ach_id = ?
+            """, (user_id, ach_id))
             
             if cursor.fetchone()[0] == 0:
                 cursor.execute("""
-                INSERT INTO achievements (user_id, ach_name, unlock_date)
-                VALUES (?, ?, ?)
-                """, (user_id, achievement_name, today.strftime("%Y-%m-%d")))
+                INSERT INTO achievements (user_id, ach_id, ach_name, unlock_date)
+                VALUES (?, ?, ?, ?)
+                """, (user_id, ach_id, achievement_name, today.strftime("%Y-%m-%d")))
     
     # Total check-in count achievements
     count_achievements = {
@@ -348,17 +348,18 @@ def check_and_unlock_checkin_achievements(user_id: int):
     }
     
     for count_required, achievement_name in count_achievements.items():
+        ach_id = f"checkin_{count_required}"
         if total_checkins >= count_required:
             cursor.execute("""
             SELECT COUNT(*) FROM achievements 
-            WHERE user_id = ? AND ach_name = ?
-            """, (user_id, achievement_name))
+            WHERE user_id = ? AND ach_id = ?
+            """, (user_id, ach_id))
             
             if cursor.fetchone()[0] == 0:
                 cursor.execute("""
-                INSERT INTO achievements (user_id, ach_name, unlock_date)
-                VALUES (?, ?, ?)
-                """, (user_id, achievement_name, today.strftime("%Y-%m-%d")))
+                INSERT INTO achievements (user_id, ach_id, ach_name, unlock_date)
+                VALUES (?, ?, ?, ?)
+                """, (user_id, ach_id, achievement_name, today.strftime("%Y-%m-%d")))
     
     conn.commit()
     conn.close()
