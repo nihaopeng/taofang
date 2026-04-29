@@ -1,6 +1,6 @@
 from starlette.responses import RedirectResponse
 from starlette.requests import Request
-from ..database import get_connection, get_recent_achievements
+from ..database import get_connection, get_recent_achievements, get_farm_currency
 from ..utils.notifications import get_all_notifications, create_notification_display
 from datetime import datetime
 
@@ -65,6 +65,11 @@ async def home(request: Request):
     notifications_html = create_notification_display(notifications)
     
     # Prepare context
+    try:
+        farm_coins = get_farm_currency(user_id)
+    except:
+        farm_coins = 0
+    
     context = {
         "request": request,
         "user_name": user_name,
@@ -73,6 +78,7 @@ async def home(request: Request):
         "recent_achievements": recent_achievements,
         "notifications_html": notifications_html,
         "has_notifications": len(notifications) > 0,
+        "farm_coins": farm_coins,
     }
     
     return request.app.templates.TemplateResponse("dashboard.html", context)

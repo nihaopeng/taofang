@@ -60,6 +60,14 @@ async def api_farm_state(request: Request):
     unlocked_plants = get_unlocked_plants(days_together, both_checkins)
     ponds = get_ponds()
     
+    # 检查主系统今日是否签到
+    conn = get_connection()
+    cursor = conn.cursor()
+    today = datetime.now().strftime("%Y-%m-%d")
+    cursor.execute("SELECT COUNT(*) FROM daily_checkin WHERE user_id=? AND DATE(checkin_time)=?", (user_id, today))
+    main_checked_in = cursor.fetchone()[0] > 0
+    conn.close()
+    
     return JSONResponse({
         "success": True,
         "coins": coins,
@@ -71,6 +79,7 @@ async def api_farm_state(request: Request):
         "unlocked_plants": [p["id"] for p in unlocked_plants],
         "days_together": days_together,
         "both_checkins": both_checkins,
+        "main_checked_in": main_checked_in,
         "claimed_checkin": not can_claim_daily(user_id, "checkin"),
         "claimed_diary": not can_claim_daily(user_id, "diary")
     })

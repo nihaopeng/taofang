@@ -562,12 +562,13 @@ class FarmScene extends Phaser.Scene {
                 window.FARM_DATA.ponds = d.ponds || {};
                 window.FARM_DATA.inventory = d.inventory;
                 window.FARM_DATA.unlockedPlants = d.unlocked_plants || [];
+                window.FARM_DATA.mainCheckedIn = d.main_checked_in;
                 this.renderPlots();
                 this.updatePondLabels();
                 updateCoinsDisplay(d.coins);
                 updateInventoryDisplay();
-                // 根据领取状态禁用按钮
-                if (d.claimed_checkin) disableRewardBtn('.btn-checkin');
+                // 根据状态更新签到按钮
+                updateCheckinBtn(d.main_checked_in, d.claimed_checkin);
                 if (d.claimed_diary) disableRewardBtn('.btn-diary');
             }
         } catch (e) { console.error('同步失败:', e); }
@@ -865,25 +866,61 @@ function closeSeedModal() { document.getElementById('seed-modal').classList.remo
 // ============ 签到/日记（绑定主系统） ============
 async function claimCheckinReward() {
     const btn = document.querySelector('.btn-checkin');
-    // 先执行主系统签到
+
+    // 如果主系统已签到但未领农场奖励，直接领
+    if (window.FARM_DATA.mainCheckedIn && !window.FARM_DATA.claimedCheckin) {
+        const r = await fetch('/api/farm/checkin-reward', { method: 'POST' });
+        const d = await r.json();
+        if (d.success) {
+            window.FARM_DATA.coins = d.coins;
+            window.FARM_DATA.claimedCheckin = true;
+            updateCoinsDisplay(d.coins);
+            showToast('📅 ' + d.message);
+            updateCheckinBtn(true, true);
+        } else {
+            showToast(d.error || '领取失败');
+        }
+        return;
+    }
+
+    // 主系统未签到，先签到
     const r1 = await fetch('/api/checkin', { method: 'POST' });
     const d1 = await r1.json();
 
-    // 再领取农场签到金币
+    if (d1.error && !d1.error.includes('Already')) {
+        showToast(d1.error); return;
+    }
+
+    // 再领农场奖励
     const r2 = await fetch('/api/farm/checkin-reward', { method: 'POST' });
     const d2 = await r2.json();
-
     if (d2.success) {
         window.FARM_DATA.coins = d2.coins;
+        window.FARM_DATA.mainCheckedIn = true;
+        window.FARM_DATA.claimedCheckin = true;
         updateCoinsDisplay(d2.coins);
         showToast('📅 ' + d2.message);
-        if (btn) { btn.disabled = true; btn.style.opacity = '0.5'; btn.style.cursor = 'not-allowed'; }
+        updateCheckinBtn(true, true);
     } else if (d2.error) {
         showToast(d2.error);
-        // 今日已领取也禁用
-        if (d2.error.includes('已领取')) {
-            if (btn) { btn.disabled = true; btn.style.opacity = '0.5'; btn.style.cursor = 'not-allowed'; }
-        }
+    }
+}
+
+function updateCheckinBtn(mainCheckedIn, claimedCheckin) {
+    const btn = document.querySelector('.btn-checkin');
+    if (!btn) return;
+
+    if (claimedCheckin) {
+        btn.disabled = true; btn.style.opacity = '0.5'; btn.style.cursor = 'not-allowed';
+        btn.textContent = '✅已签';
+    } else if (mainCheckedIn) {
+        btn.disabled = false; btn.style.opacity = '1'; btn.style.cursor = 'pointer';
+        btn.textContent = '📅领币';
+        btn.style.color = '#ffaa00';
+    } else {
+        btn.disabled = false; btn.style.opacity = '1'; btn.style.cursor = 'pointer';
+        btn.textContent = '📅签到';
+        btn.style.color = '#f0a500';
     }
 }
 
