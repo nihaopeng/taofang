@@ -6,7 +6,14 @@ from dotenv import load_dotenv
 load_dotenv()
 
 def get_connection():
-    return sqlite3.connect(os.getenv("DATABASE_PATH", "app/database.db"), check_same_thread=False)
+    return sqlite3.connect(os.getenv("DATABASE_PATH", "app/database/heartsync.db"), check_same_thread=False)
+
+def get_farm_connection():
+    farm_db = os.getenv("FARM_DATABASE_PATH", "app/database/farm.db")
+    farm_dir = os.path.dirname(farm_db)
+    if farm_dir and not os.path.exists(farm_dir):
+        os.makedirs(farm_dir)
+    return sqlite3.connect(farm_db, check_same_thread=False)
 
 def init_db():
     if not os.path.exists("app/database"):
@@ -76,14 +83,25 @@ def init_db():
     )
     """)
     
-    # Create canvas drawings table
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER NOT NULL,
         user_name TEXT NOT NULL,
         content TEXT NOT NULL,
-        is_private BOOLEAN DEFAULT 0,
+        is_private INTEGER DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id)
+    )
+    """)
+    
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS memories (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        user_name TEXT NOT NULL,
+        photo_path TEXT NOT NULL,
+        caption TEXT DEFAULT '',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (user_id) REFERENCES users(id)
     )
@@ -133,6 +151,9 @@ def init_db():
             INSERT OR IGNORE INTO meta_config (key, value)
             VALUES (?, ?)
             """, (f"achievement_def_{ach_id}", f"{name}|{description}|{icon}|{category}|{points}"))
+    
+    # 初始化农场表
+    init_farm_tables()
     
     conn.commit()
     conn.close()
@@ -193,6 +214,415 @@ def unlock_achievement(user_id: int, achievement_id: str, achievement_data: dict
     conn.commit()
     conn.close()
     return True
+
+# ==================== 农场系统表格 ====================
+
+def init_farm_tables():
+    """Initialize farm-related database tables"""
+    conn = get_farm_connection()
+    cursor = conn.cursor()
+    
+    # 植物定义表
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS farm_plants (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        seed_cost INTEGER DEFAULT 10,
+        sell_price INTEGER DEFAULT 20,
+        growth_time INTEGER DEFAULT 300,
+        water_reduction INTEGER DEFAULT 60,
+        unlock_days INTEGER DEFAULT 0,
+        unlock_both_checkins INTEGER DEFAULT 0,
+        stages INTEGER DEFAULT 4,
+        description TEXT DEFAULT ''
+    )
+    """)
+    
+    # 地块表（共享农场，不分用户）
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS farm_plots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        plot_index INTEGER NOT NULL UNIQUE,
+        plant_type TEXT,
+        planted_at TIMESTAMP,
+        watered_at TIMESTAMP,
+        growth_stage INTEGER DEFAULT 0
+    )
+    """)
+    
+    # 背包表
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS farm_inventory (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        item_type TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        quantity INTEGER DEFAULT 1,
+        FOREIGN KEY (user_id) REFERENCES users(id),
+        UNIQUE(user_id, item_type, item_id)
+    )
+    """)
+    
+    # 鱼类定义表
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS farm_fish (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        sell_price INTEGER DEFAULT 15,
+        rarity TEXT DEFAULT 'common',
+        min_wait REAL DEFAULT 2.0,
+        max_wait REAL DEFAULT 8.0,
+        description TEXT DEFAULT ''
+    )
+    """)
+    
+    # 农场货币表（每位用户独立）
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS farm_currency (
+        user_id INTEGER PRIMARY KEY,
+        coins INTEGER DEFAULT 100,
+        FOREIGN KEY (user_id) REFERENCES users(id)
+    )
+    """)
+    
+    # 每日领取记录表
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS farm_daily_claims (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        claim_type TEXT NOT NULL,
+        claim_date TEXT NOT NULL,
+        UNIQUE(user_id, claim_type, claim_date)
+    )
+    """)
+    
+    # 检查是否需要初始化种子数据
+    cursor.execute("SELECT COUNT(*) FROM farm_plants")
+    if cursor.fetchone()[0] == 0:
+        _init_default_plants(cursor)
+    
+    cursor.execute("SELECT COUNT(*) FROM farm_fish")
+    if cursor.fetchone()[0] == 0:
+        _init_default_fish(cursor)
+    
+    # 确保每个用户都有货币记录
+    cursor.execute("INSERT OR IGNORE INTO farm_currency (user_id, coins) VALUES (1, 100)")
+    cursor.execute("INSERT OR IGNORE INTO farm_currency (user_id, coins) VALUES (2, 100)")
+    
+    conn.commit()
+    conn.close()
+
+def _init_default_plants(cursor):
+    """初始化默认植物数据"""
+    plants = [
+        ("carrot", "胡萝卜", 5, 15, 120, 30, 0, 0, 4, "基础作物，易种植"),
+        ("hops", "啤酒花", 15, 40, 300, 60, 7, 3, 5, "需要恋爱7天&共同签到3天解锁"),
+        ("wheat", "小麦", 10, 25, 180, 40, 0, 0, 4, "基础粮食作物"),
+        ("tomato", "番茄", 20, 50, 240, 50, 14, 7, 4, "需要恋爱14天&共同签到7天解锁"),
+        ("sunflower", "向日葵", 25, 60, 360, 60, 30, 14, 4, "需要恋爱30天&共同签到14天解锁"),
+    ]
+    for plant in plants:
+        cursor.execute("""INSERT INTO farm_plants (id, name, seed_cost, sell_price, growth_time, water_reduction, unlock_days, unlock_both_checkins, stages, description) VALUES (?,?,?,?,?,?,?,?,?,?)""", plant)
+
+def _init_default_fish(cursor):
+    """初始化默认鱼类数据"""
+    fish = [
+        ("carp", "鲤鱼", 10, "common", 2.0, 6.0, "常见的淡水鱼"),
+        ("bass", "鲈鱼", 20, "common", 2.5, 7.0, "肉质鲜美的鱼类"),
+        ("salmon", "三文鱼", 35, "uncommon", 3.0, 10.0, "较为稀有的鱼类"),
+        ("goldfish", "金鱼", 50, "rare", 4.0, 15.0, "非常稀有的观赏鱼"),
+        ("koi", "锦鲤", 80, "rare", 5.0, 20.0, "传说级别的锦鲤！"),
+    ]
+    for f in fish:
+        cursor.execute("INSERT INTO farm_fish (id, name, sell_price, rarity, min_wait, max_wait, description) VALUES (?,?,?,?,?,?,?)", f)
+
+# ==================== 农场查询函数 ====================
+
+def get_farm_state():
+    """获取完整农场状态"""
+    conn = get_farm_connection()
+    cursor = conn.cursor()
+    
+    # 获取所有地块
+    cursor.execute("SELECT plot_index, plant_type, planted_at, watered_at, growth_stage FROM farm_plots ORDER BY plot_index")
+    plots = {}
+    for row in cursor.fetchall():
+        plots[str(row[0])] = {
+            "plot_index": row[0],
+            "plant_type": row[1],
+            "planted_at": row[2],
+            "watered_at": row[3],
+            "growth_stage": row[4]
+        }
+    
+    # 获取植物定义
+    cursor.execute("SELECT * FROM farm_plants")
+    plants = {}
+    for row in cursor.fetchall():
+        plants[row[0]] = {
+            "id": row[0], "name": row[1], "seed_cost": row[2],
+            "sell_price": row[3], "growth_time": row[4],
+            "water_reduction": row[5], "unlock_days": row[6],
+            "unlock_both_checkins": row[7], "stages": row[8],
+            "description": row[9]
+        }
+    
+    # 获取鱼类定义
+    cursor.execute("SELECT * FROM farm_fish")
+    fish_list = {}
+    for row in cursor.fetchall():
+        fish_list[row[0]] = {
+            "id": row[0], "name": row[1], "sell_price": row[2],
+            "rarity": row[3], "min_wait": row[4], "max_wait": row[5],
+            "description": row[6]
+        }
+    
+    conn.close()
+    return {"plots": plots, "plants": plants, "fish": fish_list}
+
+def get_farm_currency(user_id: int):
+    """获取用户农场货币"""
+    conn = get_farm_connection()
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR IGNORE INTO farm_currency (user_id, coins) VALUES (?, 100)", (user_id,))
+    cursor.execute("SELECT coins FROM farm_currency WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else 100
+
+def add_farm_currency(user_id: int, amount: int):
+    """增加农场货币"""
+    conn = get_farm_connection()
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR IGNORE INTO farm_currency (user_id, coins) VALUES (?, 100)", (user_id,))
+    cursor.execute("UPDATE farm_currency SET coins = coins + ? WHERE user_id = ?", (amount, user_id))
+    cursor.execute("SELECT coins FROM farm_currency WHERE user_id = ?", (user_id,))
+    new_balance = cursor.fetchone()[0]
+    conn.commit()
+    conn.close()
+    return new_balance
+
+def spend_farm_currency(user_id: int, amount: int) -> bool:
+    """花费农场货币，返回是否成功"""
+    conn = get_farm_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT coins FROM farm_currency WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    if not row or row[0] < amount:
+        conn.close()
+        return False
+    cursor.execute("UPDATE farm_currency SET coins = coins - ? WHERE user_id = ?", (amount, user_id))
+    conn.commit()
+    conn.close()
+    return True
+
+def get_inventory(user_id: int):
+    """获取用户背包"""
+    conn = get_farm_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT item_type, item_id, quantity FROM farm_inventory WHERE user_id = ?", (user_id,))
+    items = {}
+    for row in cursor.fetchall():
+        key = f"{row[0]}:{row[1]}"
+        items[key] = {"type": row[0], "id": row[1], "quantity": row[2]}
+    conn.close()
+    return items
+
+def add_to_inventory(user_id: int, item_type: str, item_id: str, quantity: int = 1):
+    """添加物品到背包"""
+    conn = get_farm_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+    INSERT INTO farm_inventory (user_id, item_type, item_id, quantity)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(user_id, item_type, item_id) DO UPDATE SET quantity = quantity + ?
+    """, (user_id, item_type, item_id, quantity, quantity))
+    conn.commit()
+    conn.close()
+
+def remove_from_inventory(user_id: int, item_type: str, item_id: str, quantity: int = 1) -> bool:
+    """从背包移除物品，返回是否成功"""
+    conn = get_farm_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT quantity FROM farm_inventory WHERE user_id = ? AND item_type = ? AND item_id = ?", (user_id, item_type, item_id))
+    row = cursor.fetchone()
+    if not row or row[0] < quantity:
+        conn.close()
+        return False
+    new_qty = row[0] - quantity
+    if new_qty <= 0:
+        cursor.execute("DELETE FROM farm_inventory WHERE user_id = ? AND item_type = ? AND item_id = ?", (user_id, item_type, item_id))
+    else:
+        cursor.execute("UPDATE farm_inventory SET quantity = ? WHERE user_id = ? AND item_type = ? AND item_id = ?", (new_qty, user_id, item_type, item_id))
+    conn.commit()
+    conn.close()
+    return True
+
+def get_plot(plot_index: int):
+    """获取单个地块信息"""
+    conn = get_farm_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT plot_index, plant_type, planted_at, watered_at, growth_stage FROM farm_plots WHERE plot_index = ?", (plot_index,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {"plot_index": row[0], "plant_type": row[1], "planted_at": row[2], "watered_at": row[3], "growth_stage": row[4]}
+
+def till_plot(plot_index: int):
+    """开垦地块"""
+    conn = get_farm_connection()
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR IGNORE INTO farm_plots (plot_index, growth_stage) VALUES (?, 0)", (plot_index,))
+    conn.commit()
+    conn.close()
+
+def plant_seed(plot_index: int, plant_type: str):
+    """种植作物"""
+    conn = get_farm_connection()
+    cursor = conn.cursor()
+    now = datetime.now().isoformat()
+    cursor.execute("""
+    UPDATE farm_plots SET plant_type = ?, planted_at = ?, watered_at = ?, growth_stage = 1
+    WHERE plot_index = ? AND growth_stage = 0
+    """, (plant_type, now, now, plot_index))
+    conn.commit()
+    conn.close()
+
+def water_plot(plot_index: int):
+    """浇水"""
+    conn = get_farm_connection()
+    cursor = conn.cursor()
+    now = datetime.now().isoformat()
+    cursor.execute("UPDATE farm_plots SET watered_at = ? WHERE plot_index = ? AND plant_type IS NOT NULL", (now, plot_index))
+    conn.commit()
+    conn.close()
+
+def harvest_plot(plot_index: int):
+    """收获作物，返回作物类型"""
+    conn = get_farm_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT plant_type, growth_stage FROM farm_plots WHERE plot_index = ?", (plot_index,))
+    row = cursor.fetchone()
+    if not row or row[1] < 5:
+        conn.close()
+        return None
+    plant_type = row[0]
+    cursor.execute("UPDATE farm_plots SET plant_type = NULL, planted_at = NULL, watered_at = NULL, growth_stage = 0 WHERE plot_index = ?", (plot_index,))
+    conn.commit()
+    conn.close()
+    return plant_type
+
+def get_plant_def(plant_id: str):
+    """获取植物定义"""
+    conn = get_farm_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM farm_plants WHERE id = ?", (plant_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {"id": row[0], "name": row[1], "seed_cost": row[2], "sell_price": row[3], "growth_time": row[4], "water_reduction": row[5], "unlock_days": row[6], "unlock_both_checkins": row[7], "stages": row[8], "description": row[9]}
+
+def get_fish_def(fish_id: str):
+    """获取鱼类定义"""
+    conn = get_farm_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM farm_fish WHERE id = ?", (fish_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {"id": row[0], "name": row[1], "sell_price": row[2], "rarity": row[3], "min_wait": row[4], "max_wait": row[5], "description": row[6]}
+
+def get_unlocked_plants(days_together: int, both_checkins: int):
+    """获取已解锁的植物列表"""
+    conn = get_farm_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM farm_plants WHERE unlock_days <= ? AND unlock_both_checkins <= ? ORDER BY unlock_days", (days_together, both_checkins))
+    plants = []
+    for row in cursor.fetchall():
+        plants.append({"id": row[0], "name": row[1], "seed_cost": row[2], "sell_price": row[3], "growth_time": row[4], "water_reduction": row[5], "unlock_days": row[6], "unlock_both_checkins": row[7], "stages": row[8], "description": row[9]})
+    conn.close()
+    return plants
+
+def get_love_progress():
+    """获取恋爱进度（天数&共同签到数）"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT value FROM meta_config WHERE key = 'anniversary_date'")
+    row = cursor.fetchone()
+    days_together = 0
+    if row:
+        anniversary_date = datetime.strptime(row[0], "%Y-%m-%d")
+        days_together = (datetime.now() - anniversary_date).days
+    
+    cursor.execute("""SELECT COUNT(DISTINCT DATE(checkin_time)) FROM daily_checkin WHERE user_id IN (1, 2) GROUP BY DATE(checkin_time) HAVING COUNT(DISTINCT user_id) = 2""")
+    both_checkins = len(cursor.fetchall())
+    
+    conn.close()
+    return days_together, both_checkins
+
+def update_growth_stages():
+    """更新所有地块的生长阶段（根据时间计算）"""
+    conn = get_farm_connection()
+    cursor = conn.cursor()
+    now = datetime.now()
+    
+    cursor.execute("SELECT plot_index, plant_type, planted_at, watered_at, growth_stage FROM farm_plots WHERE plant_type IS NOT NULL AND growth_stage < 5")
+    for row in cursor.fetchall():
+        plot_index, plant_type, planted_at_str, watered_at_str, stage = row
+        if not plant_type or not planted_at_str:
+            continue
+        
+        planted_at = datetime.fromisoformat(planted_at_str)
+        watered_at = datetime.fromisoformat(watered_at_str) if watered_at_str else planted_at
+        
+        # 计算浇水次数：基于watered_at和planted_at的时间差
+        water_count = max(0, int((watered_at - planted_at).total_seconds() / 60 + 0.5))
+        
+        # 获取植物定义
+        cursor.execute("SELECT growth_time, water_reduction, stages FROM farm_plants WHERE id = ?", (plant_type,))
+        plant_row = cursor.fetchone()
+        if not plant_row:
+            continue
+        growth_time, water_reduction, total_stages = plant_row
+        
+        # 计算实际生长时间（浇水减少时间）
+        effective_growth = max(growth_time * 0.3, growth_time - water_count * water_reduction)
+        elapsed = (now - planted_at).total_seconds()
+        
+        # 计算生长阶段
+        progress = min(1.0, elapsed / effective_growth)
+        new_stage = 1 + int(progress * (total_stages - 1))
+        new_stage = min(total_stages, new_stage)
+        if progress >= 1.0:
+            new_stage = total_stages + 1  # 可收获阶段
+        
+        if new_stage != stage:
+            cursor.execute("UPDATE farm_plots SET growth_stage = ? WHERE plot_index = ?", (new_stage, plot_index))
+    
+    conn.commit()
+    conn.close()
+
+def can_claim_daily(user_id: int, claim_type: str) -> bool:
+    """检查今日是否可领取奖励"""
+    conn = get_farm_connection()
+    cursor = conn.cursor()
+    today = datetime.now().strftime("%Y-%m-%d")
+    cursor.execute("SELECT COUNT(*) FROM farm_daily_claims WHERE user_id = ? AND claim_type = ? AND claim_date = ?", (user_id, claim_type, today))
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count == 0
+
+def record_daily_claim(user_id: int, claim_type: str):
+    """记录每日领取"""
+    conn = get_farm_connection()
+    cursor = conn.cursor()
+    today = datetime.now().strftime("%Y-%m-%d")
+    cursor.execute("INSERT OR IGNORE INTO farm_daily_claims (user_id, claim_type, claim_date) VALUES (?, ?, ?)", (user_id, claim_type, today))
+    conn.commit()
+    conn.close()
 
 def check_and_unlock_time_achievements(user_id: int):
     """Check and unlock time-based achievements"""

@@ -14,7 +14,7 @@ from starlette.middleware.cors import CORSMiddleware
 import os
 
 from .database import init_db
-from .routes import auth, dashboard, api, websocket, achievements, messages, memories
+from .routes import auth, dashboard, api, websocket, achievements, messages, memories, farm
 
 async def not_found(request, exc):
     """Custom 404 handler that redirects to gate"""
@@ -70,7 +70,18 @@ def create_app():
             Route("/api/checkin-statistics", api.get_checkin_statistics, name="checkin_stats"),
             Route("/api/checkin-calendar", api.get_checkin_calendar_data, name="checkin_calendar"),
             Route("/api/checkin-insights", api.get_checkin_insights, name="checkin_insights"),
-            Route("/farm", dashboard.placeholder, name="farm_placeholder"),
+            Route("/farm", farm.farm_page, name="farm"),
+            Route("/api/farm/state", farm.api_farm_state, name="farm_state"),
+            Route("/api/farm/currency", farm.api_farm_currency, name="farm_currency"),
+            Route("/api/farm/buy-seed", farm.api_buy_seed, methods=["POST"], name="farm_buy_seed"),
+            Route("/api/farm/till", farm.api_till, methods=["POST"], name="farm_till"),
+            Route("/api/farm/plant", farm.api_plant, methods=["POST"], name="farm_plant"),
+            Route("/api/farm/water", farm.api_water, methods=["POST"], name="farm_water"),
+            Route("/api/farm/harvest", farm.api_harvest, methods=["POST"], name="farm_harvest"),
+            Route("/api/farm/sell", farm.api_sell, methods=["POST"], name="farm_sell"),
+            Route("/api/farm/fish", farm.api_fish, methods=["POST"], name="farm_fish"),
+            Route("/api/farm/diary-reward", farm.api_diary_reward, methods=["POST"], name="farm_diary_reward"),
+            Route("/api/farm/checkin-reward", farm.api_checkin_reward, methods=["POST"], name="farm_checkin_reward"),
             Route("/achievements", achievements.achievements_page, name="achievements"),
             Route("/messages", messages.messages_page, name="messages"),
             Route("/api/messages", messages.api_get_messages, name="api_get_messages"),
@@ -121,10 +132,11 @@ def create_app():
         if not app.debug:
             response.headers["Content-Security-Policy"] = \
                 "default-src 'self'; " \
-                "script-src 'self' 'unsafe-inline'; " \
+                "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; " \
                 "style-src 'self' 'unsafe-inline'; " \
-                "img-src 'self' data:; " \
-                "connect-src 'self' ws: wss:;"
+                "img-src 'self' data: blob:; " \
+                "connect-src 'self' ws: wss:; " \
+                "worker-src 'self' blob:;"
         
         return response
     
