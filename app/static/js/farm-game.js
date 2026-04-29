@@ -97,7 +97,52 @@ class FarmScene extends Phaser.Scene {
         this.syncWithServer();
         this.time.addEvent({ delay: 10000, callback: () => this.syncWithServer(), loop: true });
 
+        // 持续显示作物信息
+        this.plotLabel = this.add.text(0, 0, '', {
+            fontSize: '11px', color: '#ffdd88', fontFamily: 'Arial',
+            stroke: '#000', strokeThickness: 3,
+            align: 'center'
+        }).setOrigin(0.5).setDepth(50).setVisible(false);
+        this.time.addEvent({ delay: 500, callback: () => this.updatePlotLabel(), loop: true });
+
         this.currentTool = 'hoe';
+    }
+
+    updatePlotLabel() {
+        if (!this.player || !this.player.body) return;
+        if (window.FARM_DATA.isFishing) { this.plotLabel.setVisible(false); return; }
+
+        const px = this.player.x, py = this.player.y;
+        const idx = findNearestPlot(px, py, 60);
+        if (idx === null) { this.plotLabel.setVisible(false); return; }
+
+        const pd = window.FARM_DATA.plots[idx];
+        if (!pd || !pd.plant_type) { this.plotLabel.setVisible(false); return; }
+
+        const plantDef = window.FARM_DATA.plants[pd.plant_type];
+        if (!plantDef) { this.plotLabel.setVisible(false); return; }
+
+        const stage = pd.growth_stage;
+        const totalStages = plantDef.stages;
+
+        if (stage >= totalStages + 1) {
+            this.plotLabel.setText('✨可收获✨');
+            this.plotLabel.setVisible(true);
+        } else {
+            const now = Date.now();
+            const plantedTime = pd.planted_at ? new Date(pd.planted_at).getTime() : now;
+            const wateredTime = pd.watered_at ? new Date(pd.watered_at).getTime() : plantedTime;
+            const waterCount = Math.max(0, Math.round((wateredTime - plantedTime) / 60000));
+            const effectiveGrowth = Math.max(plantDef.growth_time * 0.3, plantDef.growth_time - waterCount * plantDef.water_reduction);
+            const elapsed = (now - plantedTime) / 1000;
+            const remaining = Math.max(0, Math.round(effectiveGrowth - elapsed));
+            const remainText = remaining > 0 ? formatGrowthTime(remaining) : '即将成熟';
+            this.plotLabel.setText(`${plantDef.name}\n剩余:${remainText}`);
+            this.plotLabel.setVisible(true);
+        }
+
+        const pos = getPlotWorldPos(idx);
+        this.plotLabel.setPosition(pos.x, pos.y - PLOT_SIZE / 2 - 18);
     }
 
     // ============ 地图构建 ============
@@ -241,7 +286,6 @@ class FarmScene extends Phaser.Scene {
 
     handleClick(pointer) {
         if (window.FARM_DATA.isFishing) return;
-        // 忽略弹窗上的点击
         if (pointer.downElement && pointer.downElement.closest && pointer.downElement.closest('.modal-overlay')) return;
 
         const wp = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
@@ -260,11 +304,46 @@ class FarmScene extends Phaser.Scene {
             else if (this.currentTool === 'water') this.playerMoveTo(wx, wy, () => this.waterPlot(plotIdx));
             else if (this.currentTool === 'seed') this.playerMoveTo(wx, wy, () => this.openSeedModal(plotIdx));
             else if (this.currentTool === 'harvest') this.playerMoveTo(wx, wy, () => this.harvestPlot(plotIdx));
-            else this.playerMoveTo(wx, wy, null);
+            else {
+                // 非操作工具：显示作物信息
+                this.showPlotInfo(plotIdx);
+                this.playerMoveTo(wx, wy, null);
+            }
             return;
         }
 
         this.playerMoveTo(wx, wy, null);
+    }
+
+    showPlotInfo(plotIdx) {
+        const pd = window.FARM_DATA.plots[plotIdx];
+        if (!pd || !pd.plant_type) return;
+
+        const plantDef = window.FARM_DATA.plants[pd.plant_type];
+        if (!plantDef) return;
+
+        const stage = pd.growth_stage;
+        const totalStages = plantDef.stages;
+        const stageNames = ['开垦', '种子', '发芽', '生长', '成熟', '可收获'];
+
+        if (stage >= totalStages + 1) {
+            showToast(`${plantDef.name} ✨已成熟，可以收获了！`);
+            return;
+        }
+
+        // 计算剩余时间
+        const now = Date.now();
+        const plantedTime = pd.planted_at ? new Date(pd.planted_at).getTime() : now;
+        const wateredTime = pd.watered_at ? new Date(pd.watered_at).getTime() : plantedTime;
+        const waterCount = Math.max(0, Math.round((wateredTime - plantedTime) / 60000));
+        const effectiveGrowth = Math.max(plantDef.growth_time * 0.3, plantDef.growth_time - waterCount * plantDef.water_reduction);
+        const elapsed = (now - plantedTime) / 1000;
+        const remaining = Math.max(0, Math.round(effectiveGrowth - elapsed));
+
+        const stageName = stageNames[Math.min(stage, stageNames.length - 1)] || '生长中';
+        const remainText = remaining > 0 ? formatGrowthTime(remaining) : '即将成熟';
+
+        showToast(`${plantDef.name} | ${stageName}(阶段${stage}/${totalStages}) | 剩余约${remainText}`);
     }
 
     playerMoveTo(tx, ty, onArrive) {
@@ -318,7 +397,11 @@ class FarmScene extends Phaser.Scene {
         if (plot.growth_stage >= 5) { showToast('作物已成熟！'); return; }
         const r = await fetch('/api/farm/water', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ plot_index: idx }) });
         const d = await r.json();
-        if (d.success) { showToast('浇水成功！💧'); await this.syncWithServer(); }
+        if (d.success) {
+            const reduction = formatGrowthTime(d.water_reduction || 0);
+            showToast(`💧 浇水成功！减少${reduction}`);
+            await this.syncWithServer();
+        }
         else showToast(d.error || '浇水失败');
     }
 

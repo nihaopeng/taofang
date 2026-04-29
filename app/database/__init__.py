@@ -315,11 +315,11 @@ def init_farm_tables():
 def _init_default_plants(cursor):
     """初始化默认植物数据"""
     plants = [
-        ("carrot", "胡萝卜", 5, 15, 180, 45, 0, 0, 4, "基础作物，3分钟成熟"),
-        ("wheat", "小麦", 10, 25, 600, 90, 0, 0, 4, "基础粮食，10分钟成熟"),
-        ("hops", "啤酒花", 15, 40, 3600, 300, 7, 3, 5, "需恋爱7天，1小时成熟"),
-        ("tomato", "番茄", 20, 60, 14400, 600, 14, 7, 4, "需恋爱14天，4小时成熟"),
-        ("sunflower", "向日葵", 30, 100, 57600, 1200, 30, 14, 5, "需恋爱30天，16小时成熟"),
+        ("carrot", "胡萝卜", 20, 20, 180, 45, 0, 0, 4, "基础作物，3分钟成熟"),
+        ("wheat", "小麦", 40, 40, 600, 90, 0, 0, 4, "基础粮食，10分钟成熟"),
+        ("hops", "啤酒花", 100, 120, 3600, 300, 7, 3, 5, "需恋爱7天，1小时成熟"),
+        ("tomato", "番茄", 200, 250, 14400, 600, 14, 7, 4, "需恋爱14天，4小时成熟"),
+        ("sunflower", "向日葵", 400, 800, 57600, 1200, 30, 14, 5, "需恋爱30天，16小时成熟"),
     ]
     for plant in plants:
         cursor.execute("""INSERT INTO farm_plants (id, name, seed_cost, sell_price, growth_time, water_reduction, unlock_days, unlock_both_checkins, stages, description) VALUES (?,?,?,?,?,?,?,?,?,?)""", plant)
@@ -327,11 +327,11 @@ def _init_default_plants(cursor):
 def _init_default_fish(cursor):
     """初始化默认鱼类数据"""
     fish = [
-        ("carp", "鲤鱼", 10, "common", 2.0, 6.0, "常见的淡水鱼"),
-        ("bass", "鲈鱼", 20, "common", 2.5, 7.0, "肉质鲜美的鱼类"),
-        ("salmon", "三文鱼", 35, "uncommon", 3.0, 10.0, "较为稀有的鱼类"),
-        ("goldfish", "金鱼", 50, "rare", 4.0, 15.0, "非常稀有的观赏鱼"),
-        ("koi", "锦鲤", 80, "rare", 5.0, 20.0, "传说级别的锦鲤！"),
+        ("carp", "鲤鱼", 2, "common", 2.0, 6.0, "常见的淡水鱼"),
+        ("bass", "鲈鱼", 4, "common", 2.5, 7.0, "肉质鲜美的鱼类"),
+        ("salmon", "三文鱼", 7, "uncommon", 3.0, 10.0, "较为稀有的鱼类"),
+        ("goldfish", "金鱼", 15, "rare", 4.0, 15.0, "非常稀有的观赏鱼"),
+        ("koi", "锦鲤", 12, "rare", 5.0, 20.0, "传说级别的锦鲤！"),
     ]
     for f in fish:
         cursor.execute("INSERT INTO farm_fish (id, name, sell_price, rarity, min_wait, max_wait, description) VALUES (?,?,?,?,?,?,?)", f)

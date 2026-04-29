@@ -12,6 +12,20 @@ from datetime import datetime
 import random
 
 
+def format_growth_time(seconds):
+    """格式化生长时间为可读字符串"""
+    if seconds >= 3600:
+        h = seconds // 3600
+        m = (seconds % 3600) // 60
+        if m > 0:
+            return f"{h}小时{m}分钟"
+        return f"{h}小时"
+    elif seconds >= 60:
+        return f"{seconds // 60}分钟"
+    else:
+        return f"{seconds}秒"
+
+
 async def farm_page(request: Request):
     """农场游戏页面"""
     if not request.session.get("authenticated"):
@@ -194,15 +208,26 @@ async def api_water(request: Request):
     if plot["growth_stage"] >= 5:
         return JSONResponse({"success": False, "error": "作物已成熟，可以收获了"}, status_code=400)
     
+    plant_def = get_plant_def(plot["plant_type"])
+    water_reduction = plant_def["water_reduction"] if plant_def else 60
+    
     water_plot(plot_index)
     update_growth_stages()
     
     farm_state = get_farm_state()
+    updated_plot = farm_state["plots"].get(str(plot_index))
+    stage_before = plot["growth_stage"]
+    stage_after = updated_plot["growth_stage"] if updated_plot else stage_before
+    
+    reduction_text = format_growth_time(water_reduction)
     
     return JSONResponse({
         "success": True,
-        "message": "浇水成功！作物长得更快了",
-        "plot": farm_state["plots"].get(str(plot_index))
+        "message": f"浇水成功！减少了{reduction_text}",
+        "water_reduction": water_reduction,
+        "stage_before": stage_before,
+        "stage_after": stage_after,
+        "plot": updated_plot
     })
 
 
