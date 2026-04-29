@@ -427,7 +427,11 @@ class FarmScene extends Phaser.Scene {
                 sp.state = 'empty'; continue;
             }
 
-            const bg = this.add.rectangle(pos.x, pos.y, PLOT_SIZE, PLOT_SIZE, 0x8B6914, 0.65).setDepth(1);
+            // 浇水判断：watered_at > planted_at 表示浇过水
+            const isWatered = pd.watered_at && pd.planted_at && pd.watered_at > pd.planted_at;
+            const soilColor = isWatered ? 0x5C4A1E : 0x8B6914;
+            const soilAlpha = isWatered ? 0.85 : 0.65;
+            const bg = this.add.rectangle(pos.x, pos.y, PLOT_SIZE, PLOT_SIZE, soilColor, soilAlpha).setDepth(1);
             bg.setStrokeStyle(1, 0x6B4914, 0.7);
             sp.bgRect = bg; sp.state = 'tilled';
 
@@ -634,6 +638,12 @@ function setTool(tool) {
 }
 
 // ============ 商店 ============
+function formatGrowthTime(seconds) {
+    if (seconds >= 3600) return Math.round(seconds / 3600) + '小时';
+    if (seconds >= 60) return Math.round(seconds / 60) + '分钟';
+    return seconds + '秒';
+}
+
 function openShopModal() {
     const c = document.getElementById('shop-items'); c.innerHTML = '';
     const plants = window.FARM_DATA.plants;
@@ -643,8 +653,8 @@ function openShopModal() {
         const div = document.createElement('div');
         div.className = 'item-row' + (isUnlocked ? '' : ' locked');
         div.innerHTML = isUnlocked
-            ? `<div class="item-info"><div class="item-name">🌱 ${p.name}</div><div class="item-desc">${p.description||''} | ${p.growth_time}秒</div><div class="item-price">🪙 ${p.seed_cost}</div></div><button class="btn-sm btn-buy">购买</button>`
-            : `<div class="item-info"><div class="item-name">🔒 ${p.name}</div><div class="item-desc">${p.description||''}</div><div class="locked-label">需恋爱${p.unlock_days}天+共签${p.unlock_both_checkins}天</div></div>`;
+            ? `<div class="item-info"><div class="item-name">🌱 ${p.name}</div><div class="item-desc">${p.description||''} | ${formatGrowthTime(p.growth_time)}</div><div class="item-price">🪙 ${p.seed_cost}</div></div><button class="btn-sm btn-buy">购买</button>`
+            : `<div class="item-info"><div class="item-name">🔒 ${p.name}</div><div class="item-desc">${p.description||''} | ${formatGrowthTime(p.growth_time)}</div><div class="locked-label">需恋爱${p.unlock_days}天+共签${p.unlock_both_checkins}天</div></div>`;
         if (isUnlocked) div.querySelector('button').onclick = () => buySeed(id);
         c.appendChild(div);
     }
