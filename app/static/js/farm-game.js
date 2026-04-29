@@ -473,13 +473,17 @@ class FishingMinigame {
         this.onComplete = onComplete;
         this.barH = 200; this.floatY = 180; this.floatH = 18;
         this.targetY = 80; this.targetH = 36;
-        this.floatVel = 0; this.progress = 0;
+        this.floatVel = 0; this.progress = 50;
         this.isRunning = false; this.isHolding = false;
         this.targetPhase = 0;
         this.targetSpeed = 0.025 + Math.random() * 0.02;
         this.targetAmplitude = 40 + Math.random() * 40;
         this.targetCenter = 60 + Math.random() * (this.barH - 120);
         this.animId = null;
+        this.frameCount = 0;
+        this.jitterTimer = 0;
+        this.jitterOffset = 0;
+        this.speedChangeTimer = 0;
     }
 
     start() {
@@ -490,7 +494,8 @@ class FishingMinigame {
         document.getElementById('fishing-cancel-btn').style.display = 'block';
         document.getElementById('fishing-progress-fill').style.width = '0%';
 
-        this.floatY = this.barH / 2; this.floatVel = 0; this.progress = 15;
+        this.floatY = this.barH / 2; this.floatVel = 0; this.progress = 50;
+        this.frameCount = 0; this.jitterTimer = 0; this.jitterOffset = 0; this.speedChangeTimer = 0;
         this.isRunning = true; this.targetPhase = Math.random() * Math.PI * 2;
 
         const barWrapper = document.querySelector('.fishing-bar-wrapper');
@@ -511,9 +516,27 @@ class FishingMinigame {
 
     tick() {
         if (!this.isRunning) return;
+        this.frameCount++;
+
+        // 随机变速：每隔一段时间改变目标速度
+        this.speedChangeTimer++;
+        if (this.speedChangeTimer > 60 + Math.random() * 120) {
+            this.speedChangeTimer = 0;
+            this.targetSpeed = 0.015 + Math.random() * 0.045;
+        }
+
+        // 随机抖动：每隔一段时间给目标一个随机偏移
+        this.jitterTimer++;
+        if (this.jitterTimer > 30 + Math.random() * 90) {
+            this.jitterTimer = 0;
+            this.jitterOffset = (Math.random() - 0.5) * 40;
+        }
+        // 抖动平滑衰减
+        this.jitterOffset *= 0.9;
+
         this.targetPhase += this.targetSpeed;
-        this.targetY = this.targetCenter + Math.sin(this.targetPhase) * this.targetAmplitude;
-        this.targetY = Math.max(0, Math.min(this.barH - this.targetH, this.targetY));
+        this.targetY = this.targetCenter + Math.sin(this.targetPhase) * this.targetAmplitude + this.jitterOffset;
+        this.targetY = Math.max(2, Math.min(this.barH - this.targetH - 2, this.targetY));
 
         const gravity = 0.25, lift = -0.45, friction = 0.93;
         if (this.isHolding) this.floatVel += lift; else this.floatVel += gravity;
