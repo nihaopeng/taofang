@@ -81,6 +81,7 @@ def create_app():
             Route("/api/farm/sell", farm.api_sell, methods=["POST"], name="farm_sell"),
             Route("/api/farm/fish", farm.api_fish, methods=["POST"], name="farm_fish"),
             Route("/api/farm/steal", farm.api_steal, methods=["POST"], name="farm_steal"),
+            Route("/api/farm/unlock-plot", farm.api_unlock_plot, methods=["POST"], name="farm_unlock_plot"),
             Route("/api/farm/release-fish", farm.api_release_fish, methods=["POST"], name="farm_release_fish"),
             Route("/api/farm/diary-reward", farm.api_diary_reward, methods=["POST"], name="farm_diary_reward"),
             Route("/api/farm/checkin-reward", farm.api_checkin_reward, methods=["POST"], name="farm_checkin_reward"),

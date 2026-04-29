@@ -7,7 +7,7 @@ from ..database import (
     get_plant_def, get_fish_def, get_unlocked_plants, get_love_progress,
     update_growth_stages, init_farm_tables,
     can_claim_daily, record_daily_claim, get_ponds, try_catch_fish, release_fish_to_pond,
-    steal_plot
+    steal_plot, get_next_plot_cost, unlock_next_plot, get_unlocked_plots_count
 )
 from datetime import datetime
 import random
@@ -56,7 +56,8 @@ async def api_farm_state(request: Request):
     update_growth_stages()
     
     farm_state = get_farm_state(target_user_id)
-    coins = get_farm_currency(user_id)
+    coins, _ = get_farm_currency(user_id)  # 自己的金币
+    unlocked_plots_target = get_unlocked_plots_count(target_user_id)  # 目标农场的地块解锁数
     inventory = get_inventory(user_id)
     days_together, both_checkins = get_love_progress()
     unlocked_plants = get_unlocked_plants(days_together, both_checkins)
@@ -75,6 +76,8 @@ async def api_farm_state(request: Request):
     return JSONResponse({
         "success": True,
         "coins": coins,
+        "unlocked_plots": unlocked_plots_target,
+        "next_plot_cost": get_next_plot_cost(target_user_id),
         "plots": farm_state["plots"],
         "plants": farm_state["plants"],
         "fish": farm_state["fish"],
@@ -98,7 +101,7 @@ async def api_farm_currency(request: Request):
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     
     user_id = request.session.get("user_id")
-    coins = get_farm_currency(user_id)
+    coins, unlocked_plots = get_farm_currency(user_id)
     return JSONResponse({"success": True, "coins": coins})
 
 
@@ -131,7 +134,7 @@ async def api_buy_seed(request: Request):
         return JSONResponse({"success": False, "error": "货币不足"}, status_code=400)
     
     add_to_inventory(user_id, "seed", plant_id, quantity)
-    coins = get_farm_currency(user_id)
+    coins, unlocked_plots = get_farm_currency(user_id)
     inventory = get_inventory(user_id)
     
     return JSONResponse({
@@ -288,6 +291,30 @@ async def api_harvest(request: Request):
         "crop": plant_type,
         "plots": farm_state["plots"],
         "inventory": inventory
+    })
+
+
+async def api_unlock_plot(request: Request):
+    """解锁下一个地块"""
+    if not request.session.get("authenticated"):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    user_id = request.session.get("user_id")
+    cost = get_next_plot_cost(user_id)
+    if cost < 0:
+        return JSONResponse({"success": False, "error": "所有地块已解锁"}, status_code=400)
+    
+    if not unlock_next_plot(user_id):
+        return JSONResponse({"success": False, "error": f"金币不足，需要 {cost} 金币"}, status_code=400)
+    
+    _, unlocked = get_farm_currency(user_id)
+    next_cost = get_next_plot_cost(user_id)
+    
+    return JSONResponse({
+        "success": True,
+        "message": f"解锁成功，花费 {cost} 金币",
+        "unlocked_plots": unlocked,
+        "next_plot_cost": next_cost
     })
 
 

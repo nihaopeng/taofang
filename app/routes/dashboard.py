@@ -66,7 +66,7 @@ async def home(request: Request):
     
     # Prepare context
     try:
-        farm_coins = get_farm_currency(user_id)
+        farm_coins, _ = get_farm_currency(user_id)
     except:
         farm_coins = 0
     

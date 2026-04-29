@@ -261,11 +261,11 @@ class FarmScene extends Phaser.Scene {
             const tree = this.add.image(pos.x, pos.y, 'tree').setScale(1.3 + Math.random() * 0.8);
             tree.setDepth(5).setAlpha(0.85);
 
-            // 物理碰撞（树干区域）
-            const trunk = this.add.rectangle(pos.x, pos.y + 16, 18, 22);
-            trunk.setVisible(false);
-            this.physics.add.existing(trunk, true);
-            treeGroup.add(trunk);
+            // // 物理碰撞（树干区域）
+            // const trunk = this.add.rectangle(pos.x, pos.y + 16, 18, 22);
+            // trunk.setVisible(false);
+            // this.physics.add.existing(trunk, true);
+            // treeGroup.add(trunk);
         });
 
         this.physics.add.collider(this.player, treeGroup);
@@ -338,6 +338,12 @@ class FarmScene extends Phaser.Scene {
         // 地块操作
         const plotIdx = findNearestPlot(wx, wy, 55);
         if (plotIdx !== null) {
+            // 检查是否已解锁
+            const unlocked = window.FARM_DATA.unlockedPlots || 4;
+            if (plotIdx >= unlocked) {
+                this.showUnlockPrompt(plotIdx);
+                return;
+            }
             if (!window.FARM_DATA.viewingOwnFarm) {
                 // 在对方农场：只有偷菜
                 if (this.currentTool === 'harvest') {
@@ -392,6 +398,24 @@ class FarmScene extends Phaser.Scene {
         const remainText = remaining > 0 ? formatGrowthTime(remaining) : '即将成熟';
 
         showToast(`${plantDef.name} | ${stageName}(阶段${stage}/${totalStages}) | 剩余约${remainText}`);
+    }
+
+    showUnlockPrompt(plotIdx) {
+        const cost = window.FARM_DATA.nextPlotCost || 50;
+        if (confirm(`这块地尚未解锁\n解锁费用：${cost} 金币\n\n确定解锁吗？`)) {
+            this.unlockPlot();
+        }
+    }
+
+    async unlockPlot() {
+        const r = await fetch('/api/farm/unlock-plot', { method: 'POST' });
+        const d = await r.json();
+        if (d.success) {
+            showToast('🔓 ' + d.message);
+            await this.syncWithServer();
+        } else {
+            showToast(d.error || '解锁失败');
+        }
     }
 
     playerMoveTo(tx, ty, onArrive) {
@@ -590,6 +614,8 @@ class FarmScene extends Phaser.Scene {
                 window.FARM_DATA.ponds = d.ponds || {};
                 window.FARM_DATA.inventory = d.inventory;
                 window.FARM_DATA.unlockedPlants = d.unlocked_plants || [];
+                window.FARM_DATA.unlockedPlots = d.unlocked_plots || 4;
+                window.FARM_DATA.nextPlotCost = d.next_plot_cost || 0;
                 window.FARM_DATA.mainCheckedIn = d.main_checked_in;
                 window.FARM_DATA.partnerId = d.partner_id;
                 this.renderPlots();
@@ -606,6 +632,7 @@ class FarmScene extends Phaser.Scene {
 
     renderPlots() {
         const plots = window.FARM_DATA.plots;
+        const unlocked = window.FARM_DATA.unlockedPlots || 4;
         for (let i = 0; i < PLOTS_PER_ROW * PLOTS_PER_COL; i++) {
             const pd = plots[i];
             const pos = getPlotWorldPos(i);
@@ -615,6 +642,18 @@ class FarmScene extends Phaser.Scene {
             if (sp.cropSprite) { sp.cropSprite.destroy(); sp.cropSprite = null; }
             if (sp.bgRect) { sp.bgRect.destroy(); sp.bgRect = null; }
             if (sp.harvestMarker) { sp.harvestMarker.destroy(); sp.harvestMarker = null; }
+
+            // 未解锁的地块
+            if (i >= unlocked) {
+                const lockBg = this.add.rectangle(pos.x, pos.y, PLOT_SIZE, PLOT_SIZE, 0x333333, 0.5).setDepth(1);
+                lockBg.setStrokeStyle(1, 0x555555, 0.5);
+                sp.bgRect = lockBg;
+                sp.cropSprite = this.add.text(pos.x, pos.y, '🔒', {
+                    fontSize: '16px', color: '#888'
+                }).setOrigin(0.5).setDepth(3);
+                sp.state = 'locked';
+                continue;
+            }
 
             if (!pd || pd.growth_stage === undefined || pd.growth_stage < 0) {
                 sp.state = 'empty'; continue;
@@ -668,7 +707,7 @@ class FarmScene extends Phaser.Scene {
 class FishingMinigame {
     constructor(onComplete) {
         this.onComplete = onComplete;
-        this.barH = 200; this.floatY = 180; this.floatH = 18;
+        this.barH = 180; this.floatY = 160; this.floatH = 16;
         this.targetY = 80; this.targetH = 36;
         this.floatVel = 0; this.progress = 50;
         this.isRunning = false; this.isHolding = false;

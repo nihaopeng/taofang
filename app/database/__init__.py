@@ -283,6 +283,7 @@ def init_farm_tables():
     CREATE TABLE IF NOT EXISTS farm_currency (
         user_id INTEGER PRIMARY KEY,
         coins INTEGER DEFAULT 100,
+        unlocked_plots INTEGER DEFAULT 4,
         FOREIGN KEY (user_id) REFERENCES users(id)
     )
     """)
@@ -328,8 +329,8 @@ def init_farm_tables():
         _init_default_fish(cursor)
     
     # 确保每个用户都有货币记录
-    cursor.execute("INSERT OR IGNORE INTO farm_currency (user_id, coins) VALUES (1, 100)")
-    cursor.execute("INSERT OR IGNORE INTO farm_currency (user_id, coins) VALUES (2, 100)")
+    cursor.execute("INSERT OR IGNORE INTO farm_currency (user_id, coins, unlocked_plots) VALUES (1, 100, 4)")
+    cursor.execute("INSERT OR IGNORE INTO farm_currency (user_id, coins, unlocked_plots) VALUES (2, 100, 4)")
     
     conn.commit()
     conn.close()
@@ -403,20 +404,20 @@ def get_farm_state(user_id: int):
     return {"plots": plots, "plants": plants, "fish": fish_list}
 
 def get_farm_currency(user_id: int):
-    """获取用户农场货币"""
+    """获取用户农场货币和已解锁地块数"""
     conn = get_farm_connection()
     cursor = conn.cursor()
-    cursor.execute("INSERT OR IGNORE INTO farm_currency (user_id, coins) VALUES (?, 100)", (user_id,))
-    cursor.execute("SELECT coins FROM farm_currency WHERE user_id = ?", (user_id,))
+    cursor.execute("INSERT OR IGNORE INTO farm_currency (user_id, coins, unlocked_plots) VALUES (?, 100, 4)", (user_id,))
+    cursor.execute("SELECT coins, unlocked_plots FROM farm_currency WHERE user_id = ?", (user_id,))
     row = cursor.fetchone()
     conn.close()
-    return row[0] if row else 100
+    return (row[0], row[1]) if row else (100, 4)
 
 def add_farm_currency(user_id: int, amount: int):
     """增加农场货币"""
     conn = get_farm_connection()
     cursor = conn.cursor()
-    cursor.execute("INSERT OR IGNORE INTO farm_currency (user_id, coins) VALUES (?, 100)", (user_id,))
+    cursor.execute("INSERT OR IGNORE INTO farm_currency (user_id, coins, unlocked_plots) VALUES (?, 100, 4)", (user_id,))
     cursor.execute("UPDATE farm_currency SET coins = coins + ? WHERE user_id = ?", (amount, user_id))
     cursor.execute("SELECT coins FROM farm_currency WHERE user_id = ?", (user_id,))
     new_balance = cursor.fetchone()[0]
@@ -424,10 +425,50 @@ def add_farm_currency(user_id: int, amount: int):
     conn.close()
     return new_balance
 
+def get_unlocked_plots_count(user_id: int) -> int:
+    """获取用户已解锁地块数"""
+    conn = get_farm_connection()
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR IGNORE INTO farm_currency (user_id, coins, unlocked_plots) VALUES (?, 100, 4)", (user_id,))
+    cursor.execute("SELECT unlocked_plots FROM farm_currency WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else 4
+
+def get_next_plot_cost(user_id: int) -> int:
+    """获取解锁下一个地块的费用"""
+    unlocked = get_unlocked_plots_count(user_id)
+    if unlocked >= 20:
+        return -1
+    return 50 * (2 ** (unlocked - 4))
+
+def unlock_next_plot(user_id: int) -> bool:
+    """解锁下一个地块，返回是否成功"""
+    conn = get_farm_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT coins, unlocked_plots FROM farm_currency WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return False
+    coins, unlocked = row
+    if unlocked >= 20:
+        conn.close()
+        return False
+    cost = 50 * (2 ** (unlocked - 4))
+    if coins < cost:
+        conn.close()
+        return False
+    cursor.execute("UPDATE farm_currency SET coins = coins - ?, unlocked_plots = unlocked_plots + 1 WHERE user_id = ?", (cost, user_id))
+    conn.commit()
+    conn.close()
+    return True
+
 def spend_farm_currency(user_id: int, amount: int) -> bool:
     """花费农场货币，返回是否成功"""
     conn = get_farm_connection()
     cursor = conn.cursor()
+    cursor.execute("INSERT OR IGNORE INTO farm_currency (user_id, coins, unlocked_plots) VALUES (?, 100, 4)", (user_id,))
     cursor.execute("SELECT coins FROM farm_currency WHERE user_id = ?", (user_id,))
     row = cursor.fetchone()
     if not row or row[0] < amount:
