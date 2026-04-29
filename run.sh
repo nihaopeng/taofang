@@ -2,6 +2,19 @@
 
 port=80
 
+# backup old db
+if [ -f "app\database\heartsync.db" ]; then
+    timestamp=$(date +"%Y%m%d%H%M%S")
+    cp "app\database\heartsync.db" "app\database\heartsync.$timestamp.bak.db"
+    echo "Existing database backed up as app\database\heartsync.$timestamp.bak.db"
+fi
+
+if [ -f "app\database\farm.db" ]; then
+    timestamp=$(date +"%Y%m%d%H%M%S")
+    cp "app\database\farm.db" "app\database\farm.$timestamp.bak.db"
+    echo "Existing database backed up as app\database\farm.$timestamp.bak.db"
+fi
+
 # env install
 if [ ! -d ".venv" ]; then
     python3 -m venv .venv
