@@ -158,7 +158,6 @@ class FarmScene extends Phaser.Scene {
         // 水塘1 - 左上
         const w1 = { x: 230, y: 190, w: 300, h: 200 };
         this.drawWater(w1.x, w1.y, w1.w, w1.h, 5);
-        this.addWaterCollider(w1.x, w1.y, w1.w, w1.h);
         this.add.text(w1.x, w1.y + 10, '🎣 水塘', {
             fontSize: '16px', color: '#ddeeff', fontFamily: 'Arial',
             stroke: '#225577', strokeThickness: 3
@@ -167,7 +166,6 @@ class FarmScene extends Phaser.Scene {
         // 水塘2 - 右下
         const w2 = { x: 1320, y: 830, w: 400, h: 260 };
         this.drawWater(w2.x, w2.y, w2.w, w2.h, 7);
-        this.addWaterCollider(w2.x, w2.y, w2.w, w2.h);
         this.add.text(w2.x, w2.y + 10, '🎣 水塘', {
             fontSize: '16px', color: '#ddeeff', fontFamily: 'Arial',
             stroke: '#225577', strokeThickness: 3
@@ -190,12 +188,6 @@ class FarmScene extends Phaser.Scene {
         }
     }
 
-    addWaterCollider(cx, cy, w, h) {
-        const c = this.add.rectangle(cx, cy, w - 8, h - 8);
-        c.setVisible(false);
-        this.physics.add.existing(c, true);
-        this.physics.add.collider(this.player, c);
-    }
 
     createTrees() {
         const treeGroup = this.physics.add.staticGroup();
@@ -370,18 +362,31 @@ class FarmScene extends Phaser.Scene {
 
     async startFishing() {
         window.FARM_DATA.isFishing = true;
-        document.getElementById('fishing-indicator').classList.add('show');
-        try {
-            const r = await fetch('/api/farm/fish', { method: 'POST' });
-            const d = await r.json();
-            if (d.success) {
-                await new Promise(res => setTimeout(res, Math.min((d.wait_time || 3) * 1000, 5000)));
-                showToast('🎣 钓到了 ' + d.fish.name + '！');
-                await this.syncWithServer(); updateInventoryDisplay();
-            } else showToast(d.error || '钓鱼失败');
-        } catch (e) { showToast('钓鱼失败'); }
-        document.getElementById('fishing-indicator').classList.remove('show');
-        window.FARM_DATA.isFishing = false;
+        this.fishingMinigame = new FishingMinigame(async (success) => {
+            window.FARM_DATA.isFishing = false;
+            document.getElementById('fishing-cancel-btn').style.display = 'none';
+            document.getElementById('fishing-hint').style.display = 'none';
+            if (success) {
+                try {
+                    const r = await fetch('/api/farm/fish', { method: 'POST' });
+                    const d = await r.json();
+                    if (d.success) {
+                        showToast('🎣 钓到了 ' + d.fish.name + '！');
+                        document.getElementById('caught-fish-name').textContent = '🎉 ' + d.fish.name + '！';
+                    } else {
+                        document.getElementById('caught-fish-name').textContent = '鱼跑了...';
+                    }
+                } catch (e) {
+                    document.getElementById('caught-fish-name').textContent = '鱼跑了...';
+                }
+            } else {
+                document.getElementById('caught-fish-name').textContent = '鱼逃走了...';
+            }
+            document.getElementById('fishing-result').style.display = 'flex';
+            await this.syncWithServer();
+            updateInventoryDisplay();
+        });
+        this.fishingMinigame.start();
     }
 
     // ============ 同步 ============
@@ -460,6 +465,117 @@ class FarmScene extends Phaser.Scene {
             }
         }
     }
+}
+
+// ============ 钓鱼小游戏 ============
+class FishingMinigame {
+    constructor(onComplete) {
+        this.onComplete = onComplete;
+        this.barH = 200; this.floatY = 180; this.floatH = 18;
+        this.targetY = 80; this.targetH = 36;
+        this.floatVel = 0; this.progress = 0;
+        this.isRunning = false; this.isHolding = false;
+        this.targetPhase = 0;
+        this.targetSpeed = 0.025 + Math.random() * 0.02;
+        this.targetAmplitude = 40 + Math.random() * 40;
+        this.targetCenter = 60 + Math.random() * (this.barH - 120);
+        this.animId = null;
+    }
+
+    start() {
+        const el = document.getElementById('fishing-game');
+        el.classList.add('show');
+        document.getElementById('fishing-result').style.display = 'none';
+        document.getElementById('fishing-hint').style.display = 'block';
+        document.getElementById('fishing-cancel-btn').style.display = 'block';
+        document.getElementById('fishing-progress-fill').style.width = '0%';
+
+        this.floatY = this.barH / 2; this.floatVel = 0; this.progress = 15;
+        this.isRunning = true; this.targetPhase = Math.random() * Math.PI * 2;
+
+        const barWrapper = document.querySelector('.fishing-bar-wrapper');
+        const onDown = (e) => { e.preventDefault(); this.isHolding = true; };
+        const onUp = (e) => { e.preventDefault(); this.isHolding = false; };
+        barWrapper.addEventListener('mousedown', onDown);
+        barWrapper.addEventListener('touchstart', onDown);
+        window.addEventListener('mouseup', onUp);
+        window.addEventListener('touchend', onUp);
+        this._cleanup = () => {
+            barWrapper.removeEventListener('mousedown', onDown);
+            barWrapper.removeEventListener('touchstart', onDown);
+            window.removeEventListener('mouseup', onUp);
+            window.removeEventListener('touchend', onUp);
+        };
+        this.tick();
+    }
+
+    tick() {
+        if (!this.isRunning) return;
+        this.targetPhase += this.targetSpeed;
+        this.targetY = this.targetCenter + Math.sin(this.targetPhase) * this.targetAmplitude;
+        this.targetY = Math.max(0, Math.min(this.barH - this.targetH, this.targetY));
+
+        const gravity = 0.25, lift = -0.45, friction = 0.93;
+        if (this.isHolding) this.floatVel += lift; else this.floatVel += gravity;
+        this.floatVel *= friction;
+        this.floatY += this.floatVel;
+        if (this.floatY < 0) { this.floatY = 0; this.floatVel *= -0.3; }
+        if (this.floatY > this.barH - this.floatH) { this.floatY = this.barH - this.floatH; this.floatVel *= -0.3; }
+
+        const fCenter = this.floatY + this.floatH / 2;
+        if (fCenter >= this.targetY && fCenter <= this.targetY + this.targetH) {
+            this.progress += 0.9;
+        } else {
+            this.progress -= 0.35;
+        }
+        this.progress = Math.max(0, Math.min(100, this.progress));
+
+        document.getElementById('fishing-target').style.top = this.targetY + 'px';
+        document.getElementById('fishing-float').style.top = this.floatY + 'px';
+        document.getElementById('fishing-progress-fill').style.width = this.progress + '%';
+
+        // 进度条颜色
+        const fill = document.getElementById('fishing-progress-fill');
+        if (this.progress > 70) fill.style.background = 'linear-gradient(90deg, #ffaa00, #ffcc44)';
+        else if (this.progress > 25) fill.style.background = 'linear-gradient(90deg, #33cc55, #55ee77)';
+        else fill.style.background = 'linear-gradient(90deg, #cc3333, #ee5555)';
+
+        // 失败：进度归零
+        if (this.progress <= 0) {
+            this.isRunning = false;
+            if (this._cleanup) this._cleanup();
+            this.onComplete(false); return;
+        }
+
+        // 成功：进度满
+        if (this.progress >= 100) {
+            this.isRunning = false;
+            if (this._cleanup) this._cleanup();
+            this.onComplete(true); return;
+        }
+        this.animId = requestAnimationFrame(() => this.tick());
+    }
+
+    close() {
+        this.isRunning = false;
+        if (this._cleanup) this._cleanup();
+        if (this.animId) cancelAnimationFrame(this.animId);
+        document.getElementById('fishing-game').classList.remove('show');
+    }
+}
+
+function closeFishingGame() {
+    const scene = game.scene.getScene('FarmScene');
+    if (scene && scene.fishingMinigame) {
+        scene.fishingMinigame.close();
+        scene.fishingMinigame = null;
+    }
+    window.FARM_DATA.isFishing = false;
+}
+
+function cancelFishing() {
+    closeFishingGame();
+    showToast('收起了鱼竿');
 }
 
 // ============ 启动游戏 ============
