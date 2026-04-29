@@ -6,7 +6,7 @@ from ..database import (
     get_plot, till_plot, plant_seed, water_plot, harvest_plot,
     get_plant_def, get_fish_def, get_unlocked_plants, get_love_progress,
     update_growth_stages, init_farm_tables,
-    can_claim_daily, record_daily_claim
+    can_claim_daily, record_daily_claim, get_ponds, try_catch_fish, release_fish_to_pond
 )
 from datetime import datetime
 import random
@@ -58,6 +58,7 @@ async def api_farm_state(request: Request):
     inventory = get_inventory(user_id)
     days_together, both_checkins = get_love_progress()
     unlocked_plants = get_unlocked_plants(days_together, both_checkins)
+    ponds = get_ponds()
     
     return JSONResponse({
         "success": True,
@@ -65,6 +66,7 @@ async def api_farm_state(request: Request):
         "plots": farm_state["plots"],
         "plants": farm_state["plants"],
         "fish": farm_state["fish"],
+        "ponds": ponds,
         "inventory": inventory,
         "unlocked_plants": [p["id"] for p in unlocked_plants],
         "days_together": days_together,
@@ -322,12 +324,67 @@ async def api_sell(request: Request):
     })
 
 
-async def api_fish(request: Request):
-    """钓鱼"""
+async def api_release_fish(request: Request):
+    """放生鱼到水塘"""
     if not request.session.get("authenticated"):
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     
     user_id = request.session.get("user_id")
+    
+    try:
+        body = await request.json()
+    except:
+        body = {}
+    
+    pond_id = body.get("pond_id", 1)
+    fish_id = body.get("fish_id", "")
+    
+    if not fish_id:
+        return JSONResponse({"success": False, "error": "请选择要放生的鱼"}, status_code=400)
+    
+    # 从背包移除
+    if not remove_from_inventory(user_id, "fish", fish_id, 1):
+        return JSONResponse({"success": False, "error": "背包中没有该鱼"}, status_code=400)
+    
+    # 放生到水塘
+    result = release_fish_to_pond(pond_id)
+    if not result:
+        return JSONResponse({"success": False, "error": "水塘不存在"}, status_code=400)
+    
+    if not result.get("success"):
+        # 放生失败，归还鱼
+        add_to_inventory(user_id, "fish", fish_id, 1)
+        return JSONResponse({"success": False, "error": result.get("error", "放生失败")}, status_code=400)
+    
+    inventory = get_inventory(user_id)
+    ponds = get_ponds()
+    
+    return JSONResponse({
+        "success": True,
+        "message": "放生成功",
+        "fish_count": result["fish_count"],
+        "inventory": inventory,
+        "ponds": ponds
+    })
+
+
+async def api_fish(request: Request):
+    """钓鱼 - 需要消耗水塘鱼数"""
+    if not request.session.get("authenticated"):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    user_id = request.session.get("user_id")
+    
+    try:
+        body = await request.json()
+    except:
+        body = {}
+    
+    pond_id = body.get("pond_id", 1)
+    
+    # 检查水塘是否有鱼
+    if not try_catch_fish(pond_id):
+        return JSONResponse({"success": False, "error": "水塘里没有鱼了，等它们繁殖吧"}, status_code=400)
     
     # 获取所有鱼类及其概率
     farm_state = get_farm_state()
@@ -352,19 +409,17 @@ async def api_fish(request: Request):
     if not caught:
         caught = fish_list[0]
     
-    # 计算等待时间
-    wait_time = random.uniform(caught["min_wait"], caught["max_wait"])
-    
     # 加入背包
     add_to_inventory(user_id, "fish", caught["id"], 1)
     inventory = get_inventory(user_id)
+    ponds = get_ponds()
     
     return JSONResponse({
         "success": True,
         "message": f"钓到了 {caught['name']}！",
         "fish": caught,
-        "wait_time": wait_time,
-        "inventory": inventory
+        "inventory": inventory,
+        "ponds": ponds
     })
 
 

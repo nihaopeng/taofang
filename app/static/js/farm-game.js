@@ -203,7 +203,7 @@ class FarmScene extends Phaser.Scene {
         // 水塘1 - 左上
         const w1 = { x: 230, y: 190, w: 300, h: 200 };
         this.drawWater(w1.x, w1.y, w1.w, w1.h, 5);
-        this.add.text(w1.x, w1.y + 10, '🎣 水塘', {
+        this.pond1Label = this.add.text(w1.x, w1.y + 10, '🎣 水塘', {
             fontSize: '16px', color: '#ddeeff', fontFamily: 'Arial',
             stroke: '#225577', strokeThickness: 3
         }).setOrigin(0.5).setDepth(-3).setAlpha(0.6);
@@ -211,10 +211,20 @@ class FarmScene extends Phaser.Scene {
         // 水塘2 - 右下
         const w2 = { x: 1320, y: 830, w: 400, h: 260 };
         this.drawWater(w2.x, w2.y, w2.w, w2.h, 7);
-        this.add.text(w2.x, w2.y + 10, '🎣 水塘', {
+        this.pond2Label = this.add.text(w2.x, w2.y + 10, '🎣 水塘', {
             fontSize: '16px', color: '#ddeeff', fontFamily: 'Arial',
             stroke: '#225577', strokeThickness: 3
         }).setOrigin(0.5).setDepth(-3).setAlpha(0.6);
+    }
+
+    updatePondLabels() {
+        const ponds = window.FARM_DATA.ponds || {};
+        if (ponds[1] !== undefined) {
+            this.pond1Label.setText(`🎣 水塘 🐟×${ponds[1].fish_count}`);
+        }
+        if (ponds[2] !== undefined) {
+            this.pond2Label.setText(`🎣 水塘 🐟×${ponds[2].fish_count}`);
+        }
     }
 
     drawWater(cx, cy, w, h, ripples) {
@@ -293,8 +303,36 @@ class FarmScene extends Phaser.Scene {
 
         // 钓鱼
         if (this.currentTool === 'fish' && isInWater(wx, wy)) {
-            this.playerMoveTo(wx, wy, () => this.startFishing());
+            const pondId = wy < 500 ? 1 : 2;
+            const pond = (window.FARM_DATA.ponds || {})[pondId];
+            const count = pond ? pond.fish_count : 0;
+
+            if (count <= 0) {
+                showToast('水塘里没有鱼了，等它们繁殖吧');
+                return;
+            }
+            if (count === 1) {
+                if (!confirm('只剩1条鱼了！钓走后水塘将无法繁殖。确定要钓吗？')) return;
+            } else if (count === 2) {
+                if (!confirm('还剩2条鱼，钓走后水塘将无法繁殖。确定要钓吗？')) return;
+            }
+            this.playerMoveTo(wx, wy, () => this.startFishing(pondId));
             return;
+        }
+
+        // 站在水塘里且背包有鱼时可放生
+        if (isInWater(this.player.x, this.player.y) && !isInWater(wx, wy)) {
+            // 不做处理，正常移动
+        }
+
+        // 检查是否点击水塘来放生（非钓鱼工具，背包有鱼）
+        if (this.currentTool !== 'fish' && isInWater(wx, wy)) {
+            const pondId = wy < 500 ? 1 : 2;
+            const hasFish = Object.values(window.FARM_DATA.inventory || {}).some(item => item.type === 'fish');
+            if (hasFish) {
+                this.playerMoveTo(wx, wy, () => this.openReleaseModal(pondId));
+                return;
+            }
         }
 
         // 地块操作
@@ -443,7 +481,7 @@ class FarmScene extends Phaser.Scene {
         else showToast(d.error || '种植失败');
     }
 
-    async startFishing() {
+    async startFishing(pondId) {
         window.FARM_DATA.isFishing = true;
         this.fishingMinigame = new FishingMinigame(async (success) => {
             window.FARM_DATA.isFishing = false;
@@ -451,13 +489,17 @@ class FarmScene extends Phaser.Scene {
             document.getElementById('fishing-hint').style.display = 'none';
             if (success) {
                 try {
-                    const r = await fetch('/api/farm/fish', { method: 'POST' });
+                    const r = await fetch('/api/farm/fish', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ pond_id: pondId })
+                    });
                     const d = await r.json();
                     if (d.success) {
                         showToast('🎣 钓到了 ' + d.fish.name + '！');
                         document.getElementById('caught-fish-name').textContent = '🎉 ' + d.fish.name + '！';
                     } else {
-                        document.getElementById('caught-fish-name').textContent = '鱼跑了...';
+                        document.getElementById('caught-fish-name').textContent = d.error || '鱼跑了...';
                     }
                 } catch (e) {
                     document.getElementById('caught-fish-name').textContent = '鱼跑了...';
@@ -472,6 +514,41 @@ class FarmScene extends Phaser.Scene {
         this.fishingMinigame.start();
     }
 
+    openReleaseModal(pondId) {
+        const c = document.getElementById('seed-items'); c.innerHTML = '';
+        let hasFish = false;
+
+        for (const k in window.FARM_DATA.inventory) {
+            const item = window.FARM_DATA.inventory[k];
+            if (item.type !== 'fish') continue;
+            hasFish = true;
+            const fishDef = window.FARM_DATA.fish[item.id];
+            const name = fishDef ? fishDef.name : item.id;
+            const div = document.createElement('div'); div.className = 'item-row';
+            div.innerHTML = `<div class="item-info"><div class="item-name">🐟 ${name}</div><div class="item-desc">数量: ${item.quantity}</div></div><button class="btn-sm btn-plant">放生</button>`;
+            div.querySelector('button').onclick = async () => {
+                const r = await fetch('/api/farm/release-fish', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ pond_id: pondId, fish_id: item.id })
+                });
+                const d = await r.json();
+                if (d.success) {
+                    showToast(`放生了 ${name}，水塘现在有 ${d.fish_count} 条鱼`);
+                    await this.syncWithServer();
+                    updateInventoryDisplay();
+                } else {
+                    showToast(d.error || '放生失败');
+                }
+                closeSeedModal();
+            };
+            c.appendChild(div);
+        }
+
+        if (!hasFish) c.innerHTML = '<div style="text-align:center;color:#999;padding:20px;">背包里没有鱼可以放生</div>';
+        document.getElementById('seed-modal').classList.add('show');
+    }
+
     // ============ 同步 ============
 
     async syncWithServer() {
@@ -482,9 +559,11 @@ class FarmScene extends Phaser.Scene {
                 window.FARM_DATA.plots = d.plots;
                 window.FARM_DATA.plants = d.plants;
                 window.FARM_DATA.fish = d.fish;
+                window.FARM_DATA.ponds = d.ponds || {};
                 window.FARM_DATA.inventory = d.inventory;
                 window.FARM_DATA.unlockedPlants = d.unlocked_plants || [];
                 this.renderPlots();
+                this.updatePondLabels();
                 updateCoinsDisplay(d.coins);
                 updateInventoryDisplay();
                 // 根据领取状态禁用按钮

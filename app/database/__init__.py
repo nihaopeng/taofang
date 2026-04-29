@@ -296,6 +296,23 @@ def init_farm_tables():
     )
     """)
     
+    # 水塘鱼数表
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS farm_ponds (
+        pond_id INTEGER PRIMARY KEY,
+        fish_count INTEGER DEFAULT 5,
+        max_fish INTEGER DEFAULT 10,
+        last_reproduced_at TIMESTAMP
+    )
+    """)
+    
+    # 初始化水塘
+    cursor.execute("SELECT COUNT(*) FROM farm_ponds")
+    if cursor.fetchone()[0] == 0:
+        now = datetime.now().isoformat()
+        cursor.execute("INSERT INTO farm_ponds (pond_id, fish_count, max_fish, last_reproduced_at) VALUES (1, 5, 10, ?)", (now,))
+        cursor.execute("INSERT INTO farm_ponds (pond_id, fish_count, max_fish, last_reproduced_at) VALUES (2, 5, 10, ?)", (now,))
+    
     # 检查是否需要初始化种子数据
     cursor.execute("SELECT COUNT(*) FROM farm_plants")
     if cursor.fetchone()[0] == 0:
@@ -315,11 +332,11 @@ def init_farm_tables():
 def _init_default_plants(cursor):
     """初始化默认植物数据"""
     plants = [
-        ("carrot", "胡萝卜", 20, 20, 180, 45, 0, 0, 4, "基础作物，3分钟成熟"),
-        ("wheat", "小麦", 40, 40, 600, 90, 0, 0, 4, "基础粮食，10分钟成熟"),
-        ("hops", "啤酒花", 100, 120, 3600, 300, 7, 3, 5, "需恋爱7天，1小时成熟"),
-        ("tomato", "番茄", 200, 250, 14400, 600, 14, 7, 4, "需恋爱14天，4小时成熟"),
-        ("sunflower", "向日葵", 400, 800, 57600, 1200, 30, 14, 5, "需恋爱30天，16小时成熟"),
+        ("carrot", "胡萝卜", 20, 40, 180, 45, 0, 0, 4, "基础作物，3分钟成熟"),
+        ("wheat", "小麦", 40, 80, 600, 90, 0, 0, 4, "基础粮食，10分钟成熟"),
+        ("hops", "啤酒花", 100, 150, 3600, 300, 7, 3, 5, "需恋爱7天，1小时成熟"),
+        ("tomato", "番茄", 200, 300, 14400, 600, 14, 7, 4, "需恋爱14天，4小时成熟"),
+        ("sunflower", "向日葵", 400, 700, 57600, 1200, 30, 14, 5, "需恋爱30天，16小时成熟"),
     ]
     for plant in plants:
         cursor.execute("""INSERT INTO farm_plants (id, name, seed_cost, sell_price, growth_time, water_reduction, unlock_days, unlock_both_checkins, stages, description) VALUES (?,?,?,?,?,?,?,?,?,?)""", plant)
@@ -327,9 +344,9 @@ def _init_default_plants(cursor):
 def _init_default_fish(cursor):
     """初始化默认鱼类数据"""
     fish = [
-        ("carp", "鲤鱼", 2, "common", 2.0, 6.0, "常见的淡水鱼"),
-        ("bass", "鲈鱼", 4, "common", 2.5, 7.0, "肉质鲜美的鱼类"),
-        ("salmon", "三文鱼", 7, "uncommon", 3.0, 10.0, "较为稀有的鱼类"),
+        ("carp", "鲤鱼", 5, "common", 2.0, 6.0, "常见的淡水鱼"),
+        ("bass", "鲈鱼", 8, "common", 2.5, 7.0, "肉质鲜美的鱼类"),
+        ("salmon", "三文鱼", 10, "uncommon", 3.0, 10.0, "较为稀有的鱼类"),
         ("goldfish", "金鱼", 15, "rare", 4.0, 15.0, "非常稀有的观赏鱼"),
         ("koi", "锦鲤", 12, "rare", 5.0, 20.0, "传说级别的锦鲤！"),
     ]
@@ -604,6 +621,82 @@ def update_growth_stages():
     
     conn.commit()
     conn.close()
+
+def update_pond_fish():
+    """检查水塘繁殖，每次调用时更新鱼数"""
+    conn = get_farm_connection()
+    cursor = conn.cursor()
+    now = datetime.now()
+    
+    cursor.execute("SELECT pond_id, fish_count, max_fish, last_reproduced_at FROM farm_ponds")
+    for row in cursor.fetchall():
+        pond_id, fish_count, max_fish, last_str = row
+        if fish_count < 2:
+            continue
+        
+        last_reproduced = datetime.fromisoformat(last_str) if last_str else now
+        elapsed_minutes = (now - last_reproduced).total_seconds() / 60
+        
+        # 每5分钟繁殖1条
+        reproduce_interval = 5
+        new_fish = int(elapsed_minutes / reproduce_interval)
+        
+        if new_fish > 0 and fish_count < max_fish:
+            added = min(new_fish, max_fish - fish_count)
+            new_count = fish_count + added
+            new_last = last_reproduced + timedelta(minutes=new_fish * reproduce_interval)
+            cursor.execute("UPDATE farm_ponds SET fish_count=?, last_reproduced_at=? WHERE pond_id=?",
+                          (new_count, new_last.isoformat(), pond_id))
+    
+    conn.commit()
+    conn.close()
+
+def get_ponds():
+    """获取所有水塘状态"""
+    update_pond_fish()
+    conn = get_farm_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT pond_id, fish_count, max_fish FROM farm_ponds")
+    ponds = {}
+    for row in cursor.fetchall():
+        ponds[row[0]] = {"pond_id": row[0], "fish_count": row[1], "max_fish": row[2]}
+    conn.close()
+    return ponds
+
+def try_catch_fish(pond_id: int) -> bool:
+    """尝试从水塘钓鱼，返回是否成功"""
+    update_pond_fish()
+    conn = get_farm_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT fish_count FROM farm_ponds WHERE pond_id=?", (pond_id,))
+    row = cursor.fetchone()
+    if not row or row[0] <= 0:
+        conn.close()
+        return False
+    cursor.execute("UPDATE farm_ponds SET fish_count=fish_count-1 WHERE pond_id=? AND fish_count>0", (pond_id,))
+    conn.commit()
+    conn.close()
+    return True
+
+def release_fish_to_pond(pond_id: int) -> dict:
+    """放生鱼到水塘，返回更新后的水塘状态"""
+    conn = get_farm_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT fish_count, max_fish FROM farm_ponds WHERE pond_id=?", (pond_id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return None
+    fish_count, max_fish = row
+    if fish_count >= max_fish:
+        conn.close()
+        return {"success": False, "error": "水塘已满，无法放生更多鱼", "fish_count": fish_count, "max_fish": max_fish}
+    cursor.execute("UPDATE farm_ponds SET fish_count=fish_count+1 WHERE pond_id=?", (pond_id,))
+    conn.commit()
+    cursor.execute("SELECT fish_count FROM farm_ponds WHERE pond_id=?", (pond_id,))
+    new_count = cursor.fetchone()[0]
+    conn.close()
+    return {"success": True, "fish_count": new_count, "max_fish": max_fish}
 
 def can_claim_daily(user_id: int, claim_type: str) -> bool:
     """检查今日是否可领取奖励"""
