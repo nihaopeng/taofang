@@ -6,7 +6,8 @@ from ..database import (
     get_plot, till_plot, plant_seed, water_plot, harvest_plot,
     get_plant_def, get_fish_def, get_unlocked_plants, get_love_progress,
     update_growth_stages, init_farm_tables,
-    can_claim_daily, record_daily_claim, get_ponds, try_catch_fish, release_fish_to_pond
+    can_claim_daily, record_daily_claim, get_ponds, try_catch_fish, release_fish_to_pond,
+    steal_plot
 )
 from datetime import datetime
 import random
@@ -44,21 +45,22 @@ async def farm_page(request: Request):
 
 
 async def api_farm_state(request: Request):
-    """获取完整农场状态"""
+    """获取完整农场状态，target_user_id指定查看谁的农场"""
     if not request.session.get("authenticated"):
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     
     user_id = request.session.get("user_id")
+    target_user_id = int(request.query_params.get("target_user_id", user_id))
     
     init_farm_tables()
     update_growth_stages()
     
-    farm_state = get_farm_state()
+    farm_state = get_farm_state(target_user_id)
     coins = get_farm_currency(user_id)
     inventory = get_inventory(user_id)
     days_together, both_checkins = get_love_progress()
     unlocked_plants = get_unlocked_plants(days_together, both_checkins)
-    ponds = get_ponds()
+    ponds = get_ponds(target_user_id)
     
     # 检查主系统今日是否签到
     conn = get_connection()
@@ -67,6 +69,8 @@ async def api_farm_state(request: Request):
     cursor.execute("SELECT COUNT(*) FROM daily_checkin WHERE user_id=? AND DATE(checkin_time)=?", (user_id, today))
     main_checked_in = cursor.fetchone()[0] > 0
     conn.close()
+    
+    partner_id = 2 if user_id == 1 else 1
     
     return JSONResponse({
         "success": True,
@@ -81,7 +85,10 @@ async def api_farm_state(request: Request):
         "both_checkins": both_checkins,
         "main_checked_in": main_checked_in,
         "claimed_checkin": not can_claim_daily(user_id, "checkin"),
-        "claimed_diary": not can_claim_daily(user_id, "diary")
+        "claimed_diary": not can_claim_daily(user_id, "diary"),
+        "is_own_farm": target_user_id == user_id,
+        "farm_owner_id": target_user_id,
+        "partner_id": partner_id
     })
 
 
@@ -136,9 +143,11 @@ async def api_buy_seed(request: Request):
 
 
 async def api_till(request: Request):
-    """开垦地块"""
+    """开垦地块（仅限自己的农场）"""
     if not request.session.get("authenticated"):
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    user_id = request.session.get("user_id")
     
     try:
         body = await request.json()
@@ -146,10 +155,10 @@ async def api_till(request: Request):
         body = {}
     
     plot_index = body.get("plot_index", 0)
-    till_plot(plot_index)
+    till_plot(user_id, plot_index)
     
     update_growth_stages()
-    farm_state = get_farm_state()
+    farm_state = get_farm_state(user_id)
     
     return JSONResponse({
         "success": True,
@@ -159,7 +168,7 @@ async def api_till(request: Request):
 
 
 async def api_plant(request: Request):
-    """种植种子"""
+    """种植种子（仅限自己的农场）"""
     if not request.session.get("authenticated"):
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     
@@ -176,18 +185,17 @@ async def api_plant(request: Request):
     if not plant_type:
         return JSONResponse({"success": False, "error": "请选择种子"}, status_code=400)
     
-    # 检查背包中是否有种子
     if not remove_from_inventory(user_id, "seed", plant_type, 1):
         return JSONResponse({"success": False, "error": "背包中没有该种子"}, status_code=400)
     
-    plot = get_plot(plot_index)
+    plot = get_plot(user_id, plot_index)
     if not plot or plot["growth_stage"] != 0:
         return JSONResponse({"success": False, "error": "请先开垦土地"}, status_code=400)
     
-    plant_seed(plot_index, plant_type)
+    plant_seed(user_id, plot_index, plant_type)
     
     update_growth_stages()
-    farm_state = get_farm_state()
+    farm_state = get_farm_state(user_id)
     inventory = get_inventory(user_id)
     
     plant_def = get_plant_def(plant_type)
@@ -201,9 +209,11 @@ async def api_plant(request: Request):
 
 
 async def api_water(request: Request):
-    """浇水"""
+    """浇水（仅限自己的农场）"""
     if not request.session.get("authenticated"):
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    user_id = request.session.get("user_id")
     
     try:
         body = await request.json()
@@ -212,7 +222,7 @@ async def api_water(request: Request):
     
     plot_index = body.get("plot_index", 0)
     
-    plot = get_plot(plot_index)
+    plot = get_plot(user_id, plot_index)
     if not plot or not plot["plant_type"]:
         return JSONResponse({"success": False, "error": "该地块没有种植作物"}, status_code=400)
     
@@ -222,10 +232,10 @@ async def api_water(request: Request):
     plant_def = get_plant_def(plot["plant_type"])
     water_reduction = plant_def["water_reduction"] if plant_def else 60
     
-    water_plot(plot_index)
+    water_plot(user_id, plot_index)
     update_growth_stages()
     
-    farm_state = get_farm_state()
+    farm_state = get_farm_state(user_id)
     updated_plot = farm_state["plots"].get(str(plot_index))
     stage_before = plot["growth_stage"]
     stage_after = updated_plot["growth_stage"] if updated_plot else stage_before
@@ -243,7 +253,7 @@ async def api_water(request: Request):
 
 
 async def api_harvest(request: Request):
-    """收获作物"""
+    """收获作物（仅限自己的农场）"""
     if not request.session.get("authenticated"):
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     
@@ -256,27 +266,64 @@ async def api_harvest(request: Request):
     
     plot_index = body.get("plot_index", 0)
     
-    plant_type = harvest_plot(plot_index)
+    plant_type = harvest_plot(user_id, plot_index)
     if not plant_type:
-        # 检查原因
-        plot = get_plot(plot_index)
+        plot = get_plot(user_id, plot_index)
         if not plot or not plot["plant_type"]:
             return JSONResponse({"success": False, "error": "该地块没有种植作物"}, status_code=400)
         if plot["growth_stage"] < 5:
             return JSONResponse({"success": False, "error": "作物尚未成熟"}, status_code=400)
         return JSONResponse({"success": False, "error": "收获失败"}, status_code=400)
     
-    # 获得作物放入背包
     add_to_inventory(user_id, "crop", plant_type, 1)
     
     update_growth_stages()
-    farm_state = get_farm_state()
+    farm_state = get_farm_state(user_id)
     inventory = get_inventory(user_id)
     plant_def = get_plant_def(plant_type)
     
     return JSONResponse({
         "success": True,
         "message": f"收获了{plant_def['name'] if plant_def else plant_type}！",
+        "crop": plant_type,
+        "plots": farm_state["plots"],
+        "inventory": inventory
+    })
+
+
+async def api_steal(request: Request):
+    """偷菜：从对方农场偷成熟作物"""
+    if not request.session.get("authenticated"):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    user_id = request.session.get("user_id")
+    partner_id = 2 if user_id == 1 else 1
+    
+    try:
+        body = await request.json()
+    except:
+        body = {}
+    
+    plot_index = body.get("plot_index", 0)
+    
+    plant_type = steal_plot(user_id, partner_id, plot_index)
+    if not plant_type:
+        plot = get_plot(partner_id, plot_index)
+        if not plot or not plot["plant_type"]:
+            return JSONResponse({"success": False, "error": "该地块没有种植作物"}, status_code=400)
+        if plot["growth_stage"] < 5:
+            return JSONResponse({"success": False, "error": "作物尚未成熟，不能偷"}, status_code=400)
+        return JSONResponse({"success": False, "error": "偷菜失败"}, status_code=400)
+    
+    add_to_inventory(user_id, "crop", plant_type, 1)
+    
+    farm_state = get_farm_state(partner_id)
+    inventory = get_inventory(user_id)
+    plant_def = get_plant_def(plant_type)
+    
+    return JSONResponse({
+        "success": True,
+        "message": f"偷到了{plant_def['name'] if plant_def else plant_type}！😈",
         "crop": plant_type,
         "plots": farm_state["plots"],
         "inventory": inventory
@@ -347,6 +394,7 @@ async def api_release_fish(request: Request):
     
     pond_id = body.get("pond_id", 1)
     fish_id = body.get("fish_id", "")
+    farm_owner_id = body.get("farm_owner_id", user_id)
     
     if not fish_id:
         return JSONResponse({"success": False, "error": "请选择要放生的鱼"}, status_code=400)
@@ -356,7 +404,7 @@ async def api_release_fish(request: Request):
         return JSONResponse({"success": False, "error": "背包中没有该鱼"}, status_code=400)
     
     # 放生到水塘
-    result = release_fish_to_pond(pond_id)
+    result = release_fish_to_pond(farm_owner_id, pond_id)
     if not result:
         return JSONResponse({"success": False, "error": "水塘不存在"}, status_code=400)
     
@@ -366,7 +414,7 @@ async def api_release_fish(request: Request):
         return JSONResponse({"success": False, "error": result.get("error", "放生失败")}, status_code=400)
     
     inventory = get_inventory(user_id)
-    ponds = get_ponds()
+    ponds = get_ponds(farm_owner_id)
     
     return JSONResponse({
         "success": True,
@@ -390,13 +438,14 @@ async def api_fish(request: Request):
         body = {}
     
     pond_id = body.get("pond_id", 1)
+    farm_owner_id = body.get("farm_owner_id", user_id)
     
     # 检查水塘是否有鱼
-    if not try_catch_fish(pond_id):
+    if not try_catch_fish(farm_owner_id, pond_id):
         return JSONResponse({"success": False, "error": "水塘里没有鱼了，等它们繁殖吧"}, status_code=400)
     
     # 获取所有鱼类及其概率
-    farm_state = get_farm_state()
+    farm_state = get_farm_state(user_id)
     fish_defs = farm_state["fish"]
     
     # 根据稀有度计算概率
@@ -421,7 +470,7 @@ async def api_fish(request: Request):
     # 加入背包
     add_to_inventory(user_id, "fish", caught["id"], 1)
     inventory = get_inventory(user_id)
-    ponds = get_ponds()
+    ponds = get_ponds(user_id)
     
     return JSONResponse({
         "success": True,

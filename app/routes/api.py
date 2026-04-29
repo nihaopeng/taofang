@@ -101,12 +101,24 @@ async def checkin(request: Request):
     from ..database import check_and_unlock_achievements
     check_and_unlock_achievements(user_id)
     
+    # 同步农场签到奖励
+    farm_coins = 0
+    try:
+        from ..database import add_farm_currency, can_claim_daily, record_daily_claim
+        if can_claim_daily(user_id, "checkin"):
+            farm_coins = 50
+            add_farm_currency(user_id, farm_coins)
+            record_daily_claim(user_id, "checkin")
+    except Exception:
+        pass
+    
     return JSONResponse({
         "success": True,
         "message": "Check-in recorded",
         "both_checked_in": both_checked_in,
         "timestamp": datetime.now().isoformat(),
-        "points": points
+        "points": points,
+        "farm_coins": farm_coins
     })
 
 async def get_achievements(request: Request):

@@ -2,51 +2,52 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>心动农场</title>
     <link rel="stylesheet" href="/static/css/style.css">
     <script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser.min.js"></script>
     <style>
         :root { --primary: #667eea; --secondary: #764ba2; --accent: #ff6b6b; --gold: #f0a500; }
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
+        html, body {
+            width: 100%; min-height: 100%;
             background: #1a1a2e;
             font-family: 'Arial', sans-serif;
             user-select: none; -webkit-user-select: none;
-            display: flex; flex-direction: column; align-items: center;
-            min-height: 100vh;
+            touch-action: manipulation;
         }
-
         #game-outer {
             display: flex; flex-direction: column;
-            width: 800px;
-            margin-top: 10px;
+            width: 100%; max-width: 460px;
+            margin: 0 auto;
+        }
+        /* 手机全屏，PC限制高度 */
+        @media (min-height: 800px) {
+            #game-outer { max-height: 700px; }
         }
 
         /* 顶栏 */
         #top-bar {
             display: flex; justify-content: space-between; align-items: center;
-            padding: 6px 14px;
+            padding: 6px 10px; flex-shrink: 0;
             background: #2a2a4a;
-            border-radius: 10px 10px 0 0;
-            color: white;
-            border: 1px solid #444;
-            border-bottom: none;
+            color: white; border-bottom: 1px solid #444;
         }
         #coins-display {
-            display: flex; align-items: center; gap: 6px;
-            font-size: 17px; font-weight: bold; color: #f0a500;
+            display: flex; align-items: center; gap: 4px;
+            font-size: 15px; font-weight: bold; color: #f0a500;
         }
-        #coins-display .coin-icon { font-size: 20px; }
-        #top-buttons { display: flex; gap: 6px; }
+        #coins-display .coin-icon { font-size: 18px; }
+        #top-buttons { display: flex; gap: 4px; }
         #top-buttons button, #top-buttons .home-link {
-            padding: 4px 10px;
-            border: 1px solid rgba(255,255,255,0.25);
-            border-radius: 12px;
+            padding: 3px 8px;
+            border: 1px solid rgba(255,255,255,0.2);
+            border-radius: 10px;
             background: rgba(255,255,255,0.08);
             color: #ccc; cursor: pointer;
-            font-size: 12px; transition: all 0.2s;
-            text-decoration: none; display: inline-flex; align-items: center; gap: 3px;
+            font-size: 11px; transition: all 0.2s;
+            text-decoration: none; display: inline-flex; align-items: center; gap: 2px;
+            white-space: nowrap;
         }
         #top-buttons button:hover, #top-buttons .home-link:hover {
             background: rgba(255,255,255,0.18); color: #fff;
@@ -56,11 +57,18 @@
 
         /* 游戏容器 */
         #game-container {
-            width: 800px; height: 520px;
-            border-left: 1px solid #444; border-right: 1px solid #444;
+            width: 100%; height: 540px;
             position: relative; overflow: hidden; background: #111;
         }
         #game-container canvas { display: block; }
+
+        /* 手机小屏撑满 */
+        @media (max-height: 750px) {
+            #game-container { height: auto; flex: 1; }
+            #game-outer { height: 100%; }
+            html, body { height: 100%; overflow: hidden; }
+        }
+        #game-container canvas { display: block; width: 100% !important; height: 100% !important; }
 
         /* HUD覆盖层 */
         #hud-overlay {
@@ -70,10 +78,10 @@
 
         /* Toast */
         #toast {
-            position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
-            padding: 8px 18px;
+            position: absolute; top: 8px; left: 50%; transform: translateX(-50%);
+            padding: 6px 14px;
             background: rgba(0,0,0,0.85); color: #fff;
-            border-radius: 16px; font-size: 13px;
+            border-radius: 14px; font-size: 12px;
             white-space: nowrap; opacity: 0;
             transition: opacity 0.3s; pointer-events: none;
         }
@@ -89,78 +97,66 @@
         .modal-overlay.show { display: flex; }
         .modal-box {
             background: #2a2a4a; border: 1px solid #555;
-            border-radius: 12px; padding: 18px;
-            max-width: 400px; width: 90%; max-height: 75%;
+            border-radius: 12px; padding: 14px;
+            max-width: 360px; width: 92%; max-height: 70%;
             overflow-y: auto; color: white;
         }
-        .modal-box h3 { margin-bottom: 10px; font-size: 16px; text-align: center; }
-        .item-list { display: flex; flex-direction: column; gap: 6px; max-height: 260px; overflow-y: auto; }
+        .modal-box h3 { margin-bottom: 8px; font-size: 15px; text-align: center; }
+        .item-list { display: flex; flex-direction: column; gap: 5px; max-height: 240px; overflow-y: auto; }
         .item-row {
             display: flex; justify-content: space-between; align-items: center;
-            padding: 8px 10px; background: rgba(255,255,255,0.05);
-            border-radius: 8px; gap: 8px;
+            padding: 6px 8px; background: rgba(255,255,255,0.05);
+            border-radius: 8px; gap: 6px;
         }
         .item-row .item-info { flex: 1; min-width: 0; }
-        .item-row .item-name { font-weight: bold; font-size: 13px; }
-        .item-row .item-desc { font-size: 11px; color: #999; }
-        .item-row .item-price { color: #f0a500; font-size: 12px; }
+        .item-row .item-name { font-weight: bold; font-size: 12px; }
+        .item-row .item-desc { font-size: 10px; color: #999; }
+        .item-row .item-price { color: #f0a500; font-size: 11px; }
         .btn-sm {
-            padding: 3px 10px; border-radius: 10px; border: none;
-            cursor: pointer; font-size: 12px; transition: all 0.2s;
+            padding: 3px 8px; border-radius: 8px; border: none;
+            cursor: pointer; font-size: 11px; transition: all 0.2s;
             white-space: nowrap;
         }
         .btn-buy { background: #51cf66; color: white; }
-        .btn-buy:hover { background: #40c057; }
         .btn-sell { background: #f0a500; color: white; }
-        .btn-sell:hover { background: #e09900; }
         .btn-plant { background: #667eea; color: white; }
-        .btn-plant:hover { background: #5568d3; }
         .btn-close {
-            display: block; margin: 12px auto 0;
-            padding: 6px 20px; border-radius: 12px;
+            display: block; margin: 10px auto 0;
+            padding: 5px 16px; border-radius: 10px;
             border: 1px solid rgba(255,255,255,0.25);
             background: rgba(255,255,255,0.08); color: #ccc;
-            cursor: pointer; font-size: 13px;
+            cursor: pointer; font-size: 12px;
         }
-        .btn-close:hover { background: rgba(255,255,255,0.18); color: #fff; }
         .locked { opacity: 0.4; }
         .locked-label { font-size: 10px; color: #f0a500; }
 
         /* 底栏 */
         #bottom-bar {
             display: flex; justify-content: center; align-items: center;
-            padding: 6px 14px; gap: 10px;
-            background: #2a2a4a;
-            border-radius: 0 0 10px 10px;
-            border: 1px solid #444; border-top: none;
+            padding: 5px 10px; gap: 8px; flex-shrink: 0;
+            background: #2a2a4a; border-top: 1px solid #444;
         }
         #bottom-bar button {
-            width: 40px; height: 40px; border-radius: 50%;
+            width: 38px; height: 38px; border-radius: 50%;
             border: 2px solid transparent;
             background: rgba(255,255,255,0.08); color: #ccc;
-            font-size: 18px; cursor: pointer; transition: all 0.2s;
+            font-size: 16px; cursor: pointer; transition: all 0.2s;
             position: relative;
         }
         #bottom-bar button:hover { background: rgba(255,255,255,0.18); color: #fff; }
         #bottom-bar button.active {
             border-color: #f0a500;
             background: rgba(240,165,0,0.3);
-            box-shadow: 0 0 14px rgba(240,165,0,0.5);
-            color: #fff; transform: scale(1.1);
+            box-shadow: 0 0 12px rgba(240,165,0,0.4);
+            color: #fff; transform: scale(1.08);
         }
         #bottom-bar button.active::after {
             content: ''; position: absolute;
-            bottom: -6px; left: 50%; transform: translateX(-50%);
-            width: 6px; height: 6px;
+            bottom: -5px; left: 50%; transform: translateX(-50%);
+            width: 5px; height: 5px;
             background: #f0a500; border-radius: 50%;
         }
         #bottom-bar .spacer { flex: 1; }
-        #bottom-bar .badge {
-            position: absolute; top: -4px; right: -4px;
-            background: #ff6b6b; color: white; font-size: 9px;
-            width: 16px; height: 16px; border-radius: 50%;
-            display: flex; align-items: center; justify-content: center;
-        }
 
         /* 钓鱼小游戏 */
         #fishing-game {
@@ -172,48 +168,48 @@
         #fishing-game.show { display: flex; }
         .fishing-panel {
             background: #1a3a5c; border: 2px solid #3388cc;
-            border-radius: 16px; padding: 20px 30px;
-            text-align: center; color: white; width: 320px;
+            border-radius: 14px; padding: 16px 24px;
+            text-align: center; color: white; width: 280px;
         }
-        .fishing-title { font-size: 18px; margin-bottom: 12px; }
+        .fishing-title { font-size: 16px; margin-bottom: 10px; }
         .fishing-bar-wrapper {
-            position: relative; width: 60px; height: 200px;
-            margin: 0 auto 12px;
+            position: relative; width: 50px; height: 180px;
+            margin: 0 auto 10px;
             background: rgba(0,0,0,0.4); border: 1px solid #555;
             border-radius: 8px; overflow: hidden;
         }
         #fishing-target {
             position: absolute; left: 0; right: 0;
-            height: 36px;
+            height: 30px;
             background: linear-gradient(180deg, #33cc55, #229944);
-            border-radius: 4px; transition: none;
+            border-radius: 4px;
             box-shadow: 0 0 8px rgba(51,204,85,0.5);
         }
         #fishing-float {
             position: absolute; left: 10%; right: 10%;
-            width: 80%; height: 18px;
+            width: 80%; height: 16px;
             background: linear-gradient(180deg, #ff9944, #cc6622);
-            border-radius: 9px; transition: none;
+            border-radius: 8px;
             box-shadow: 0 0 6px rgba(255,153,68,0.6);
         }
         #fishing-progress-bg {
-            width: 100%; height: 10px;
+            width: 100%; height: 8px;
             background: rgba(255,255,255,0.15);
-            border-radius: 5px; overflow: hidden;
+            border-radius: 4px; overflow: hidden;
         }
         #fishing-progress-fill {
             height: 100%; width: 0%;
             background: linear-gradient(90deg, #33cc55, #55ee77);
-            border-radius: 5px; transition: width 0.1s linear;
+            border-radius: 4px; transition: width 0.1s linear;
         }
         .fishing-hint {
-            margin-top: 10px; font-size: 13px; color: #aaccdd;
+            margin-top: 8px; font-size: 12px; color: #aaccdd;
         }
         #fishing-result {
-            display: none; flex-direction: column; align-items: center; gap: 8px;
-            margin-top: 10px;
+            display: none; flex-direction: column; align-items: center; gap: 6px;
+            margin-top: 8px;
         }
-        #fishing-result .fish-name { font-size: 20px; font-weight: bold; color: #ffdd44; }
+        #fishing-result .fish-name { font-size: 18px; font-weight: bold; color: #ffdd44; }
     </style>
 </head>
 <body>
@@ -222,9 +218,10 @@
         <div id="top-bar">
             <div id="coins-display"><span class="coin-icon">🪙</span><span id="coins-value">0</span></div>
             <div id="top-buttons">
+                <button id="switch-farm-btn" onclick="switchFarm()" title="切换农场">🏡</button>
                 <button class="btn-checkin" onclick="claimCheckinReward()">📅签到</button>
                 <button class="btn-diary" onclick="claimDiaryReward()">📝日记</button>
-                <button onclick="openShopModal()">🏪商店</button>
+                <button onclick="openShopModal()">🏪</button>
                 <a href="/" class="home-link">🏠</a>
             </div>
         </div>
@@ -233,7 +230,6 @@
         <div id="game-container">
             <div id="hud-overlay">
                 <div id="toast"></div>
-                <!-- 弹窗 -->
                 <div id="shop-modal" class="modal-overlay">
                     <div class="modal-box">
                         <h3>🏪 种子商店</h3>
@@ -263,8 +259,8 @@
                             <div id="fishing-float"></div>
                         </div>
                         <div id="fishing-progress-bg"><div id="fishing-progress-fill"></div></div>
-                        <div class="fishing-hint" id="fishing-hint">🖱️ 按住鼠标让浮漂保持在绿色区域！</div>
-                        <button class="btn-close" id="fishing-cancel-btn" onclick="cancelFishing()" style="margin-top:8px;">取消钓鱼</button>
+                        <div class="fishing-hint" id="fishing-hint">🖱️ 按住让浮漂保持在绿色区域！</div>
+                        <button class="btn-close" id="fishing-cancel-btn" onclick="cancelFishing()" style="margin-top:6px;">取消钓鱼</button>
                         <div id="fishing-result">
                             <div class="fish-name" id="caught-fish-name"></div>
                             <button class="btn-close" onclick="closeFishingGame()">收杆</button>
@@ -291,7 +287,8 @@
             userId: {{ user_id }},
             userName: "{{ user_name }}",
             coins: 100, plots: {}, plants: {}, fish: {}, inventory: {},
-            unlockedPlants: [], currentTool: 'hoe', targetPlotIndex: null, isFishing: false
+            unlockedPlants: [], currentTool: 'hoe', targetPlotIndex: null, isFishing: false,
+            viewingOwnFarm: true, partnerId: null
         };
     </script>
     <script src="/static/js/farm-game.js"></script>

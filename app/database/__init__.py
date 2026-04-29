@@ -238,15 +238,17 @@ def init_farm_tables():
     )
     """)
     
-    # 地块表（共享农场，不分用户）
+    # 地块表（每位用户独立）
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS farm_plots (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        plot_index INTEGER NOT NULL UNIQUE,
+        user_id INTEGER NOT NULL,
+        plot_index INTEGER NOT NULL,
         plant_type TEXT,
         planted_at TIMESTAMP,
         watered_at TIMESTAMP,
-        growth_stage INTEGER DEFAULT 0
+        growth_stage INTEGER DEFAULT 0,
+        UNIQUE(user_id, plot_index)
     )
     """)
     
@@ -296,13 +298,15 @@ def init_farm_tables():
     )
     """)
     
-    # 水塘鱼数表
+    # 水塘鱼数表（每位用户独立）
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS farm_ponds (
-        pond_id INTEGER PRIMARY KEY,
+        pond_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
         fish_count INTEGER DEFAULT 5,
         max_fish INTEGER DEFAULT 10,
-        last_reproduced_at TIMESTAMP
+        last_reproduced_at TIMESTAMP,
+        PRIMARY KEY (pond_id, user_id)
     )
     """)
     
@@ -310,8 +314,9 @@ def init_farm_tables():
     cursor.execute("SELECT COUNT(*) FROM farm_ponds")
     if cursor.fetchone()[0] == 0:
         now = datetime.now().isoformat()
-        cursor.execute("INSERT INTO farm_ponds (pond_id, fish_count, max_fish, last_reproduced_at) VALUES (1, 5, 10, ?)", (now,))
-        cursor.execute("INSERT INTO farm_ponds (pond_id, fish_count, max_fish, last_reproduced_at) VALUES (2, 5, 10, ?)", (now,))
+        for uid in [1, 2]:
+            cursor.execute("INSERT INTO farm_ponds (pond_id, user_id, fish_count, max_fish, last_reproduced_at) VALUES (1, ?, 5, 10, ?)", (uid, now))
+            cursor.execute("INSERT INTO farm_ponds (pond_id, user_id, fish_count, max_fish, last_reproduced_at) VALUES (2, ?, 5, 10, ?)", (uid, now))
     
     # 检查是否需要初始化种子数据
     cursor.execute("SELECT COUNT(*) FROM farm_plants")
@@ -355,13 +360,13 @@ def _init_default_fish(cursor):
 
 # ==================== 农场查询函数 ====================
 
-def get_farm_state():
-    """获取完整农场状态"""
+def get_farm_state(user_id: int):
+    """获取指定用户的农场状态"""
     conn = get_farm_connection()
     cursor = conn.cursor()
     
-    # 获取所有地块
-    cursor.execute("SELECT plot_index, plant_type, planted_at, watered_at, growth_stage FROM farm_plots ORDER BY plot_index")
+    # 获取该用户的地块
+    cursor.execute("SELECT plot_index, plant_type, planted_at, watered_at, growth_stage FROM farm_plots WHERE user_id=? ORDER BY plot_index", (user_id,))
     plots = {}
     for row in cursor.fetchall():
         plots[str(row[0])] = {
@@ -475,57 +480,72 @@ def remove_from_inventory(user_id: int, item_type: str, item_id: str, quantity: 
     conn.close()
     return True
 
-def get_plot(plot_index: int):
+def get_plot(user_id: int, plot_index: int):
     """获取单个地块信息"""
     conn = get_farm_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT plot_index, plant_type, planted_at, watered_at, growth_stage FROM farm_plots WHERE plot_index = ?", (plot_index,))
+    cursor.execute("SELECT plot_index, plant_type, planted_at, watered_at, growth_stage FROM farm_plots WHERE user_id=? AND plot_index=?", (user_id, plot_index))
     row = cursor.fetchone()
     conn.close()
     if not row:
         return None
     return {"plot_index": row[0], "plant_type": row[1], "planted_at": row[2], "watered_at": row[3], "growth_stage": row[4]}
 
-def till_plot(plot_index: int):
+def till_plot(user_id: int, plot_index: int):
     """开垦地块"""
     conn = get_farm_connection()
     cursor = conn.cursor()
-    cursor.execute("INSERT OR IGNORE INTO farm_plots (plot_index, growth_stage) VALUES (?, 0)", (plot_index,))
+    cursor.execute("INSERT OR IGNORE INTO farm_plots (user_id, plot_index, growth_stage) VALUES (?, ?, 0)", (user_id, plot_index))
     conn.commit()
     conn.close()
 
-def plant_seed(plot_index: int, plant_type: str):
+def plant_seed(user_id: int, plot_index: int, plant_type: str):
     """种植作物"""
     conn = get_farm_connection()
     cursor = conn.cursor()
     now = datetime.now().isoformat()
     cursor.execute("""
     UPDATE farm_plots SET plant_type = ?, planted_at = ?, watered_at = ?, growth_stage = 1
-    WHERE plot_index = ? AND growth_stage = 0
-    """, (plant_type, now, now, plot_index))
+    WHERE user_id = ? AND plot_index = ? AND growth_stage = 0
+    """, (plant_type, now, now, user_id, plot_index))
     conn.commit()
     conn.close()
 
-def water_plot(plot_index: int):
+def water_plot(user_id: int, plot_index: int):
     """浇水"""
     conn = get_farm_connection()
     cursor = conn.cursor()
     now = datetime.now().isoformat()
-    cursor.execute("UPDATE farm_plots SET watered_at = ? WHERE plot_index = ? AND plant_type IS NOT NULL", (now, plot_index))
+    cursor.execute("UPDATE farm_plots SET watered_at = ? WHERE user_id=? AND plot_index=? AND plant_type IS NOT NULL", (now, user_id, plot_index))
     conn.commit()
     conn.close()
 
-def harvest_plot(plot_index: int):
+def harvest_plot(user_id: int, plot_index: int):
     """收获作物，返回作物类型"""
     conn = get_farm_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT plant_type, growth_stage FROM farm_plots WHERE plot_index = ?", (plot_index,))
+    cursor.execute("SELECT plant_type, growth_stage FROM farm_plots WHERE user_id=? AND plot_index=?", (user_id, plot_index))
     row = cursor.fetchone()
     if not row or row[1] < 5:
         conn.close()
         return None
     plant_type = row[0]
-    cursor.execute("UPDATE farm_plots SET plant_type = NULL, planted_at = NULL, watered_at = NULL, growth_stage = 0 WHERE plot_index = ?", (plot_index,))
+    cursor.execute("UPDATE farm_plots SET plant_type = NULL, planted_at = NULL, watered_at = NULL, growth_stage = 0 WHERE user_id=? AND plot_index=?", (user_id, plot_index))
+    conn.commit()
+    conn.close()
+    return plant_type
+
+def steal_plot(stealer_id: int, owner_id: int, plot_index: int):
+    """偷菜：从对方农场收获成熟作物，返回作物类型或None"""
+    conn = get_farm_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT plant_type, growth_stage FROM farm_plots WHERE user_id=? AND plot_index=?", (owner_id, plot_index))
+    row = cursor.fetchone()
+    if not row or row[1] < 5:
+        conn.close()
+        return None
+    plant_type = row[0]
+    cursor.execute("UPDATE farm_plots SET plant_type = NULL, planted_at = NULL, watered_at = NULL, growth_stage = 0 WHERE user_id=? AND plot_index=?", (owner_id, plot_index))
     conn.commit()
     conn.close()
     return plant_type
@@ -586,9 +606,9 @@ def update_growth_stages():
     cursor = conn.cursor()
     now = datetime.now()
     
-    cursor.execute("SELECT plot_index, plant_type, planted_at, watered_at, growth_stage FROM farm_plots WHERE plant_type IS NOT NULL AND growth_stage < 5")
+    cursor.execute("SELECT user_id, plot_index, plant_type, planted_at, watered_at, growth_stage FROM farm_plots WHERE plant_type IS NOT NULL AND growth_stage < 5")
     for row in cursor.fetchall():
-        plot_index, plant_type, planted_at_str, watered_at_str, stage = row
+        uid, plot_index, plant_type, planted_at_str, watered_at_str, stage = row
         if not plant_type or not planted_at_str:
             continue
         
@@ -617,27 +637,26 @@ def update_growth_stages():
             new_stage = total_stages + 1  # 可收获阶段
         
         if new_stage != stage:
-            cursor.execute("UPDATE farm_plots SET growth_stage = ? WHERE plot_index = ?", (new_stage, plot_index))
+            cursor.execute("UPDATE farm_plots SET growth_stage = ? WHERE user_id=? AND plot_index = ?", (new_stage, uid, plot_index))
     
     conn.commit()
     conn.close()
 
 def update_pond_fish():
-    """检查水塘繁殖，每次调用时更新鱼数"""
+    """检查所有水塘繁殖，每次调用时更新鱼数"""
     conn = get_farm_connection()
     cursor = conn.cursor()
     now = datetime.now()
     
-    cursor.execute("SELECT pond_id, fish_count, max_fish, last_reproduced_at FROM farm_ponds")
+    cursor.execute("SELECT pond_id, user_id, fish_count, max_fish, last_reproduced_at FROM farm_ponds")
     for row in cursor.fetchall():
-        pond_id, fish_count, max_fish, last_str = row
+        pond_id, uid, fish_count, max_fish, last_str = row
         if fish_count < 2:
             continue
         
         last_reproduced = datetime.fromisoformat(last_str) if last_str else now
         elapsed_minutes = (now - last_reproduced).total_seconds() / 60
         
-        # 每5分钟繁殖1条
         reproduce_interval = 5
         new_fish = int(elapsed_minutes / reproduce_interval)
         
@@ -645,44 +664,44 @@ def update_pond_fish():
             added = min(new_fish, max_fish - fish_count)
             new_count = fish_count + added
             new_last = last_reproduced + timedelta(minutes=new_fish * reproduce_interval)
-            cursor.execute("UPDATE farm_ponds SET fish_count=?, last_reproduced_at=? WHERE pond_id=?",
-                          (new_count, new_last.isoformat(), pond_id))
+            cursor.execute("UPDATE farm_ponds SET fish_count=?, last_reproduced_at=? WHERE pond_id=? AND user_id=?",
+                          (new_count, new_last.isoformat(), pond_id, uid))
     
     conn.commit()
     conn.close()
 
-def get_ponds():
-    """获取所有水塘状态"""
+def get_ponds(user_id: int):
+    """获取指定用户的水塘状态"""
     update_pond_fish()
     conn = get_farm_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT pond_id, fish_count, max_fish FROM farm_ponds")
+    cursor.execute("SELECT pond_id, fish_count, max_fish FROM farm_ponds WHERE user_id=?", (user_id,))
     ponds = {}
     for row in cursor.fetchall():
         ponds[row[0]] = {"pond_id": row[0], "fish_count": row[1], "max_fish": row[2]}
     conn.close()
     return ponds
 
-def try_catch_fish(pond_id: int) -> bool:
+def try_catch_fish(user_id: int, pond_id: int) -> bool:
     """尝试从水塘钓鱼，返回是否成功"""
     update_pond_fish()
     conn = get_farm_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT fish_count FROM farm_ponds WHERE pond_id=?", (pond_id,))
+    cursor.execute("SELECT fish_count FROM farm_ponds WHERE pond_id=? AND user_id=?", (pond_id, user_id))
     row = cursor.fetchone()
     if not row or row[0] <= 0:
         conn.close()
         return False
-    cursor.execute("UPDATE farm_ponds SET fish_count=fish_count-1 WHERE pond_id=? AND fish_count>0", (pond_id,))
+    cursor.execute("UPDATE farm_ponds SET fish_count=fish_count-1 WHERE pond_id=? AND user_id=? AND fish_count>0", (pond_id, user_id))
     conn.commit()
     conn.close()
     return True
 
-def release_fish_to_pond(pond_id: int) -> dict:
+def release_fish_to_pond(user_id: int, pond_id: int) -> dict:
     """放生鱼到水塘，返回更新后的水塘状态"""
     conn = get_farm_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT fish_count, max_fish FROM farm_ponds WHERE pond_id=?", (pond_id,))
+    cursor.execute("SELECT fish_count, max_fish FROM farm_ponds WHERE pond_id=? AND user_id=?", (pond_id, user_id))
     row = cursor.fetchone()
     if not row:
         conn.close()
@@ -691,9 +710,9 @@ def release_fish_to_pond(pond_id: int) -> dict:
     if fish_count >= max_fish:
         conn.close()
         return {"success": False, "error": "水塘已满，无法放生更多鱼", "fish_count": fish_count, "max_fish": max_fish}
-    cursor.execute("UPDATE farm_ponds SET fish_count=fish_count+1 WHERE pond_id=?", (pond_id,))
+    cursor.execute("UPDATE farm_ponds SET fish_count=fish_count+1 WHERE pond_id=? AND user_id=?", (pond_id, user_id))
     conn.commit()
-    cursor.execute("SELECT fish_count FROM farm_ponds WHERE pond_id=?", (pond_id,))
+    cursor.execute("SELECT fish_count FROM farm_ponds WHERE pond_id=? AND user_id=?", (pond_id, user_id))
     new_count = cursor.fetchone()[0]
     conn.close()
     return {"success": True, "fish_count": new_count, "max_fish": max_fish}

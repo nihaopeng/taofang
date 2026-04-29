@@ -338,12 +338,22 @@ class FarmScene extends Phaser.Scene {
         // 地块操作
         const plotIdx = findNearestPlot(wx, wy, 55);
         if (plotIdx !== null) {
+            if (!window.FARM_DATA.viewingOwnFarm) {
+                // 在对方农场：只有偷菜
+                if (this.currentTool === 'harvest') {
+                    this.playerMoveTo(wx, wy, () => this.stealPlot(plotIdx));
+                } else {
+                    this.showPlotInfo(plotIdx);
+                    this.playerMoveTo(wx, wy, null);
+                }
+                return;
+            }
+            // 在自己农场
             if (this.currentTool === 'hoe') this.playerMoveTo(wx, wy, () => this.tillPlot(plotIdx));
             else if (this.currentTool === 'water') this.playerMoveTo(wx, wy, () => this.waterPlot(plotIdx));
             else if (this.currentTool === 'seed') this.playerMoveTo(wx, wy, () => this.openSeedModal(plotIdx));
             else if (this.currentTool === 'harvest') this.playerMoveTo(wx, wy, () => this.harvestPlot(plotIdx));
             else {
-                // 非操作工具：显示作物信息
                 this.showPlotInfo(plotIdx);
                 this.playerMoveTo(wx, wy, null);
             }
@@ -492,7 +502,7 @@ class FarmScene extends Phaser.Scene {
                     const r = await fetch('/api/farm/fish', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ pond_id: pondId })
+                        body: JSON.stringify({ pond_id: pondId, farm_owner_id: window.FARM_DATA.viewingOwnFarm ? window.FARM_DATA.userId : window.FARM_DATA.partnerId })
                     });
                     const d = await r.json();
                     if (d.success) {
@@ -514,6 +524,22 @@ class FarmScene extends Phaser.Scene {
         this.fishingMinigame.start();
     }
 
+    async stealPlot(idx) {
+        const plot = window.FARM_DATA.plots[idx];
+        if (!plot || !plot.plant_type) { showToast('没东西可偷'); return; }
+        if (plot.growth_stage < 5) { showToast('还没熟，不能偷~'); return; }
+        const r = await fetch('/api/farm/steal', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ plot_index: idx }) });
+        const d = await r.json();
+        if (d.success) {
+            showToast('😈 ' + d.message);
+            window.FARM_DATA.inventory = d.inventory;
+            updateInventoryDisplay();
+            await this.syncWithServer();
+        } else {
+            showToast(d.error || '偷菜失败');
+        }
+    }
+
     openReleaseModal(pondId) {
         const c = document.getElementById('seed-items'); c.innerHTML = '';
         let hasFish = false;
@@ -530,7 +556,7 @@ class FarmScene extends Phaser.Scene {
                 const r = await fetch('/api/farm/release-fish', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ pond_id: pondId, fish_id: item.id })
+                    body: JSON.stringify({ pond_id: pondId, fish_id: item.id, farm_owner_id: window.FARM_DATA.viewingOwnFarm ? window.FARM_DATA.userId : window.FARM_DATA.partnerId })
                 });
                 const d = await r.json();
                 if (d.success) {
@@ -553,7 +579,9 @@ class FarmScene extends Phaser.Scene {
 
     async syncWithServer() {
         try {
-            const r = await fetch('/api/farm/state'); const d = await r.json();
+            const targetId = window.FARM_DATA.viewingOwnFarm ? window.FARM_DATA.userId : window.FARM_DATA.partnerId;
+            const r = await fetch('/api/farm/state?target_user_id=' + targetId);
+            const d = await r.json();
             if (d.success) {
                 window.FARM_DATA.coins = d.coins;
                 window.FARM_DATA.plots = d.plots;
@@ -563,13 +591,15 @@ class FarmScene extends Phaser.Scene {
                 window.FARM_DATA.inventory = d.inventory;
                 window.FARM_DATA.unlockedPlants = d.unlocked_plants || [];
                 window.FARM_DATA.mainCheckedIn = d.main_checked_in;
+                window.FARM_DATA.partnerId = d.partner_id;
                 this.renderPlots();
                 this.updatePondLabels();
                 updateCoinsDisplay(d.coins);
                 updateInventoryDisplay();
-                // 根据状态更新签到按钮
-                updateCheckinBtn(d.main_checked_in, d.claimed_checkin);
+                updateCheckinBtn(d.main_checked_in);
                 if (d.claimed_diary) disableRewardBtn('.btn-diary');
+                updateFarmSwitchBtn();
+                updateToolBarForFarm();
             }
         } catch (e) { console.error('同步失败:', e); }
     }
@@ -770,7 +800,7 @@ function cancelFishing() {
 
 // ============ 启动游戏 ============
 const game = new Phaser.Game({
-    type: Phaser.AUTO, width: 800, height: 520,
+    type: Phaser.AUTO, width: 400, height: 600,
     parent: 'game-container', pixelArt: true,
     physics: { default: 'arcade', arcade: { gravity: { y: 0 }, debug: false } },
     scene: [BootScene, FarmScene],
@@ -865,58 +895,34 @@ function closeSeedModal() { document.getElementById('seed-modal').classList.remo
 
 // ============ 签到/日记（绑定主系统） ============
 async function claimCheckinReward() {
-    const btn = document.querySelector('.btn-checkin');
-
-    // 如果主系统已签到但未领农场奖励，直接领
-    if (window.FARM_DATA.mainCheckedIn && !window.FARM_DATA.claimedCheckin) {
-        const r = await fetch('/api/farm/checkin-reward', { method: 'POST' });
-        const d = await r.json();
-        if (d.success) {
-            window.FARM_DATA.coins = d.coins;
-            window.FARM_DATA.claimedCheckin = true;
-            updateCoinsDisplay(d.coins);
-            showToast('📅 ' + d.message);
-            updateCheckinBtn(true, true);
-        } else {
-            showToast(d.error || '领取失败');
-        }
-        return;
-    }
-
-    // 主系统未签到，先签到
-    const r1 = await fetch('/api/checkin', { method: 'POST' });
-    const d1 = await r1.json();
-
-    if (d1.error && !d1.error.includes('Already')) {
-        showToast(d1.error); return;
-    }
-
-    // 再领农场奖励
-    const r2 = await fetch('/api/farm/checkin-reward', { method: 'POST' });
-    const d2 = await r2.json();
-    if (d2.success) {
-        window.FARM_DATA.coins = d2.coins;
+    const r = await fetch('/api/checkin', { method: 'POST' });
+    const d = await r.json();
+    if (d.success) {
         window.FARM_DATA.mainCheckedIn = true;
-        window.FARM_DATA.claimedCheckin = true;
-        updateCoinsDisplay(d2.coins);
-        showToast('📅 ' + d2.message);
         updateCheckinBtn(true, true);
-    } else if (d2.error) {
-        showToast(d2.error);
+        if (d.farm_coins) {
+            window.FARM_DATA.coins += d.farm_coins;
+            updateCoinsDisplay(window.FARM_DATA.coins);
+            showToast('📅 签到 +' + d.farm_coins + '农场金币');
+        } else {
+            showToast('📅 签到成功');
+        }
+    } else if (d.error) {
+        showToast(d.error);
+        // Already checked in - still try to claim if not yet
+        if (d.error.includes('Already')) {
+            window.FARM_DATA.mainCheckedIn = true;
+            updateCheckinBtn(true, false);
+        }
     }
 }
 
-function updateCheckinBtn(mainCheckedIn, claimedCheckin) {
+function updateCheckinBtn(mainCheckedIn) {
     const btn = document.querySelector('.btn-checkin');
     if (!btn) return;
-
-    if (claimedCheckin) {
+    if (mainCheckedIn) {
         btn.disabled = true; btn.style.opacity = '0.5'; btn.style.cursor = 'not-allowed';
         btn.textContent = '✅已签';
-    } else if (mainCheckedIn) {
-        btn.disabled = false; btn.style.opacity = '1'; btn.style.cursor = 'pointer';
-        btn.textContent = '📅领币';
-        btn.style.color = '#ffaa00';
     } else {
         btn.disabled = false; btn.style.opacity = '1'; btn.style.cursor = 'pointer';
         btn.textContent = '📅签到';
@@ -952,4 +958,53 @@ updateCoinsDisplay(window.FARM_DATA.coins);
 function disableRewardBtn(selector) {
     const btn = document.querySelector(selector);
     if (btn) { btn.disabled = true; btn.style.opacity = '0.5'; btn.style.cursor = 'not-allowed'; }
+}
+
+async function switchFarm() {
+    window.FARM_DATA.viewingOwnFarm = !window.FARM_DATA.viewingOwnFarm;
+    const scene = game.scene.getScene('FarmScene');
+    if (scene) {
+        await scene.syncWithServer();
+    }
+}
+
+function updateFarmSwitchBtn() {
+    const btn = document.getElementById('switch-farm-btn');
+    if (!btn) return;
+    if (window.FARM_DATA.viewingOwnFarm) {
+        btn.textContent = '🏡我的';
+        btn.style.color = '#51cf66';
+    } else {
+        btn.textContent = '🏚️对方';
+        btn.style.color = '#ff6b6b';
+    }
+}
+
+function updateToolBarForFarm() {
+    const tools = ['hoe', 'water', 'seed', 'fish', 'harvest'];
+    if (!window.FARM_DATA.viewingOwnFarm) {
+        // 在对方农场：只允许收获（偷菜）和钓鱼
+        tools.forEach(t => {
+            const btn = document.getElementById('tool-' + t);
+            if (!btn) return;
+            if (t === 'harvest' || t === 'fish') {
+                btn.style.opacity = '1';
+                btn.disabled = false;
+            } else {
+                btn.style.opacity = '0.3';
+                btn.disabled = true;
+            }
+        });
+        if (!['harvest', 'fish'].includes(window.FARM_DATA.currentTool)) {
+            setTool('harvest');
+        }
+    } else {
+        // 在自己农场：全部可用
+        tools.forEach(t => {
+            const btn = document.getElementById('tool-' + t);
+            if (!btn) return;
+            btn.style.opacity = '1';
+            btn.disabled = false;
+        });
+    }
 }
