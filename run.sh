@@ -20,7 +20,7 @@ if [ ! -d ".venv" ]; then
     python3 -m venv .venv
 fi
 source .venv/bin/activate
-pip install -r requirements.txt
+pip3 install -r requirements.txt
 
 # check if env exists
 if [ ! -d ".env" ]; then
@@ -30,13 +30,13 @@ fi
 
 # build service
 cat << EOF > /etc/systemd/system/taofang.service
-echo "[Unit]
+[Unit]
 Description=taofang server
 After=network.target
 [Service]
 User=root
 Group=root
-WorkingDirectory=/root/projects/taofang
+WorkingDirectory=$(pwd)
 ExecStart=$(pwd)/.venv/bin/python $(pwd)/main.py $port
 Restart=on-failure
 RestartSec=5s
