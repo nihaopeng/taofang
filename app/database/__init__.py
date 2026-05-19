@@ -2,6 +2,7 @@ import sqlite3
 import os
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
+from zoneinfo import ZoneInfo
 
 load_dotenv()
 
@@ -115,7 +116,7 @@ def init_db():
         cursor.execute("INSERT INTO users (id, name, secret_key) VALUES (2, ?, ?)", (os.getenv("USER_B_NAME"), os.getenv("USER_B_PASSPHRASE")))
         
         # Set anniversary date (default to today for demo)
-        anniversary_date = datetime.now().strftime("%Y-%m-%d")
+        anniversary_date = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
         cursor.execute("INSERT OR REPLACE INTO meta_config (key, value) VALUES ('anniversary_date', ?)", (anniversary_date,))
         
         # Initialize achievement definitions
@@ -162,7 +163,7 @@ def unlock_achievement(user_id: int, achievement_id: str, achievement_data: dict
     """Unlock a specific achievement for a user"""
     conn = get_connection()
     cursor = conn.cursor()
-    today = datetime.now()
+    today = datetime.now(ZoneInfo("Asia/Shanghai"))
     
     # Check if achievement already unlocked
     cursor.execute("""
@@ -314,7 +315,7 @@ def init_farm_tables():
     # 初始化水塘
     cursor.execute("SELECT COUNT(*) FROM farm_ponds")
     if cursor.fetchone()[0] == 0:
-        now = datetime.now().isoformat()
+        now = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat()
         for uid in [1, 2]:
             cursor.execute("INSERT INTO farm_ponds (pond_id, user_id, fish_count, max_fish, last_reproduced_at) VALUES (1, ?, 5, 10, ?)", (uid, now))
             cursor.execute("INSERT INTO farm_ponds (pond_id, user_id, fish_count, max_fish, last_reproduced_at) VALUES (2, ?, 5, 10, ?)", (uid, now))
@@ -544,7 +545,7 @@ def plant_seed(user_id: int, plot_index: int, plant_type: str):
     """种植作物"""
     conn = get_farm_connection()
     cursor = conn.cursor()
-    now = datetime.now().isoformat()
+    now = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat()
     cursor.execute("""
     UPDATE farm_plots SET plant_type = ?, planted_at = ?, watered_at = ?, growth_stage = 1
     WHERE user_id = ? AND plot_index = ? AND growth_stage = 0
@@ -556,7 +557,7 @@ def water_plot(user_id: int, plot_index: int):
     """浇水"""
     conn = get_farm_connection()
     cursor = conn.cursor()
-    now = datetime.now().isoformat()
+    now = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat()
     cursor.execute("UPDATE farm_plots SET watered_at = ? WHERE user_id=? AND plot_index=? AND plant_type IS NOT NULL", (now, user_id, plot_index))
     conn.commit()
     conn.close()
@@ -633,7 +634,7 @@ def get_love_progress():
     days_together = 0
     if row:
         anniversary_date = datetime.strptime(row[0], "%Y-%m-%d")
-        days_together = (datetime.now() - anniversary_date).days
+        days_together = (datetime.now(ZoneInfo("Asia/Shanghai")) - anniversary_date).days
     
     cursor.execute("""SELECT COUNT(DISTINCT DATE(checkin_time)) FROM daily_checkin WHERE user_id IN (1, 2) GROUP BY DATE(checkin_time) HAVING COUNT(DISTINCT user_id) = 2""")
     both_checkins = len(cursor.fetchall())
@@ -645,7 +646,7 @@ def update_growth_stages():
     """更新所有地块的生长阶段（根据时间计算）"""
     conn = get_farm_connection()
     cursor = conn.cursor()
-    now = datetime.now()
+    now = datetime.now(ZoneInfo("Asia/Shanghai"))
     
     cursor.execute("SELECT user_id, plot_index, plant_type, planted_at, watered_at, growth_stage FROM farm_plots WHERE plant_type IS NOT NULL AND growth_stage < 5")
     for row in cursor.fetchall():
@@ -687,7 +688,7 @@ def update_pond_fish():
     """检查所有水塘繁殖，每次调用时更新鱼数"""
     conn = get_farm_connection()
     cursor = conn.cursor()
-    now = datetime.now()
+    now = datetime.now(ZoneInfo("Asia/Shanghai"))
     
     cursor.execute("SELECT pond_id, user_id, fish_count, max_fish, last_reproduced_at FROM farm_ponds")
     for row in cursor.fetchall():
@@ -762,7 +763,7 @@ def can_claim_daily(user_id: int, claim_type: str) -> bool:
     """检查今日是否可领取奖励"""
     conn = get_farm_connection()
     cursor = conn.cursor()
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
     cursor.execute("SELECT COUNT(*) FROM farm_daily_claims WHERE user_id = ? AND claim_type = ? AND claim_date = ?", (user_id, claim_type, today))
     count = cursor.fetchone()[0]
     conn.close()
@@ -772,7 +773,7 @@ def record_daily_claim(user_id: int, claim_type: str):
     """记录每日领取"""
     conn = get_farm_connection()
     cursor = conn.cursor()
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
     cursor.execute("INSERT OR IGNORE INTO farm_daily_claims (user_id, claim_type, claim_date) VALUES (?, ?, ?)", (user_id, claim_type, today))
     conn.commit()
     conn.close()
@@ -781,7 +782,7 @@ def check_and_unlock_time_achievements(user_id: int):
     """Check and unlock time-based achievements"""
     conn = get_connection()
     cursor = conn.cursor()
-    today = datetime.now()
+    today = datetime.now(ZoneInfo("Asia/Shanghai"))
     
     # Get user's anniversary date
     cursor.execute("SELECT value FROM meta_config WHERE key = 'anniversary_date'")
@@ -839,7 +840,7 @@ def check_and_unlock_special_achievements(user_id: int, event_type: str):
         unlock_achievement(user_id, "special_birthday")
     
     # Check month/year milestones
-    today = datetime.now()
+    today = datetime.now(ZoneInfo("Asia/Shanghai"))
     conn = get_connection()
     cursor = conn.cursor()
     
@@ -860,7 +861,7 @@ def check_and_unlock_special_achievements(user_id: int, event_type: str):
 
 def check_and_unlock_checkin_achievements(user_id: int):
     """Check and unlock check-in based achievements"""
-    today = datetime.now()
+    today = datetime.now(ZoneInfo("Asia/Shanghai"))
     conn = get_connection()
     cursor = conn.cursor()
     
@@ -1117,15 +1118,19 @@ def get_user_streak(user_id: int):
     WHERE user_id = ?
     ORDER BY checkin_date DESC
     """, (user_id,))
-    
-    checkin_dates = [datetime.strptime(row[0], "%Y-%m-%d").date() for row in cursor.fetchall()]
+    res = cursor.fetchall()
+    #print(f"user:{user_id},res:{res}")
+    checkin_dates = [datetime.strptime(row[0], "%Y-%m-%d").date() for row in res]
+    #print(f"checking dates:{checkin_dates}") 
     conn.close()
     
     if not checkin_dates:
         return 0
     
     # Calculate current streak
-    today = datetime.now().date()
+    #today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+    today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+    print(f"user_id:{user_id},today:{today},last checkin:{checkin_dates[0]},checkin is today:{checkin_dates[0] == today}")
     streak = 0
     
     # Check if checked in today
@@ -1151,7 +1156,7 @@ def get_user_streak(user_id: int):
                     streak += 1
                 else:
                     break
-    
+    print(f"streak:{streak}")
     return streak
 
 def get_longest_streak(user_id: int):
@@ -1214,7 +1219,7 @@ def get_checkin_stats(user_id: int):
     monthly_stats = [{"month": row[0], "count": row[1]} for row in cursor.fetchall()]
     
     # Check-in calendar (last 30 days)
-    thirty_days_ago = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+    thirty_days_ago = (datetime.now(ZoneInfo("Asia/Shanghai")) - timedelta(days=30)).strftime("%Y-%m-%d")
     cursor.execute("""
     SELECT DATE(checkin_time) as checkin_date
     FROM daily_checkin
@@ -1301,7 +1306,7 @@ def get_partner_checkin_status(current_user_id: int):
     # Calculate current both-checkin streak
     both_current_streak = 0
     if both_checkin_dates:
-        today = datetime.now().date()
+        today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
         
         # Check if both checked in today
         if both_checkin_dates[0] == today:
@@ -1360,7 +1365,7 @@ def get_checkin_calendar(user_id: int, year: int = None, month: int = None):
     conn = get_connection()
     cursor = conn.cursor()
     
-    today = datetime.now()
+    today = datetime.now(ZoneInfo("Asia/Shanghai"))
     if year is None:
         year = today.year
     if month is None:
@@ -1420,7 +1425,7 @@ def add_message(user_id: int, user_name: str, content: str, is_private: bool = F
     
     # 解锁留言相关成就
     from datetime import datetime
-    today = datetime.now()
+    today = datetime.now(ZoneInfo("Asia/Shanghai"))
     
     # 获取用户留言数量
     cursor.execute("SELECT COUNT(*) FROM messages WHERE user_id = ?", (user_id,))
