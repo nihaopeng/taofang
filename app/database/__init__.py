@@ -633,8 +633,9 @@ def get_love_progress():
     row = cursor.fetchone()
     days_together = 0
     if row:
-        anniversary_date = datetime.strptime(row[0], "%Y-%m-%d")
-        days_together = (datetime.now(ZoneInfo("Asia/Shanghai")) - anniversary_date).days
+        anniversary_datetime = datetime.strptime(row[0], "%Y-%m-%d")
+        anniversary_date = anniversary_datetime.date()
+        days_together = (datetime.now(ZoneInfo("Asia/Shanghai")).date() - anniversary_date).days
     
     cursor.execute("""SELECT COUNT(DISTINCT DATE(checkin_time)) FROM daily_checkin WHERE user_id IN (1, 2) GROUP BY DATE(checkin_time) HAVING COUNT(DISTINCT user_id) = 2""")
     both_checkins = len(cursor.fetchall())
