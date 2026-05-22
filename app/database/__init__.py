@@ -793,8 +793,8 @@ def check_and_unlock_time_achievements(user_id: int):
         conn.close()
         return
     
-    anniversary_date = datetime.strptime(anniversary_row[0], "%Y-%m-%d")
-    days_together = (today - anniversary_date).days
+    anniversary_date = datetime.strptime(anniversary_row[0], "%Y-%m-%d").date()
+    days_together = (datetime.now(ZoneInfo("Asia/Shanghai")).date() - anniversary_date).days
     
     # Time-based achievements
     time_achievements = {
@@ -872,8 +872,8 @@ def check_and_unlock_checkin_achievements(user_id: int):
     anniversary_row = cursor.fetchone()
     
     if anniversary_row:
-        anniversary_date = datetime.strptime(anniversary_row[0], "%Y-%m-%d")
-        days_together = (today - anniversary_date).days
+        anniversary_date = datetime.strptime(anniversary_row[0], "%Y-%m-%d").date()
+        days_together = (datetime.now(ZoneInfo("Asia/Shanghai")).date() - anniversary_date).days
     
     # Check for check-in based achievements
     if days_together >= 7:
