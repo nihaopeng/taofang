@@ -23,7 +23,17 @@ source .venv/bin/activate
 pip3 install -r requirements.txt
 
 # check if env exists
-if [ ! -f ".env" ]; then
+if [ -f ".env" ]; then
+    # 如果文件存在，询问是否覆盖
+    read -p ".env 文件已存在，是否覆盖？(y/n): " choice
+    if [ "$choice" = "y" ] || [ "$choice" = "Y" ]; then
+        cp .env.example .env
+        vim .env
+    else
+        echo "操作已取消，未覆盖原文件。"
+    fi
+else
+    # 如果文件不存在，直接复制并打开
     cp .env.example .env
     vim .env
 fi
