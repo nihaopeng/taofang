@@ -23,7 +23,7 @@ source .venv/bin/activate
 pip3 install -r requirements.txt
 
 # check if env exists
-if [ ! -d ".env" ]; then
+if [ ! -f ".env" ]; then
     cp .env.example .env
     vim .env
 fi
