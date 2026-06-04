@@ -19,17 +19,17 @@ async def achievements_page(request: Request):
     # Category names and icons
     category_names = {
         "time": "恋爱时间",
-        "interaction": "互动成就",
-        "special": "特殊时刻",
-        "milestone": "里程碑",
+        "checkin_streak": "打卡连胜",
+        "checkin_count": "打卡次数",
+        "checkin_both": "双人打卡",
         "general": "一般成就"
     }
     
     category_icons = {
         "time": "⏰",
-        "interaction": "💬",
-        "special": "🎉",
-        "milestone": "🏅",
+        "checkin_streak": "🔥",
+        "checkin_count": "✅",
+        "checkin_both": "💑",
         "general": "🏆"
     }
     

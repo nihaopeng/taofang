@@ -1,8 +1,10 @@
 from starlette.responses import RedirectResponse
 from starlette.requests import Request
-from ..database import get_connection, get_recent_achievements, get_farm_currency
+from ..database import get_connection, get_recent_achievements, check_and_send_reminders, mark_email_sent, get_work_items
 from ..utils.notifications import get_all_notifications, create_notification_display
-from datetime import datetime
+from datetime import datetime, date
+from zoneinfo import ZoneInfo
+import os
 
 async def placeholder(request: Request):
     """Placeholder page for future features"""
@@ -63,13 +65,27 @@ async def home(request: Request):
     # Get notifications
     notifications = get_all_notifications(user_id)
     notifications_html = create_notification_display(notifications)
-    
+
+    # Check work summary reminders for both users
+    today_str = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
+    pending_users = check_and_send_reminders()
+    if pending_users:
+        from ..utils.email_reminder import send_reminder_email
+        user_names = {
+            1: os.getenv("USER_A_NAME", "taotao"),
+            2: os.getenv("USER_B_NAME", "fangfang"),
+        }
+        user_emails = {
+            1: os.getenv("USER_A_NOTIFY_EMAIL", ""),
+            2: os.getenv("USER_B_NOTIFY_EMAIL", ""),
+        }
+        for uid in pending_users:
+            to_email = user_emails.get(uid, "")
+            if to_email:
+                if send_reminder_email(to_email, user_names.get(uid, "")):
+                    mark_email_sent(uid, today_str)
+
     # Prepare context
-    try:
-        farm_coins, _ = get_farm_currency(user_id)
-    except:
-        farm_coins = 0
-    
     context = {
         "request": request,
         "user_name": user_name,
@@ -78,7 +94,6 @@ async def home(request: Request):
         "recent_achievements": recent_achievements,
         "notifications_html": notifications_html,
         "has_notifications": len(notifications) > 0,
-        "farm_coins": farm_coins,
     }
     
     return request.app.templates.TemplateResponse("dashboard.html", context)

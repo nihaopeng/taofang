@@ -1,20 +1,17 @@
 from starlette.applications import Starlette
 from starlette.routing import Route, Mount, WebSocketRoute
-from starlette.responses import RedirectResponse
+from starlette.responses import RedirectResponse, JSONResponse
 from starlette.staticfiles import StaticFiles
 from starlette.middleware import Middleware
 from starlette.middleware.sessions import SessionMiddleware
-from jinja2 import Environment, FileSystemLoader
 from starlette.templating import Jinja2Templates
-from starlette.routing import Route, Mount
-from starlette.responses import JSONResponse, RedirectResponse
 from starlette.exceptions import HTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.cors import CORSMiddleware
 import os
 
 from .database import init_db
-from .routes import auth, dashboard, api, websocket, achievements, messages, memories, farm
+from .routes import auth, dashboard, api, websocket, achievements, memories, work_summary
 
 async def not_found(request, exc):
     """Custom 404 handler that redirects to gate"""
@@ -70,26 +67,15 @@ def create_app():
             Route("/api/checkin-statistics", api.get_checkin_statistics, name="checkin_stats"),
             Route("/api/checkin-calendar", api.get_checkin_calendar_data, name="checkin_calendar"),
             Route("/api/checkin-insights", api.get_checkin_insights, name="checkin_insights"),
-            Route("/farm", farm.farm_page, name="farm"),
-            Route("/api/farm/state", farm.api_farm_state, name="farm_state"),
-            Route("/api/farm/currency", farm.api_farm_currency, name="farm_currency"),
-            Route("/api/farm/buy-seed", farm.api_buy_seed, methods=["POST"], name="farm_buy_seed"),
-            Route("/api/farm/till", farm.api_till, methods=["POST"], name="farm_till"),
-            Route("/api/farm/plant", farm.api_plant, methods=["POST"], name="farm_plant"),
-            Route("/api/farm/water", farm.api_water, methods=["POST"], name="farm_water"),
-            Route("/api/farm/harvest", farm.api_harvest, methods=["POST"], name="farm_harvest"),
-            Route("/api/farm/sell", farm.api_sell, methods=["POST"], name="farm_sell"),
-            Route("/api/farm/fish", farm.api_fish, methods=["POST"], name="farm_fish"),
-            Route("/api/farm/steal", farm.api_steal, methods=["POST"], name="farm_steal"),
-            Route("/api/farm/unlock-plot", farm.api_unlock_plot, methods=["POST"], name="farm_unlock_plot"),
-            Route("/api/farm/release-fish", farm.api_release_fish, methods=["POST"], name="farm_release_fish"),
-            Route("/api/farm/diary-reward", farm.api_diary_reward, methods=["POST"], name="farm_diary_reward"),
-            Route("/api/farm/checkin-reward", farm.api_checkin_reward, methods=["POST"], name="farm_checkin_reward"),
             Route("/achievements", achievements.achievements_page, name="achievements"),
-            Route("/messages", messages.messages_page, name="messages"),
-            Route("/api/messages", messages.api_get_messages, name="api_get_messages"),
-            Route("/api/messages", messages.api_add_message, methods=["POST"], name="api_add_message"),
-            Route("/api/messages/{message_id:int}", messages.api_delete_message, methods=["DELETE"], name="api_delete_message"),
+            Route("/work-summary", work_summary.work_summary_page, name="work_summary"),
+            Route("/api/work-items", work_summary.api_get_work_items, name="api_get_work_items"),
+            Route("/api/work-items", work_summary.api_add_work_item, methods=["POST"], name="api_add_work_item"),
+            Route("/api/work-items/{item_id:int}", work_summary.api_update_work_item, methods=["PUT"], name="api_update_work_item"),
+            Route("/api/work-items/{item_id:int}", work_summary.api_delete_work_item, methods=["DELETE"], name="api_delete_work_item"),
+            Route("/api/work-items/stats", work_summary.api_get_work_stats, name="api_get_work_stats"),
+            Route("/api/work-items/acknowledge", work_summary.api_acknowledge_day, methods=["POST"], name="api_acknowledge_day"),
+            Route("/api/work-items/check-reminders", work_summary.api_check_reminders, name="api_check_reminders"),
             Route("/memories", memories.memories_page, name="memories"),
             Route("/api/memories", memories.api_get_memories, name="api_get_memories"),
             Route("/api/memories", memories.api_add_memory, methods=["POST"], name="api_add_memory"),
@@ -135,7 +121,7 @@ def create_app():
         if not app.debug:
             response.headers["Content-Security-Policy"] = \
                 "default-src 'self'; " \
-                "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; " \
+                "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdn.plot.ly; " \
                 "style-src 'self' 'unsafe-inline'; " \
                 "img-src 'self' data: blob:; " \
                 "connect-src 'self' ws: wss:; " \

@@ -6,38 +6,52 @@
             {"id": "time_7days", "name": "一周之约", "description": "恋爱7天", "icon": "❤️", "points": 10},
             {"id": "time_30days", "name": "满月之喜", "description": "恋爱30天", "icon": "🌕", "points": 30},
             {"id": "time_100days", "name": "百日纪念", "description": "恋爱100天", "icon": "💯", "points": 50},
+            {"id": "time_200days", "name": "双百纪念", "description": "恋爱200天", "icon": "💎", "points": 60},
             {"id": "time_365days", "name": "周年庆典", "description": "恋爱1周年", "icon": "🎂", "points": 100},
-            {"id": "time_1000days", "name": "千日之恋", "description": "恋爱1000天", "icon": "🌟", "points": 200}
+            {"id": "time_500days", "name": "五百天纪念", "description": "恋爱500天", "icon": "💖", "points": 120},
+            {"id": "time_1000days", "name": "千日之恋", "description": "恋爱1000天", "icon": "🌟", "points": 200},
+            {"id": "time_2000days", "name": "两干日之情", "description": "恋爱2000天", "icon": "👑", "points": 300}
         ]
     },
-    "interaction": {
-        "name": "互动成就",
-        "icon": "💬",
+    "checkin_streak": {
+        "name": "打卡连胜",
+        "icon": "🔥",
         "achievements": [
-            {"id": "interact_first", "name": "初次互动", "description": "第一次互动", "icon": "👋", "points": 10},
-            {"id": "interact_10", "name": "活跃伙伴", "description": "完成10次互动", "icon": "💬", "points": 30},
-            {"id": "interact_50", "name": "亲密无间", "description": "完成50次互动", "icon": "💕", "points": 60},
-            {"id": "interact_100", "name": "心有灵犀", "description": "完成100次互动", "icon": "✨", "points": 100}
+            {"id": "streak_3", "name": "签到新星", "description": "连续打卡3天", "icon": "🌱", "points": 10},
+            {"id": "streak_7", "name": "签到达人", "description": "连续打卡7天", "icon": "📅", "points": 30},
+            {"id": "streak_14", "name": "半月坚持", "description": "连续打卡14天", "icon": "🌟", "points": 50},
+            {"id": "streak_21", "name": "三周习惯", "description": "连续打卡21天", "icon": "💪", "points": 70},
+            {"id": "streak_30", "name": "签到王者", "description": "连续打卡30天", "icon": "👑", "points": 100},
+            {"id": "streak_60", "name": "双月连签", "description": "连续打卡60天", "icon": "🔥", "points": 150},
+            {"id": "streak_100", "name": "百日连胜", "description": "连续打卡100天", "icon": "💎", "points": 200},
+            {"id": "streak_180", "name": "半年之约", "description": "连续打卡180天", "icon": "✨", "points": 300},
+            {"id": "streak_365", "name": "全年无休", "description": "连续打卡365天", "icon": "🏆", "points": 500}
         ]
     },
-    "special": {
-        "name": "特殊时刻",
-        "icon": "🎉",
+    "checkin_count": {
+        "name": "打卡次数",
+        "icon": "✅",
         "achievements": [
-            {"id": "special_first_month", "name": "第一个月", "description": "度过第一个月", "icon": "📅", "points": 20},
-            {"id": "special_first_year", "name": "第一年", "description": "度过第一年", "icon": "🎉", "points": 80},
-            {"id": "special_valentine", "name": "情人节", "description": "一起过情人节", "icon": "💘", "points": 50},
-            {"id": "special_birthday", "name": "生日祝福", "description": "为对方庆生", "icon": "🎁", "points": 40}
+            {"id": "checkin_10", "name": "十次打卡", "description": "累计打卡10次", "icon": "📝", "points": 10},
+            {"id": "checkin_50", "name": "五十次打卡", "description": "累计打卡50次", "icon": "📋", "points": 30},
+            {"id": "checkin_100", "name": "百日签到", "description": "累计打卡100次", "icon": "💯", "points": 60},
+            {"id": "checkin_200", "name": "两百次打卡", "description": "累计打卡200次", "icon": "💫", "points": 100},
+            {"id": "checkin_365", "name": "周年签到", "description": "累计打卡365次", "icon": "🎂", "points": 200},
+            {"id": "checkin_500", "name": "五百里程碑", "description": "累计打卡500次", "icon": "🌟", "points": 300},
+            {"id": "checkin_1000", "name": "千次打卡", "description": "累计打卡1000次", "icon": "👑", "points": 500}
         ]
     },
-    "milestone": {
-        "name": "里程碑",
-        "icon": "🏅",
+    "checkin_both": {
+        "name": "双人打卡",
+        "icon": "💑",
         "achievements": [
-            {"id": "milestone_first_photo", "name": "第一张照片", "description": "上传第一张照片", "icon": "📸", "points": 30},
-            {"id": "milestone_first_note", "name": "第一篇日记", "description": "写下第一篇日记", "icon": "📝", "points": 20},
-            {"id": "milestone_10_photos", "name": "回忆满满", "description": "上传10张照片", "icon": "📷", "points": 50},
-            {"id": "milestone_10_notes", "name": "日记达人", "description": "写下10篇日记", "icon": "📚", "points": 40}
+            {"id": "checkin_both_7", "name": "默契初现", "description": "双人同时打卡7天", "icon": "🤝", "points": 30},
+            {"id": "checkin_both_14", "name": "两周同步", "description": "双人同时打卡14天", "icon": "💕", "points": 60},
+            {"id": "checkin_both_30", "name": "月度默契", "description": "双人同时打卡30天", "icon": "💑", "points": 100},
+            {"id": "checkin_both_60", "name": "双月同在", "description": "双人同时打卡60天", "icon": "💖", "points": 150},
+            {"id": "checkin_both_100", "name": "百日同心", "description": "双人同时打卡100天", "icon": "💎", "points": 200},
+            {"id": "checkin_both_200", "name": "两百天默契", "description": "双人同时打卡200天", "icon": "🌟", "points": 300},
+            {"id": "checkin_both_365", "name": "全年相伴", "description": "双人同时打卡365天", "icon": "🏆", "points": 500}
         ]
     }
 }

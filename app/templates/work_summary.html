@@ -1,0 +1,643 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>每日工作总结 - 心动坐标</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+    <style>
+        :root {
+            --primary-color: #667eea;
+            --secondary-color: #764ba2;
+            --accent-color: #ff6b6b;
+            --success-color: #51cf66;
+            --text-color: #333;
+            --light-bg: rgba(255, 255, 255, 0.9);
+            --glass-bg: rgba(255, 255, 255, 0.1);
+            --shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Arial', sans-serif;
+            background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+            color: var(--text-color);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container { max-width: 800px; margin: 0 auto; }
+
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 16px 20px;
+            background: var(--light-bg);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            margin-bottom: 16px;
+            box-shadow: var(--shadow);
+        }
+
+        .logo { font-size: 1.5em; color: var(--primary-color); font-weight: bold; }
+        .user-info { display: flex; align-items: center; gap: 12px; }
+        .user-name { font-weight: bold; color: var(--secondary-color); }
+        .nav-links { display: flex; gap: 8px; align-items: center; }
+
+        .nav-btn {
+            padding: 8px 14px;
+            background: var(--glass-bg);
+            color: var(--text-color);
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            text-decoration: none;
+            font-size: 0.9em;
+            transition: all 0.3s ease;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+
+        .nav-btn:hover { background: var(--primary-color); color: white; transform: translateY(-2px); }
+
+        .logout-btn {
+            padding: 8px 14px;
+            background: var(--accent-color);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            text-decoration: none;
+            font-size: 0.9em;
+            transition: transform 0.3s ease;
+        }
+
+        .logout-btn:hover { transform: translateY(-2px); }
+
+        .card {
+            background: var(--light-bg);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            padding: 24px;
+            box-shadow: var(--shadow);
+            margin-bottom: 16px;
+        }
+
+        .section-title {
+            font-size: 1.3em;
+            color: var(--secondary-color);
+            margin-bottom: 16px;
+        }
+
+        .input-group {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 16px;
+        }
+
+        .input-group input {
+            flex: 1;
+            padding: 12px 14px;
+            border: 1px solid rgba(0, 0, 0, 0.2);
+            border-radius: 12px;
+            font-size: 1em;
+            outline: none;
+            transition: border-color 0.3s;
+        }
+
+        .input-group input:focus { border-color: var(--primary-color); }
+
+        .btn-add {
+            padding: 12px 22px;
+            background: var(--primary-color);
+            color: white;
+            border: none;
+            border-radius: 12px;
+            font-size: 1em;
+            cursor: pointer;
+            transition: all 0.3s;
+            white-space: nowrap;
+        }
+
+        .btn-add:hover { background: var(--secondary-color); transform: translateY(-2px); }
+
+        .items-list { display: flex; flex-direction: column; gap: 8px; }
+
+        .work-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 12px 14px;
+            background: var(--glass-bg);
+            border-radius: 12px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            transition: all 0.3s;
+        }
+
+        .work-item:hover { background: rgba(255, 255, 255, 0.15); }
+
+        .item-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: var(--success-color);
+            flex-shrink: 0;
+        }
+
+        .item-content {
+            flex: 1;
+            font-size: 1em;
+            word-break: break-word;
+        }
+
+        .item-actions { display: flex; gap: 6px; flex-shrink: 0; }
+
+        .btn-icon {
+            width: 32px;
+            height: 32px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 1em;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .btn-edit { background: rgba(102, 126, 234, 0.2); color: var(--primary-color); }
+        .btn-edit:hover { background: var(--primary-color); color: white; }
+        .btn-delete { background: rgba(255, 107, 107, 0.2); color: var(--accent-color); }
+        .btn-delete:hover { background: var(--accent-color); color: white; }
+
+        .empty-hint {
+            text-align: center;
+            padding: 32px 20px;
+            color: #999;
+            font-size: 1em;
+        }
+
+        .btn-skip {
+            display: inline-block;
+            margin-top: 12px;
+            padding: 8px 20px;
+            background: rgba(255, 255, 255, 0.3);
+            color: var(--text-color);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            border-radius: 20px;
+            cursor: pointer;
+            font-size: 0.9em;
+            transition: all 0.2s;
+        }
+
+        .btn-skip:hover {
+            background: var(--secondary-color);
+            color: white;
+        }
+
+        .date-nav {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            margin-bottom: 16px;
+        }
+
+        .date-nav .date-label {
+            font-weight: bold;
+            font-size: 1.05em;
+            min-width: 150px;
+            text-align: center;
+            color: var(--secondary-color);
+        }
+
+        .date-nav-btn {
+            width: 40px;
+            height: 40px;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            background: var(--glass-bg);
+            color: var(--text-color);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            font-size: 1.1em;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .date-nav-btn:hover { background: var(--primary-color); color: white; }
+
+        .today-btn {
+            padding: 8px 16px;
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            border-radius: 10px;
+            cursor: pointer;
+            background: var(--glass-bg);
+            color: var(--text-color);
+            font-size: 0.9em;
+            transition: all 0.2s;
+        }
+
+        .today-btn:hover { background: var(--success-color); color: white; }
+
+        .chart-container { width: 100%; min-height: 350px; }
+
+        .view-switcher {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+
+        .view-btn {
+            padding: 8px 18px;
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            border-radius: 20px;
+            cursor: pointer;
+            background: var(--glass-bg);
+            color: var(--text-color);
+            font-size: 0.9em;
+            transition: all 0.2s;
+        }
+
+        .view-btn.active { background: var(--primary-color); color: white; border-color: var(--primary-color); }
+        .view-btn:hover { background: var(--primary-color); color: white; }
+
+        .stats-summary {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 12px;
+            flex-wrap: wrap;
+        }
+
+        .stat-badge {
+            padding: 6px 14px;
+            background: var(--glass-bg);
+            border-radius: 10px;
+            font-size: 0.85em;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+
+        .stat-badge .stat-num {
+            font-weight: bold;
+            color: var(--accent-color);
+            font-size: 1.15em;
+        }
+
+        .footer {
+            text-align: center;
+            padding: 16px;
+            color: white;
+            font-size: 0.85em;
+            opacity: 0.8;
+        }
+
+        @media (max-width: 768px) {
+            body { padding: 12px; }
+            .header { flex-direction: column; gap: 10px; text-align: center; }
+            .card { padding: 18px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <div class="logo">📋 每日工作总结</div>
+            <div class="user-info">
+                <span class="user-name">{{ user_name }}</span>
+                <div class="nav-links">
+                    <a href="/" class="nav-btn">🏠 首页</a>
+                    <a href="/logout" class="logout-btn">退出</a>
+                </div>
+            </div>
+        </header>
+
+        <div class="card">
+            <h2 class="section-title">📝 今日事项</h2>
+            <div class="date-nav">
+                <button class="date-nav-btn" onclick="changeDate(-1)" title="前一天">&lt;</button>
+                <span class="date-label" id="current-date-label">{{ today }}</span>
+                <button class="date-nav-btn" onclick="changeDate(1)" title="后一天">&gt;</button>
+                <button class="today-btn" onclick="goToToday()">今天</button>
+            </div>
+            <div class="input-group">
+                <input type="text" id="item-input" placeholder="添加今日事项..." maxlength="500">
+                <button class="btn-add" onclick="addItem()">+ 添加</button>
+            </div>
+            <div class="items-list" id="items-list">
+                {% if items %}
+                {% for item in items %}
+                <div class="work-item" data-id="{{ item.id }}">
+                    <span class="item-dot"></span>
+                    <span class="item-content">{{ item.content }}</span>
+                    <div class="item-actions">
+                        <button class="btn-icon btn-edit" onclick="editItem({{ item.id }})" title="编辑">✎</button>
+                        <button class="btn-icon btn-delete" onclick="deleteItem({{ item.id }})" title="删除">✕</button>
+                    </div>
+                </div>
+                {% endfor %}
+                {% else %}
+                <div class="empty-hint" id="empty-hint">
+                    {% if acknowledged %}
+                    今日已确认无事，好好休息吧 🌙
+                    {% else %}
+                    今天还没有记录事项，请在 <strong>{{ "20:00" if not request else "" }}</strong> 前添加，或点击下方按钮跳过提醒
+                    <br><button class="btn-skip" onclick="acknowledgeDay()" id="btn-skip">今日无事，不提醒</button>
+                    {% endif %}
+                </div>
+                {% endif %}
+            </div>
+        </div>
+
+        <div class="card">
+            <h2 class="section-title">📊 完成趋势</h2>
+            <div class="view-switcher">
+                <button class="view-btn active" onclick="switchView('day')" id="btn-day">日视图</button>
+                <button class="view-btn" onclick="switchView('month')" id="btn-month">月视图</button>
+                <button class="view-btn" onclick="switchView('year')" id="btn-year">年视图</button>
+            </div>
+            <div class="stats-summary" id="stats-summary"></div>
+            <div class="chart-container" id="chart"></div>
+        </div>
+
+        <footer class="footer">
+            &copy; 2026 心动坐标 · 只属于我们的私密空间
+        </footer>
+    </div>
+
+    <script>
+        let currentDate = "{{ today }}";
+        let currentView = "day";
+        let allStats = {{ stats | tojson }};
+
+        const itemInput = document.getElementById("item-input");
+        itemInput.addEventListener("keydown", (e) => {
+            if (e.key === "Enter") addItem();
+        });
+
+        function changeDate(offset) {
+            const parts = currentDate.split("-");
+            const d = new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]));
+            d.setDate(d.getDate() + offset);
+            const yyyy = d.getFullYear();
+            const mm = String(d.getMonth() + 1).padStart(2, "0");
+            const dd = String(d.getDate()).padStart(2, "0");
+            currentDate = `${yyyy}-${mm}-${dd}`;
+            document.getElementById("current-date-label").textContent = currentDate;
+            loadItems();
+        }
+
+        function goToToday() {
+            const d = new Date();
+            const yyyy = d.getFullYear();
+            const mm = String(d.getMonth() + 1).padStart(2, "0");
+            const dd = String(d.getDate()).padStart(2, "0");
+            currentDate = `${yyyy}-${mm}-${dd}`;
+            document.getElementById("current-date-label").textContent = currentDate;
+            loadItems();
+        }
+
+        async function loadItems() {
+            try {
+                const resp = await fetch(`/api/work-items?date=${currentDate}`);
+                const data = await resp.json();
+                if (!data.success) return;
+
+                const container = document.getElementById("items-list");
+                if (!data.items || data.items.length === 0) {
+                    if (currentDate === new Date().toISOString().split("T")[0]) {
+                        container.innerHTML = `<div class="empty-hint" id="empty-hint">
+                            今天还没有记录事项，请在 ${"20:00"} 前添加，或点击下方按钮跳过提醒
+                            <br><button class="btn-skip" onclick="acknowledgeDay()" id="btn-skip">今日无事，不提醒</button>
+                        </div>`;
+                    } else {
+                        container.innerHTML = '<div class="empty-hint">该日期没有记录事项</div>';
+                    }
+                } else {
+                    container.innerHTML = data.items.map(item => `
+                        <div class="work-item" data-id="${item.id}">
+                            <span class="item-dot"></span>
+                            <span class="item-content">${escapeHtml(item.content)}</span>
+                            <div class="item-actions">
+                                <button class="btn-icon btn-edit" onclick="editItem(${item.id})" title="编辑">✎</button>
+                                <button class="btn-icon btn-delete" onclick="deleteItem(${item.id})" title="删除">✕</button>
+                            </div>
+                        </div>
+                    `).join("");
+                }
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement("div");
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        async function addItem() {
+            const content = itemInput.value.trim();
+            if (!content) return;
+
+            try {
+                const resp = await fetch("/api/work-items", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ content, work_date: currentDate })
+                });
+                const data = await resp.json();
+                if (data.success) {
+                    itemInput.value = "";
+                    loadItems();
+                    refreshStats();
+                } else {
+                    alert(data.error || "添加失败");
+                }
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        function editItem(id) {
+            const item = document.querySelector(`.work-item[data-id="${id}"]`);
+            if (!item) return;
+            const contentEl = item.querySelector(".item-content");
+            const oldText = contentEl.textContent;
+
+            const input = document.createElement("input");
+            input.type = "text";
+            input.value = oldText;
+            input.style.cssText = "flex:1;padding:6px 10px;border:1px solid #667eea;border-radius:8px;font-size:1em;outline:none;";
+            contentEl.replaceWith(input);
+            input.focus();
+            input.select();
+
+            async function save() {
+                const newContent = input.value.trim();
+                if (!newContent || newContent === oldText) {
+                    input.replaceWith(contentEl);
+                    return;
+                }
+                try {
+                    const resp = await fetch(`/api/work-items/${id}`, {
+                        method: "PUT",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ action: "edit", content: newContent })
+                    });
+                    const data = await resp.json();
+                    if (data.success) {
+                        loadItems();
+                    } else {
+                        alert(data.error || "编辑失败");
+                        input.replaceWith(contentEl);
+                    }
+                } catch (e) {
+                    console.error(e);
+                    input.replaceWith(contentEl);
+                }
+            }
+
+            input.addEventListener("blur", save);
+            input.addEventListener("keydown", (e) => {
+                if (e.key === "Enter") { input.blur(); }
+                if (e.key === "Escape") { input.value = oldText; input.blur(); }
+            });
+        }
+
+        async function deleteItem(id) {
+            if (!confirm("确定删除这条事项吗？")) return;
+
+            try {
+                const resp = await fetch(`/api/work-items/${id}`, { method: "DELETE" });
+                const data = await resp.json();
+                if (data.success) {
+                    loadItems();
+                    refreshStats();
+                }
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        async function acknowledgeDay() {
+            try {
+                const resp = await fetch("/api/work-items/acknowledge", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" }
+                });
+                const data = await resp.json();
+                if (data.success) {
+                    const hint = document.getElementById("empty-hint");
+                    hint.innerHTML = '今日已确认无事，好好休息吧 🌙';
+                }
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        function switchView(view) {
+            currentView = view;
+            document.querySelectorAll(".view-btn").forEach(btn => btn.classList.remove("active"));
+            document.getElementById(`btn-${view}`).classList.add("active");
+            renderChart();
+        }
+
+        async function refreshStats() {
+            try {
+                const resp = await fetch("/api/work-items/stats");
+                const data = await resp.json();
+                if (data.success) {
+                    allStats = data.stats;
+                    renderChart();
+                }
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        function renderChart() {
+            if (!allStats || allStats.length === 0) {
+                document.getElementById("chart").innerHTML = '<div class="empty-hint" style="height:350px;display:flex;align-items:center;justify-content:center;">还没有数据，开始记录吧 📝</div>';
+                document.getElementById("stats-summary").innerHTML = "";
+                return;
+            }
+
+            let labels = [];
+            let values = [];
+
+            if (currentView === "day") {
+                labels = allStats.map(s => s.date);
+                values = allStats.map(s => s.total);
+            } else if (currentView === "month") {
+                const monthly = {};
+                allStats.forEach(s => {
+                    const month = s.date.substring(0, 7);
+                    if (!monthly[month]) monthly[month] = 0;
+                    monthly[month] += s.total;
+                });
+                labels = Object.keys(monthly);
+                values = labels.map(k => monthly[k]);
+            } else if (currentView === "year") {
+                const yearly = {};
+                allStats.forEach(s => {
+                    const year = s.date.substring(0, 4);
+                    if (!yearly[year]) yearly[year] = 0;
+                    yearly[year] += s.total;
+                });
+                labels = Object.keys(yearly);
+                values = labels.map(k => yearly[k]);
+            }
+
+            const totalItems = values.reduce((a, b) => a + b, 0);
+            const avgPerDay = labels.length > 0 ? (totalItems / labels.length).toFixed(1) : 0;
+
+            document.getElementById("stats-summary").innerHTML = `
+                <div class="stat-badge">📋 总计 <span class="stat-num">${totalItems}</span> 项</div>
+                <div class="stat-badge">📊 日均 <span class="stat-num">${avgPerDay}</span> 项</div>
+            `;
+
+            const trace = {
+                x: labels,
+                y: values,
+                type: "scatter",
+                mode: "lines+markers",
+                name: "完成事项",
+                line: { color: "#51cf66", width: 3, shape: "spline" },
+                marker: { color: "#51cf66", size: 7 },
+                fill: "tozeroy",
+                fillcolor: "rgba(81, 207, 102, 0.1)"
+            };
+
+            const layout = {
+                margin: { t: 10, r: 20, b: 50, l: 40 },
+                paper_bgcolor: "transparent",
+                plot_bgcolor: "transparent",
+                xaxis: {
+                    title: currentView === "day" ? "日期" : currentView === "month" ? "月份" : "年份",
+                    gridcolor: "rgba(0,0,0,0.05)",
+                    tickfont: { size: 11 }
+                },
+                yaxis: {
+                    title: "事项数",
+                    gridcolor: "rgba(0,0,0,0.05)",
+                    tickfont: { size: 11 },
+                    dtick: Math.max(1, Math.ceil(Math.max(...values) / 8))
+                },
+                hovermode: "x unified"
+            };
+
+            const config = { responsive: true, displayModeBar: false };
+
+            Plotly.newPlot("chart", [trace], layout, config);
+        }
+
+        document.addEventListener("DOMContentLoaded", () => {
+            renderChart();
+        });
+    </script>
+</body>
+</html>

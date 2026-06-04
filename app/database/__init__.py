@@ -6,15 +6,10 @@ from zoneinfo import ZoneInfo
 
 load_dotenv()
 
+VALID_ACHIEVEMENT_CATEGORIES = {"time", "checkin_streak", "checkin_count", "checkin_both"}
+
 def get_connection():
     return sqlite3.connect(os.getenv("DATABASE_PATH", "app/database/heartsync.db"), check_same_thread=False)
-
-def get_farm_connection():
-    farm_db = os.getenv("FARM_DATABASE_PATH", "app/database/farm.db")
-    farm_dir = os.path.dirname(farm_db)
-    if farm_dir and not os.path.exists(farm_dir):
-        os.makedirs(farm_dir)
-    return sqlite3.connect(farm_db, check_same_thread=False)
 
 def init_db():
     if not os.path.exists("app/database"):
@@ -85,24 +80,24 @@ def init_db():
     """)
     
     cursor.execute("""
-    CREATE TABLE IF NOT EXISTS messages (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        user_name TEXT NOT NULL,
-        content TEXT NOT NULL,
-        is_private INTEGER DEFAULT 0,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (user_id) REFERENCES users(id)
-    )
-    """)
-    
-    cursor.execute("""
     CREATE TABLE IF NOT EXISTS memories (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER NOT NULL,
         user_name TEXT NOT NULL,
         photo_path TEXT NOT NULL,
         caption TEXT DEFAULT '',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id)
+    )
+    """)
+    
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS work_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        content TEXT NOT NULL,
+        completed INTEGER DEFAULT 0,
+        work_date DATE NOT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (user_id) REFERENCES users(id)
     )
@@ -121,30 +116,37 @@ def init_db():
         
         # Initialize achievement definitions
         achievement_definitions = [
-            # 恋爱时间成就
             ("time_7days", "一周之约", "恋爱7天", "❤️", "time", 10),
             ("time_30days", "满月之喜", "恋爱30天", "🌕", "time", 30),
             ("time_100days", "百日纪念", "恋爱100天", "💯", "time", 50),
+            ("time_200days", "双百纪念", "恋爱200天", "💎", "time", 60),
             ("time_365days", "周年庆典", "恋爱1周年", "🎂", "time", 100),
+            ("time_500days", "五百天纪念", "恋爱500天", "💖", "time", 120),
             ("time_1000days", "千日之恋", "恋爱1000天", "🌟", "time", 200),
-            
-            # 互动成就
-            ("interact_first", "初次互动", "第一次互动", "👋", "interaction", 10),
-            ("interact_10", "活跃伙伴", "完成10次互动", "💬", "interaction", 30),
-            ("interact_50", "亲密无间", "完成50次互动", "💕", "interaction", 60),
-            ("interact_100", "心有灵犀", "完成100次互动", "✨", "interaction", 100),
-            
-            # 特殊时刻成就
-            ("special_first_month", "第一个月", "度过第一个月", "📅", "special", 20),
-            ("special_first_year", "第一年", "度过第一年", "🎉", "special", 80),
-            ("special_valentine", "情人节", "一起过情人节", "💘", "special", 50),
-            ("special_birthday", "生日祝福", "为对方庆生", "🎁", "special", 40),
-            
-            # 里程碑成就
-            ("milestone_first_photo", "第一张照片", "上传第一张照片", "📸", "milestone", 30),
-            ("milestone_first_note", "第一篇日记", "写下第一篇日记", "📝", "milestone", 20),
-            ("milestone_10_photos", "回忆满满", "上传10张照片", "📷", "milestone", 50),
-            ("milestone_10_notes", "日记达人", "写下10篇日记", "📚", "milestone", 40),
+            ("time_2000days", "两干日之情", "恋爱2000天", "👑", "time", 300),
+            ("streak_3", "签到新星", "连续打卡3天", "🌱", "checkin_streak", 10),
+            ("streak_7", "签到达人", "连续打卡7天", "📅", "checkin_streak", 30),
+            ("streak_14", "半月坚持", "连续打卡14天", "🌟", "checkin_streak", 50),
+            ("streak_21", "三周习惯", "连续打卡21天", "💪", "checkin_streak", 70),
+            ("streak_30", "签到王者", "连续打卡30天", "👑", "checkin_streak", 100),
+            ("streak_60", "双月连签", "连续打卡60天", "🔥", "checkin_streak", 150),
+            ("streak_100", "百日连胜", "连续打卡100天", "💎", "checkin_streak", 200),
+            ("streak_180", "半年之约", "连续打卡180天", "✨", "checkin_streak", 300),
+            ("streak_365", "全年无休", "连续打卡365天", "🏆", "checkin_streak", 500),
+            ("checkin_10", "十次打卡", "累计打卡10次", "📝", "checkin_count", 10),
+            ("checkin_50", "五十次打卡", "累计打卡50次", "📋", "checkin_count", 30),
+            ("checkin_100", "百日签到", "累计打卡100次", "💯", "checkin_count", 60),
+            ("checkin_200", "两百次打卡", "累计打卡200次", "💫", "checkin_count", 100),
+            ("checkin_365", "周年签到", "累计打卡365次", "🎂", "checkin_count", 200),
+            ("checkin_500", "五百里程碑", "累计打卡500次", "🌟", "checkin_count", 300),
+            ("checkin_1000", "千次打卡", "累计打卡1000次", "👑", "checkin_count", 500),
+            ("checkin_both_7", "默契初现", "双人同时打卡7天", "🤝", "checkin_both", 30),
+            ("checkin_both_14", "两周同步", "双人同时打卡14天", "💕", "checkin_both", 60),
+            ("checkin_both_30", "月度默契", "双人同时打卡30天", "💑", "checkin_both", 100),
+            ("checkin_both_60", "双月同在", "双人同时打卡60天", "💖", "checkin_both", 150),
+            ("checkin_both_100", "百日同心", "双人同时打卡100天", "💎", "checkin_both", 200),
+            ("checkin_both_200", "两百天默契", "双人同时打卡200天", "🌟", "checkin_both", 300),
+            ("checkin_both_365", "全年相伴", "双人同时打卡365天", "🏆", "checkin_both", 500),
         ]
         
         for ach_id, name, description, icon, category, points in achievement_definitions:
@@ -152,9 +154,6 @@ def init_db():
             INSERT OR IGNORE INTO meta_config (key, value)
             VALUES (?, ?)
             """, (f"achievement_def_{ach_id}", f"{name}|{description}|{icon}|{category}|{points}"))
-    
-    # 初始化农场表
-    init_farm_tables()
     
     conn.commit()
     conn.close()
@@ -216,569 +215,6 @@ def unlock_achievement(user_id: int, achievement_id: str, achievement_data: dict
     conn.close()
     return True
 
-# ==================== 农场系统表格 ====================
-
-def init_farm_tables():
-    """Initialize farm-related database tables"""
-    conn = get_farm_connection()
-    cursor = conn.cursor()
-    
-    # 植物定义表
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS farm_plants (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        seed_cost INTEGER DEFAULT 10,
-        sell_price INTEGER DEFAULT 20,
-        growth_time INTEGER DEFAULT 300,
-        water_reduction INTEGER DEFAULT 60,
-        unlock_days INTEGER DEFAULT 0,
-        unlock_both_checkins INTEGER DEFAULT 0,
-        stages INTEGER DEFAULT 4,
-        description TEXT DEFAULT ''
-    )
-    """)
-    
-    # 地块表（每位用户独立）
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS farm_plots (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        plot_index INTEGER NOT NULL,
-        plant_type TEXT,
-        planted_at TIMESTAMP,
-        watered_at TIMESTAMP,
-        growth_stage INTEGER DEFAULT 0,
-        UNIQUE(user_id, plot_index)
-    )
-    """)
-    
-    # 背包表
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS farm_inventory (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        item_type TEXT NOT NULL,
-        item_id TEXT NOT NULL,
-        quantity INTEGER DEFAULT 1,
-        FOREIGN KEY (user_id) REFERENCES users(id),
-        UNIQUE(user_id, item_type, item_id)
-    )
-    """)
-    
-    # 鱼类定义表
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS farm_fish (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        sell_price INTEGER DEFAULT 15,
-        rarity TEXT DEFAULT 'common',
-        min_wait REAL DEFAULT 2.0,
-        max_wait REAL DEFAULT 8.0,
-        description TEXT DEFAULT ''
-    )
-    """)
-    
-    # 农场货币表（每位用户独立）
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS farm_currency (
-        user_id INTEGER PRIMARY KEY,
-        coins INTEGER DEFAULT 100,
-        unlocked_plots INTEGER DEFAULT 4,
-        FOREIGN KEY (user_id) REFERENCES users(id)
-    )
-    """)
-    
-    # 每日领取记录表
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS farm_daily_claims (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        claim_type TEXT NOT NULL,
-        claim_date TEXT NOT NULL,
-        UNIQUE(user_id, claim_type, claim_date)
-    )
-    """)
-    
-    # 水塘鱼数表（每位用户独立）
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS farm_ponds (
-        pond_id INTEGER NOT NULL,
-        user_id INTEGER NOT NULL,
-        fish_count INTEGER DEFAULT 5,
-        max_fish INTEGER DEFAULT 10,
-        last_reproduced_at TIMESTAMP,
-        PRIMARY KEY (pond_id, user_id)
-    )
-    """)
-    
-    # 初始化水塘
-    cursor.execute("SELECT COUNT(*) FROM farm_ponds")
-    if cursor.fetchone()[0] == 0:
-        now = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat()
-        for uid in [1, 2]:
-            cursor.execute("INSERT INTO farm_ponds (pond_id, user_id, fish_count, max_fish, last_reproduced_at) VALUES (1, ?, 5, 10, ?)", (uid, now))
-            cursor.execute("INSERT INTO farm_ponds (pond_id, user_id, fish_count, max_fish, last_reproduced_at) VALUES (2, ?, 5, 10, ?)", (uid, now))
-    
-    # 检查是否需要初始化种子数据
-    cursor.execute("SELECT COUNT(*) FROM farm_plants")
-    if cursor.fetchone()[0] == 0:
-        _init_default_plants(cursor)
-    
-    cursor.execute("SELECT COUNT(*) FROM farm_fish")
-    if cursor.fetchone()[0] == 0:
-        _init_default_fish(cursor)
-    
-    # 确保每个用户都有货币记录
-    cursor.execute("INSERT OR IGNORE INTO farm_currency (user_id, coins, unlocked_plots) VALUES (1, 100, 4)")
-    cursor.execute("INSERT OR IGNORE INTO farm_currency (user_id, coins, unlocked_plots) VALUES (2, 100, 4)")
-    
-    conn.commit()
-    conn.close()
-
-def _init_default_plants(cursor):
-    """初始化默认植物数据"""
-    plants = [
-        ("carrot", "胡萝卜", 20, 40, 180, 45, 0, 0, 4, "基础作物，3分钟成熟"),
-        ("wheat", "小麦", 40, 80, 600, 90, 0, 0, 4, "基础粮食，10分钟成熟"),
-        ("hops", "啤酒花", 100, 150, 3600, 300, 7, 3, 5, "需恋爱7天，1小时成熟"),
-        ("tomato", "番茄", 200, 300, 14400, 600, 14, 7, 4, "需恋爱14天，4小时成熟"),
-        ("sunflower", "向日葵", 400, 700, 57600, 1200, 30, 14, 5, "需恋爱30天，16小时成熟"),
-    ]
-    for plant in plants:
-        cursor.execute("""INSERT INTO farm_plants (id, name, seed_cost, sell_price, growth_time, water_reduction, unlock_days, unlock_both_checkins, stages, description) VALUES (?,?,?,?,?,?,?,?,?,?)""", plant)
-
-def _init_default_fish(cursor):
-    """初始化默认鱼类数据"""
-    fish = [
-        ("carp", "鲤鱼", 5, "common", 2.0, 6.0, "常见的淡水鱼"),
-        ("bass", "鲈鱼", 8, "common", 2.5, 7.0, "肉质鲜美的鱼类"),
-        ("salmon", "三文鱼", 10, "uncommon", 3.0, 10.0, "较为稀有的鱼类"),
-        ("goldfish", "金鱼", 15, "rare", 4.0, 15.0, "非常稀有的观赏鱼"),
-        ("koi", "锦鲤", 12, "rare", 5.0, 20.0, "传说级别的锦鲤！"),
-    ]
-    for f in fish:
-        cursor.execute("INSERT INTO farm_fish (id, name, sell_price, rarity, min_wait, max_wait, description) VALUES (?,?,?,?,?,?,?)", f)
-
-# ==================== 农场查询函数 ====================
-
-def get_farm_state(user_id: int):
-    """获取指定用户的农场状态"""
-    conn = get_farm_connection()
-    cursor = conn.cursor()
-    
-    # 获取该用户的地块
-    cursor.execute("SELECT plot_index, plant_type, planted_at, watered_at, growth_stage FROM farm_plots WHERE user_id=? ORDER BY plot_index", (user_id,))
-    plots = {}
-    for row in cursor.fetchall():
-        plots[str(row[0])] = {
-            "plot_index": row[0],
-            "plant_type": row[1],
-            "planted_at": row[2],
-            "watered_at": row[3],
-            "growth_stage": row[4]
-        }
-    
-    # 获取植物定义
-    cursor.execute("SELECT * FROM farm_plants")
-    plants = {}
-    for row in cursor.fetchall():
-        plants[row[0]] = {
-            "id": row[0], "name": row[1], "seed_cost": row[2],
-            "sell_price": row[3], "growth_time": row[4],
-            "water_reduction": row[5], "unlock_days": row[6],
-            "unlock_both_checkins": row[7], "stages": row[8],
-            "description": row[9]
-        }
-    
-    # 获取鱼类定义
-    cursor.execute("SELECT * FROM farm_fish")
-    fish_list = {}
-    for row in cursor.fetchall():
-        fish_list[row[0]] = {
-            "id": row[0], "name": row[1], "sell_price": row[2],
-            "rarity": row[3], "min_wait": row[4], "max_wait": row[5],
-            "description": row[6]
-        }
-    
-    conn.close()
-    return {"plots": plots, "plants": plants, "fish": fish_list}
-
-def get_farm_currency(user_id: int):
-    """获取用户农场货币和已解锁地块数"""
-    conn = get_farm_connection()
-    cursor = conn.cursor()
-    cursor.execute("INSERT OR IGNORE INTO farm_currency (user_id, coins, unlocked_plots) VALUES (?, 100, 4)", (user_id,))
-    cursor.execute("SELECT coins, unlocked_plots FROM farm_currency WHERE user_id = ?", (user_id,))
-    row = cursor.fetchone()
-    conn.close()
-    return (row[0], row[1]) if row else (100, 4)
-
-def add_farm_currency(user_id: int, amount: int):
-    """增加农场货币"""
-    conn = get_farm_connection()
-    cursor = conn.cursor()
-    cursor.execute("INSERT OR IGNORE INTO farm_currency (user_id, coins, unlocked_plots) VALUES (?, 100, 4)", (user_id,))
-    cursor.execute("UPDATE farm_currency SET coins = coins + ? WHERE user_id = ?", (amount, user_id))
-    cursor.execute("SELECT coins FROM farm_currency WHERE user_id = ?", (user_id,))
-    new_balance = cursor.fetchone()[0]
-    conn.commit()
-    conn.close()
-    return new_balance
-
-def get_unlocked_plots_count(user_id: int) -> int:
-    """获取用户已解锁地块数"""
-    conn = get_farm_connection()
-    cursor = conn.cursor()
-    cursor.execute("INSERT OR IGNORE INTO farm_currency (user_id, coins, unlocked_plots) VALUES (?, 100, 4)", (user_id,))
-    cursor.execute("SELECT unlocked_plots FROM farm_currency WHERE user_id = ?", (user_id,))
-    row = cursor.fetchone()
-    conn.close()
-    return row[0] if row else 4
-
-def get_next_plot_cost(user_id: int) -> int:
-    """获取解锁下一个地块的费用"""
-    unlocked = get_unlocked_plots_count(user_id)
-    if unlocked >= 20:
-        return -1
-    return 50 * (2 ** (unlocked - 4))
-
-def unlock_next_plot(user_id: int) -> bool:
-    """解锁下一个地块，返回是否成功"""
-    conn = get_farm_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT coins, unlocked_plots FROM farm_currency WHERE user_id = ?", (user_id,))
-    row = cursor.fetchone()
-    if not row:
-        conn.close()
-        return False
-    coins, unlocked = row
-    if unlocked >= 20:
-        conn.close()
-        return False
-    cost = 50 * (2 ** (unlocked - 4))
-    if coins < cost:
-        conn.close()
-        return False
-    cursor.execute("UPDATE farm_currency SET coins = coins - ?, unlocked_plots = unlocked_plots + 1 WHERE user_id = ?", (cost, user_id))
-    conn.commit()
-    conn.close()
-    return True
-
-def spend_farm_currency(user_id: int, amount: int) -> bool:
-    """花费农场货币，返回是否成功"""
-    conn = get_farm_connection()
-    cursor = conn.cursor()
-    cursor.execute("INSERT OR IGNORE INTO farm_currency (user_id, coins, unlocked_plots) VALUES (?, 100, 4)", (user_id,))
-    cursor.execute("SELECT coins FROM farm_currency WHERE user_id = ?", (user_id,))
-    row = cursor.fetchone()
-    if not row or row[0] < amount:
-        conn.close()
-        return False
-    cursor.execute("UPDATE farm_currency SET coins = coins - ? WHERE user_id = ?", (amount, user_id))
-    conn.commit()
-    conn.close()
-    return True
-
-def get_inventory(user_id: int):
-    """获取用户背包"""
-    conn = get_farm_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT item_type, item_id, quantity FROM farm_inventory WHERE user_id = ?", (user_id,))
-    items = {}
-    for row in cursor.fetchall():
-        key = f"{row[0]}:{row[1]}"
-        items[key] = {"type": row[0], "id": row[1], "quantity": row[2]}
-    conn.close()
-    return items
-
-def add_to_inventory(user_id: int, item_type: str, item_id: str, quantity: int = 1):
-    """添加物品到背包"""
-    conn = get_farm_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-    INSERT INTO farm_inventory (user_id, item_type, item_id, quantity)
-    VALUES (?, ?, ?, ?)
-    ON CONFLICT(user_id, item_type, item_id) DO UPDATE SET quantity = quantity + ?
-    """, (user_id, item_type, item_id, quantity, quantity))
-    conn.commit()
-    conn.close()
-
-def remove_from_inventory(user_id: int, item_type: str, item_id: str, quantity: int = 1) -> bool:
-    """从背包移除物品，返回是否成功"""
-    conn = get_farm_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT quantity FROM farm_inventory WHERE user_id = ? AND item_type = ? AND item_id = ?", (user_id, item_type, item_id))
-    row = cursor.fetchone()
-    if not row or row[0] < quantity:
-        conn.close()
-        return False
-    new_qty = row[0] - quantity
-    if new_qty <= 0:
-        cursor.execute("DELETE FROM farm_inventory WHERE user_id = ? AND item_type = ? AND item_id = ?", (user_id, item_type, item_id))
-    else:
-        cursor.execute("UPDATE farm_inventory SET quantity = ? WHERE user_id = ? AND item_type = ? AND item_id = ?", (new_qty, user_id, item_type, item_id))
-    conn.commit()
-    conn.close()
-    return True
-
-def get_plot(user_id: int, plot_index: int):
-    """获取单个地块信息"""
-    conn = get_farm_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT plot_index, plant_type, planted_at, watered_at, growth_stage FROM farm_plots WHERE user_id=? AND plot_index=?", (user_id, plot_index))
-    row = cursor.fetchone()
-    conn.close()
-    if not row:
-        return None
-    return {"plot_index": row[0], "plant_type": row[1], "planted_at": row[2], "watered_at": row[3], "growth_stage": row[4]}
-
-def till_plot(user_id: int, plot_index: int):
-    """开垦地块"""
-    conn = get_farm_connection()
-    cursor = conn.cursor()
-    cursor.execute("INSERT OR IGNORE INTO farm_plots (user_id, plot_index, growth_stage) VALUES (?, ?, 0)", (user_id, plot_index))
-    conn.commit()
-    conn.close()
-
-def plant_seed(user_id: int, plot_index: int, plant_type: str):
-    """种植作物"""
-    conn = get_farm_connection()
-    cursor = conn.cursor()
-    now = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat()
-    cursor.execute("""
-    UPDATE farm_plots SET plant_type = ?, planted_at = ?, watered_at = ?, growth_stage = 1
-    WHERE user_id = ? AND plot_index = ? AND growth_stage = 0
-    """, (plant_type, now, now, user_id, plot_index))
-    conn.commit()
-    conn.close()
-
-def water_plot(user_id: int, plot_index: int):
-    """浇水"""
-    conn = get_farm_connection()
-    cursor = conn.cursor()
-    now = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat()
-    cursor.execute("UPDATE farm_plots SET watered_at = ? WHERE user_id=? AND plot_index=? AND plant_type IS NOT NULL", (now, user_id, plot_index))
-    conn.commit()
-    conn.close()
-
-def harvest_plot(user_id: int, plot_index: int):
-    """收获作物，返回作物类型"""
-    conn = get_farm_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT plant_type, growth_stage FROM farm_plots WHERE user_id=? AND plot_index=?", (user_id, plot_index))
-    row = cursor.fetchone()
-    if not row or row[1] < 5:
-        conn.close()
-        return None
-    plant_type = row[0]
-    cursor.execute("UPDATE farm_plots SET plant_type = NULL, planted_at = NULL, watered_at = NULL, growth_stage = 0 WHERE user_id=? AND plot_index=?", (user_id, plot_index))
-    conn.commit()
-    conn.close()
-    return plant_type
-
-def steal_plot(stealer_id: int, owner_id: int, plot_index: int):
-    """偷菜：从对方农场收获成熟作物，返回作物类型或None"""
-    conn = get_farm_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT plant_type, growth_stage FROM farm_plots WHERE user_id=? AND plot_index=?", (owner_id, plot_index))
-    row = cursor.fetchone()
-    if not row or row[1] < 5:
-        conn.close()
-        return None
-    plant_type = row[0]
-    cursor.execute("UPDATE farm_plots SET plant_type = NULL, planted_at = NULL, watered_at = NULL, growth_stage = 0 WHERE user_id=? AND plot_index=?", (owner_id, plot_index))
-    conn.commit()
-    conn.close()
-    return plant_type
-
-def get_plant_def(plant_id: str):
-    """获取植物定义"""
-    conn = get_farm_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM farm_plants WHERE id = ?", (plant_id,))
-    row = cursor.fetchone()
-    conn.close()
-    if not row:
-        return None
-    return {"id": row[0], "name": row[1], "seed_cost": row[2], "sell_price": row[3], "growth_time": row[4], "water_reduction": row[5], "unlock_days": row[6], "unlock_both_checkins": row[7], "stages": row[8], "description": row[9]}
-
-def get_fish_def(fish_id: str):
-    """获取鱼类定义"""
-    conn = get_farm_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM farm_fish WHERE id = ?", (fish_id,))
-    row = cursor.fetchone()
-    conn.close()
-    if not row:
-        return None
-    return {"id": row[0], "name": row[1], "sell_price": row[2], "rarity": row[3], "min_wait": row[4], "max_wait": row[5], "description": row[6]}
-
-def get_unlocked_plants(days_together: int, both_checkins: int):
-    """获取已解锁的植物列表"""
-    conn = get_farm_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM farm_plants WHERE unlock_days <= ? AND unlock_both_checkins <= ? ORDER BY unlock_days", (days_together, both_checkins))
-    plants = []
-    for row in cursor.fetchall():
-        plants.append({"id": row[0], "name": row[1], "seed_cost": row[2], "sell_price": row[3], "growth_time": row[4], "water_reduction": row[5], "unlock_days": row[6], "unlock_both_checkins": row[7], "stages": row[8], "description": row[9]})
-    conn.close()
-    return plants
-
-def get_love_progress():
-    """获取恋爱进度（天数&共同签到数）"""
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT value FROM meta_config WHERE key = 'anniversary_date'")
-    row = cursor.fetchone()
-    days_together = 0
-    if row:
-        anniversary_datetime = datetime.strptime(row[0], "%Y-%m-%d")
-        anniversary_date = anniversary_datetime.date()
-        days_together = (datetime.now(ZoneInfo("Asia/Shanghai")).date() - anniversary_date).days
-    
-    cursor.execute("""SELECT COUNT(DISTINCT DATE(checkin_time)) FROM daily_checkin WHERE user_id IN (1, 2) GROUP BY DATE(checkin_time) HAVING COUNT(DISTINCT user_id) = 2""")
-    both_checkins = len(cursor.fetchall())
-    
-    conn.close()
-    return days_together, both_checkins
-
-def update_growth_stages():
-    """更新所有地块的生长阶段（根据时间计算）"""
-    conn = get_farm_connection()
-    cursor = conn.cursor()
-    now = datetime.now(ZoneInfo("Asia/Shanghai"))
-    
-    cursor.execute("SELECT user_id, plot_index, plant_type, planted_at, watered_at, growth_stage FROM farm_plots WHERE plant_type IS NOT NULL AND growth_stage < 5")
-    for row in cursor.fetchall():
-        uid, plot_index, plant_type, planted_at_str, watered_at_str, stage = row
-        if not plant_type or not planted_at_str:
-            continue
-        
-        planted_at = datetime.fromisoformat(planted_at_str)
-        watered_at = datetime.fromisoformat(watered_at_str) if watered_at_str else planted_at
-        
-        # 计算浇水次数：基于watered_at和planted_at的时间差
-        water_count = max(0, int((watered_at - planted_at).total_seconds() / 60 + 0.5))
-        
-        # 获取植物定义
-        cursor.execute("SELECT growth_time, water_reduction, stages FROM farm_plants WHERE id = ?", (plant_type,))
-        plant_row = cursor.fetchone()
-        if not plant_row:
-            continue
-        growth_time, water_reduction, total_stages = plant_row
-        
-        # 计算实际生长时间（浇水减少时间）
-        effective_growth = max(growth_time * 0.3, growth_time - water_count * water_reduction)
-        elapsed = (now - planted_at).total_seconds()
-        
-        # 计算生长阶段
-        progress = min(1.0, elapsed / effective_growth)
-        new_stage = 1 + int(progress * (total_stages - 1))
-        new_stage = min(total_stages, new_stage)
-        if progress >= 1.0:
-            new_stage = total_stages + 1  # 可收获阶段
-        
-        if new_stage != stage:
-            cursor.execute("UPDATE farm_plots SET growth_stage = ? WHERE user_id=? AND plot_index = ?", (new_stage, uid, plot_index))
-    
-    conn.commit()
-    conn.close()
-
-def update_pond_fish():
-    """检查所有水塘繁殖，每次调用时更新鱼数"""
-    conn = get_farm_connection()
-    cursor = conn.cursor()
-    now = datetime.now(ZoneInfo("Asia/Shanghai"))
-    
-    cursor.execute("SELECT pond_id, user_id, fish_count, max_fish, last_reproduced_at FROM farm_ponds")
-    for row in cursor.fetchall():
-        pond_id, uid, fish_count, max_fish, last_str = row
-        if fish_count < 2:
-            continue
-        
-        last_reproduced = datetime.fromisoformat(last_str) if last_str else now
-        elapsed_minutes = (now - last_reproduced).total_seconds() / 60
-        
-        reproduce_interval = 5
-        new_fish = int(elapsed_minutes / reproduce_interval)
-        
-        if new_fish > 0 and fish_count < max_fish:
-            added = min(new_fish, max_fish - fish_count)
-            new_count = fish_count + added
-            new_last = last_reproduced + timedelta(minutes=new_fish * reproduce_interval)
-            cursor.execute("UPDATE farm_ponds SET fish_count=?, last_reproduced_at=? WHERE pond_id=? AND user_id=?",
-                          (new_count, new_last.isoformat(), pond_id, uid))
-    
-    conn.commit()
-    conn.close()
-
-def get_ponds(user_id: int):
-    """获取指定用户的水塘状态"""
-    update_pond_fish()
-    conn = get_farm_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT pond_id, fish_count, max_fish FROM farm_ponds WHERE user_id=?", (user_id,))
-    ponds = {}
-    for row in cursor.fetchall():
-        ponds[row[0]] = {"pond_id": row[0], "fish_count": row[1], "max_fish": row[2]}
-    conn.close()
-    return ponds
-
-def try_catch_fish(user_id: int, pond_id: int) -> bool:
-    """尝试从水塘钓鱼，返回是否成功"""
-    update_pond_fish()
-    conn = get_farm_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT fish_count FROM farm_ponds WHERE pond_id=? AND user_id=?", (pond_id, user_id))
-    row = cursor.fetchone()
-    if not row or row[0] <= 0:
-        conn.close()
-        return False
-    cursor.execute("UPDATE farm_ponds SET fish_count=fish_count-1 WHERE pond_id=? AND user_id=? AND fish_count>0", (pond_id, user_id))
-    conn.commit()
-    conn.close()
-    return True
-
-def release_fish_to_pond(user_id: int, pond_id: int) -> dict:
-    """放生鱼到水塘，返回更新后的水塘状态"""
-    conn = get_farm_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT fish_count, max_fish FROM farm_ponds WHERE pond_id=? AND user_id=?", (pond_id, user_id))
-    row = cursor.fetchone()
-    if not row:
-        conn.close()
-        return None
-    fish_count, max_fish = row
-    if fish_count >= max_fish:
-        conn.close()
-        return {"success": False, "error": "水塘已满，无法放生更多鱼", "fish_count": fish_count, "max_fish": max_fish}
-    cursor.execute("UPDATE farm_ponds SET fish_count=fish_count+1 WHERE pond_id=? AND user_id=?", (pond_id, user_id))
-    conn.commit()
-    cursor.execute("SELECT fish_count FROM farm_ponds WHERE pond_id=? AND user_id=?", (pond_id, user_id))
-    new_count = cursor.fetchone()[0]
-    conn.close()
-    return {"success": True, "fish_count": new_count, "max_fish": max_fish}
-
-def can_claim_daily(user_id: int, claim_type: str) -> bool:
-    """检查今日是否可领取奖励"""
-    conn = get_farm_connection()
-    cursor = conn.cursor()
-    today = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
-    cursor.execute("SELECT COUNT(*) FROM farm_daily_claims WHERE user_id = ? AND claim_type = ? AND claim_date = ?", (user_id, claim_type, today))
-    count = cursor.fetchone()[0]
-    conn.close()
-    return count == 0
-
-def record_daily_claim(user_id: int, claim_type: str):
-    """记录每日领取"""
-    conn = get_farm_connection()
-    cursor = conn.cursor()
-    today = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
-    cursor.execute("INSERT OR IGNORE INTO farm_daily_claims (user_id, claim_type, claim_date) VALUES (?, ?, ?)", (user_id, claim_type, today))
-    conn.commit()
-    conn.close()
-
 def check_and_unlock_time_achievements(user_id: int):
     """Check and unlock time-based achievements"""
     conn = get_connection()
@@ -801,8 +237,11 @@ def check_and_unlock_time_achievements(user_id: int):
         7: "time_7days",
         30: "time_30days",
         100: "time_100days",
+        200: "time_200days",
         365: "time_365days",
-        1000: "time_1000days"
+        500: "time_500days",
+        1000: "time_1000days",
+        2000: "time_2000days"
     }
     
     for days_required, achievement_id in time_achievements.items():
@@ -811,54 +250,10 @@ def check_and_unlock_time_achievements(user_id: int):
     
     conn.close()
 
-def check_and_unlock_interaction_achievements(user_id: int, interaction_count: int):
-    """Check and unlock interaction-based achievements"""
-    if interaction_count >= 1:
-        unlock_achievement(user_id, "interact_first")
-    if interaction_count >= 10:
-        unlock_achievement(user_id, "interact_10")
-    if interaction_count >= 50:
-        unlock_achievement(user_id, "interact_50")
-    if interaction_count >= 100:
-        unlock_achievement(user_id, "interact_100")
-
 def check_and_unlock_achievements(user_id: int):
     """Check and unlock all types of achievements for a user"""
-    # Check time-based achievements
     check_and_unlock_time_achievements(user_id)
-    
-    # Check check-in based achievements
     check_and_unlock_checkin_achievements(user_id)
-    
-    # Note: Other achievement types (game, canvas, interaction, special) 
-    # are checked in their respective contexts
-
-def check_and_unlock_special_achievements(user_id: int, event_type: str):
-    """Check and unlock special event achievements"""
-    if event_type == "valentine":
-        unlock_achievement(user_id, "special_valentine")
-    elif event_type == "birthday":
-        unlock_achievement(user_id, "special_birthday")
-    
-    # Check month/year milestones
-    today = datetime.now(ZoneInfo("Asia/Shanghai"))
-    conn = get_connection()
-    cursor = conn.cursor()
-    
-    cursor.execute("SELECT value FROM meta_config WHERE key = 'anniversary_date'")
-    anniversary_row = cursor.fetchone()
-    
-    if anniversary_row:
-        anniversary_date = datetime.strptime(anniversary_row[0], "%Y-%m-%d")
-        months_together = (today.year - anniversary_date.year) * 12 + today.month - anniversary_date.month
-        years_together = today.year - anniversary_date.year
-        
-        if months_together >= 1:
-            unlock_achievement(user_id, "special_first_month")
-        if years_together >= 1:
-            unlock_achievement(user_id, "special_first_year")
-    
-    conn.close()
 
 def check_and_unlock_checkin_achievements(user_id: int):
     """Check and unlock check-in based achievements"""
@@ -866,87 +261,33 @@ def check_and_unlock_checkin_achievements(user_id: int):
     conn = get_connection()
     cursor = conn.cursor()
     
-    # Get days together from anniversary date
-    days_together = 0
-    cursor.execute("SELECT value FROM meta_config WHERE key = 'anniversary_date'")
-    anniversary_row = cursor.fetchone()
-    
-    if anniversary_row:
-        anniversary_date = datetime.strptime(anniversary_row[0], "%Y-%m-%d").date()
-        days_together = (datetime.now(ZoneInfo("Asia/Shanghai")).date() - anniversary_date).days
-    
-    # Check for check-in based achievements
-    if days_together >= 7:
-        # Check for 7 consecutive days of both users checking in
-        cursor.execute("""
-        SELECT DATE(checkin_time) as checkin_date
-        FROM daily_checkin
-        WHERE user_id IN (1, 2)
-        GROUP BY DATE(checkin_time)
-        HAVING COUNT(DISTINCT user_id) = 2
-        ORDER BY checkin_date DESC
-        LIMIT 7
-        """)
-        
-        consecutive_days = cursor.fetchall()
-        if len(consecutive_days) >= 7:
-            cursor.execute("""
-            SELECT COUNT(*) FROM achievements 
-            WHERE user_id = ? AND ach_id = 'checkin_both_7'
-            """, (user_id,))
-            
-            if cursor.fetchone()[0] == 0:
-                cursor.execute("""
-                INSERT INTO achievements (user_id, ach_id, ach_name, unlock_date)
-                VALUES (?, 'checkin_both_7', '默契初现', ?)
-                """, (user_id, today.strftime("%Y-%m-%d")))
-    
-    # Check for streak-based achievements
     current_streak = get_user_streak(user_id)
     total_checkins = get_checkin_stats(user_id)["total_checkins"]
     
-    # Streak length achievements
-    streak_achievements = {
-        3: "签到新星",
-        7: "签到达人",
-        30: "签到王者",
-    }
+    streak_thresholds = [3, 7, 14, 21, 30, 60, 100, 180, 365]
+    for threshold in streak_thresholds:
+        if current_streak >= threshold:
+            unlock_achievement(user_id, f"streak_{threshold}")
     
-    for streak_required, achievement_name in streak_achievements.items():
-        ach_id = f"streak_{streak_required}"
-        if current_streak >= streak_required:
-            cursor.execute("""
-            SELECT COUNT(*) FROM achievements 
-            WHERE user_id = ? AND ach_id = ?
-            """, (user_id, ach_id))
-            
-            if cursor.fetchone()[0] == 0:
-                cursor.execute("""
-                INSERT INTO achievements (user_id, ach_id, ach_name, unlock_date)
-                VALUES (?, ?, ?, ?)
-                """, (user_id, ach_id, achievement_name, today.strftime("%Y-%m-%d")))
+    count_thresholds = [10, 50, 100, 200, 365, 500, 1000]
+    for threshold in count_thresholds:
+        if total_checkins >= threshold:
+            unlock_achievement(user_id, f"checkin_{threshold}")
     
-    # Total check-in count achievements
-    count_achievements = {
-        100: "百日签到",
-        365: "周年签到",
-    }
+    cursor.execute("""
+    SELECT COUNT(DISTINCT DATE(checkin_time))
+    FROM daily_checkin
+    WHERE user_id IN (1, 2)
+    GROUP BY DATE(checkin_time)
+    HAVING COUNT(DISTINCT user_id) = 2
+    """)
+    both_checkin_days = len(cursor.fetchall())
     
-    for count_required, achievement_name in count_achievements.items():
-        ach_id = f"checkin_{count_required}"
-        if total_checkins >= count_required:
-            cursor.execute("""
-            SELECT COUNT(*) FROM achievements 
-            WHERE user_id = ? AND ach_id = ?
-            """, (user_id, ach_id))
-            
-            if cursor.fetchone()[0] == 0:
-                cursor.execute("""
-                INSERT INTO achievements (user_id, ach_id, ach_name, unlock_date)
-                VALUES (?, ?, ?, ?)
-                """, (user_id, ach_id, achievement_name, today.strftime("%Y-%m-%d")))
+    both_thresholds = [7, 14, 30, 60, 100, 200, 365]
+    for threshold in both_thresholds:
+        if both_checkin_days >= threshold:
+            unlock_achievement(user_id, f"checkin_both_{threshold}")
     
-    conn.commit()
     conn.close()
 
 def get_recent_achievements(user_id: int, limit: int = 5):
@@ -1006,6 +347,8 @@ def get_all_achievements(user_id: int):
     achievements_by_category = {}
     for row in cursor.fetchall():
         category = row[4] or "general"
+        if category not in VALID_ACHIEVEMENT_CATEGORIES:
+            continue
         if category not in achievements_by_category:
             achievements_by_category[category] = []
         
@@ -1031,6 +374,9 @@ def get_all_achievements(user_id: int):
         parts = row[1].split('|')
         if len(parts) >= 5:
             ach_id = row[0].replace('achievement_def_', '')
+            category = parts[3]
+            if category not in VALID_ACHIEVEMENT_CATEGORIES:
+                continue
             all_definitions[ach_id] = {
                 "id": ach_id,
                 "name": parts[0],
@@ -1067,42 +413,54 @@ def get_achievement_stats(user_id: int):
     conn = get_connection()
     cursor = conn.cursor()
     
-    # Get total achievements unlocked
     cursor.execute("""
-    SELECT COUNT(*) FROM achievements WHERE user_id = ?
-    """, (user_id,))
-    total_unlocked = cursor.fetchone()[0]
-    
-    # Get total points
-    cursor.execute("""
-    SELECT SUM(ach_points) FROM achievements WHERE user_id = ?
-    """, (user_id,))
-    total_points = cursor.fetchone()[0] or 0
-    
-    # Get achievements by category
-    cursor.execute("""
-    SELECT ach_category, COUNT(*) 
+    SELECT ach_category, COUNT(*), SUM(ach_points)
     FROM achievements 
     WHERE user_id = ?
     GROUP BY ach_category
     """, (user_id,))
     
+    total_unlocked = 0
+    total_points = 0
     category_stats = {}
     for row in cursor.fetchall():
-        category_stats[row[0]] = row[1]
+        cat = row[0]
+        if cat not in VALID_ACHIEVEMENT_CATEGORIES:
+            continue
+        category_stats[cat] = row[1]
+        total_unlocked += row[1]
+        total_points += (row[2] or 0)
     
-    # Get total achievement definitions
-    cursor.execute("""
-    SELECT COUNT(*) FROM meta_config WHERE key LIKE 'achievement_def_%'
-    """)
-    total_achievements = cursor.fetchone()[0]
+    cursor.execute(
+        "SELECT COUNT(*) FROM meta_config WHERE key LIKE 'achievement_def_%'"
+    )
+    total_defs = cursor.fetchone()[0]
+    
+    valid_total = sum(
+        1 for p in [
+            "time_",
+            "checkin_streak_",
+            "checkin_count_",
+            "checkin_both_"
+        ]
+        for _ in range(total_defs)
+    )
+    
+    valid_count = 0
+    cursor.execute("SELECT key FROM meta_config WHERE key LIKE 'achievement_def_%'")
+    for row in cursor.fetchall():
+        ach_id = row[0].replace("achievement_def_", "")
+        for prefix in ["time_", "streak_", "checkin_", "checkin_both_"]:
+            if ach_id.startswith(prefix):
+                valid_count += 1
+                break
     
     conn.close()
     
     return {
         "total_unlocked": total_unlocked,
-        "total_achievements": total_achievements,
-        "completion_rate": round((total_unlocked / total_achievements * 100), 1) if total_achievements > 0 else 0,
+        "total_achievements": valid_count,
+        "completion_rate": round((total_unlocked / valid_count * 100), 1) if valid_count > 0 else 0,
         "total_points": total_points,
         "category_stats": category_stats
     }
@@ -1131,7 +489,7 @@ def get_user_streak(user_id: int):
     # Calculate current streak
     #today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
     today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
-    print(f"user_id:{user_id},today:{today},last checkin:{checkin_dates[0]},checkin is today:{checkin_dates[0] == today}")
+    # print(f"user_id:{user_id},today:{today},last checkin:{checkin_dates[0]},checkin is today:{checkin_dates[0] == today}")
     streak = 0
     
     # Check if checked in today
@@ -1157,7 +515,7 @@ def get_user_streak(user_id: int):
                     streak += 1
                 else:
                     break
-    print(f"streak:{streak}")
+    # print(f"streak:{streak}")
     return streak
 
 def get_longest_streak(user_id: int):
@@ -1409,166 +767,6 @@ def get_checkin_calendar(user_id: int, year: int = None, month: int = None):
         "month": month
     }
 
-# ==================== 留言系统函数 ====================
-
-def add_message(user_id: int, user_name: str, content: str, is_private: bool = False):
-    """Add a new message"""
-    conn = get_connection()
-    cursor = conn.cursor()
-    
-    cursor.execute("""
-    INSERT INTO messages (user_id, user_name, content, is_private)
-    VALUES (?, ?, ?, ?)
-    """, (user_id, user_name, content, 1 if is_private else 0))
-    
-    conn.commit()
-    message_id = cursor.lastrowid
-    
-    # 解锁留言相关成就
-    from datetime import datetime
-    today = datetime.now(ZoneInfo("Asia/Shanghai"))
-    
-    # 获取用户留言数量
-    cursor.execute("SELECT COUNT(*) FROM messages WHERE user_id = ?", (user_id,))
-    message_count = cursor.fetchone()[0]
-    
-    # 检查成就
-    if message_count >= 1:
-        cursor.execute("SELECT COUNT(*) FROM achievements WHERE user_id = ? AND ach_id = ?", 
-                      (user_id, "milestone_first_note"))
-        if cursor.fetchone()[0] == 0:
-            cursor.execute("""
-            INSERT INTO achievements 
-            (user_id, ach_id, ach_name, ach_description, ach_icon, ach_category, ach_points, unlock_date)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (user_id, "milestone_first_note", "第一篇日记", "写下第一篇日记", "📝", "milestone", 20, today.strftime("%Y-%m-%d")))
-    
-    if message_count >= 10:
-        cursor.execute("SELECT COUNT(*) FROM achievements WHERE user_id = ? AND ach_id = ?", 
-                      (user_id, "milestone_10_notes"))
-        if cursor.fetchone()[0] == 0:
-            cursor.execute("""
-            INSERT INTO achievements 
-            (user_id, ach_id, ach_name, ach_description, ach_icon, ach_category, ach_points, unlock_date)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (user_id, "milestone_10_notes", "日记达人", "写下10篇日记", "📚", "milestone", 40, today.strftime("%Y-%m-%d")))
-    
-    conn.commit()
-    conn.close()
-    return message_id
-
-def get_messages(user_id: int, include_private: bool = True, limit: int = 50):
-    """Get messages for a user"""
-    conn = get_connection()
-    cursor = conn.cursor()
-    
-    if include_private:
-        # 获取所有公开消息和用户自己的私密消息
-        cursor.execute("""
-        SELECT 
-            m.id, m.user_id, m.user_name, m.content, m.is_private, m.created_at,
-            CASE WHEN m.user_id = ? THEN 1 ELSE 0 END as is_own
-        FROM messages m
-        WHERE m.is_private = 0 OR m.user_id = ?
-        ORDER BY m.created_at DESC
-        LIMIT ?
-        """, (user_id, user_id, limit))
-    else:
-        # 只获取公开消息
-        cursor.execute("""
-        SELECT 
-            m.id, m.user_id, m.user_name, m.content, m.is_private, m.created_at,
-            0 as is_own
-        FROM messages m
-        WHERE m.is_private = 0
-        ORDER BY m.created_at DESC
-        LIMIT ?
-        """, (limit,))
-    
-    messages = []
-    for row in cursor.fetchall():
-        messages.append({
-            "id": row[0],
-            "user_id": row[1],
-            "user_name": row[2],
-            "content": row[3],
-            "is_private": bool(row[4]),
-            "created_at": row[5],
-            "is_own": bool(row[6]),
-            "can_delete": row[1] == user_id  # 只有自己的消息可以删除
-        })
-    
-    conn.close()
-    return messages
-
-def delete_message(message_id: int, user_id: int):
-    """Delete a message (only if user owns it)"""
-    conn = get_connection()
-    cursor = conn.cursor()
-    
-    # 检查消息是否存在且属于该用户
-    cursor.execute("SELECT user_id FROM messages WHERE id = ?", (message_id,))
-    row = cursor.fetchone()
-    
-    if not row:
-        conn.close()
-        return False
-    
-    if row[0] != user_id:
-        conn.close()
-        return False
-    
-    # 删除消息
-    cursor.execute("DELETE FROM messages WHERE id = ?", (message_id,))
-    conn.commit()
-    conn.close()
-    return True
-
-def get_message_stats(user_id: int):
-    """Get message statistics for a user"""
-    conn = get_connection()
-    cursor = conn.cursor()
-    
-    # 获取用户的消息统计
-    cursor.execute("""
-    SELECT 
-        COUNT(*) as total_messages,
-        SUM(CASE WHEN is_private = 1 THEN 1 ELSE 0 END) as private_messages,
-        MIN(created_at) as first_message,
-        MAX(created_at) as last_message
-    FROM messages
-    WHERE user_id = ?
-    """, (user_id,))
-    
-    row = cursor.fetchone()
-    
-    # 获取总消息数
-    cursor.execute("SELECT COUNT(*) FROM messages")
-    total_all_messages = cursor.fetchone()[0]
-    
-    conn.close()
-    print(f"User {user_id} message stats: {row}")
-    if row:
-        total_messages, private_messages, first_message, last_message = row
-        private_messages = private_messages or 0  # Handle NULL case
-        return {
-            "total_messages": total_messages,
-            "private_messages": private_messages,
-            "public_messages": total_messages - private_messages,
-            "first_message": first_message,
-            "last_message": last_message,
-            "total_all_messages": total_all_messages
-        }
-    
-    return {
-        "total_messages": 0,
-        "private_messages": 0,
-        "public_messages": 0,
-        "first_message": None,
-        "last_message": None,
-        "total_all_messages": total_all_messages
-    }
-
 # ==================== 回忆相册函数 ====================
 
 def add_memory(user_id: int, user_name: str, photo_path: str, caption: str = ""):
@@ -1641,5 +839,182 @@ def delete_memory(memory_id: int, user_id: int):
     
     return True
 
-# ==================== 画板函数 ====================
+# ==================== 工作总结函数 ====================
+
+def add_work_item(user_id: int, content: str, work_date: str):
+    """Add a new work item (default completed)"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO work_items (user_id, content, completed, work_date) VALUES (?, ?, 1, ?)",
+        (user_id, content, work_date)
+    )
+    conn.commit()
+    item_id = cursor.lastrowid
+    conn.close()
+    return item_id
+
+def get_work_items(user_id: int, work_date: str = None):
+    """Get work items for a user, optionally filtered by date"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    if work_date:
+        cursor.execute(
+            "SELECT id, content, completed, work_date, created_at FROM work_items WHERE user_id = ? AND work_date = ? ORDER BY created_at ASC",
+            (user_id, work_date)
+        )
+    else:
+        cursor.execute(
+            "SELECT id, content, completed, work_date, created_at FROM work_items WHERE user_id = ? ORDER BY work_date DESC, created_at ASC",
+            (user_id,)
+        )
+    items = []
+    for row in cursor.fetchall():
+        items.append({
+            "id": row[0],
+            "content": row[1],
+            "completed": bool(row[2]),
+            "work_date": row[3],
+            "created_at": row[4]
+        })
+    conn.close()
+    return items
+
+def toggle_work_item(item_id: int, user_id: int):
+    """Toggle completion status of a work item"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE work_items SET completed = 1 - completed WHERE id = ? AND user_id = ?",
+        (item_id, user_id)
+    )
+    conn.commit()
+    affected = cursor.rowcount
+    conn.close()
+    return affected > 0
+
+def update_work_item(item_id: int, user_id: int, content: str):
+    """Update content of a work item"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE work_items SET content = ? WHERE id = ? AND user_id = ?",
+        (content, item_id, user_id)
+    )
+    conn.commit()
+    affected = cursor.rowcount
+    conn.close()
+    return affected > 0
+
+def delete_work_item(item_id: int, user_id: int):
+    """Delete a work item"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "DELETE FROM work_items WHERE id = ? AND user_id = ?",
+        (item_id, user_id)
+    )
+    conn.commit()
+    affected = cursor.rowcount
+    conn.close()
+    return affected > 0
+
+def get_work_stats(user_id: int):
+    """Get work stats for visualization - daily completed items count"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """SELECT work_date, 
+                  COUNT(*) as total, 
+                  SUM(completed) as completed_count
+           FROM work_items 
+           WHERE user_id = ? 
+           GROUP BY work_date 
+           ORDER BY work_date ASC""",
+        (user_id,)
+    )
+    stats = []
+    for row in cursor.fetchall():
+        stats.append({
+            "date": row[0],
+            "total": row[1],
+            "completed": row[2] or 0
+        })
+    conn.close()
+    return stats
+
+
+def record_work_visit(user_id: int, date_str: str):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR REPLACE INTO meta_config (key, value) VALUES (?, ?)",
+                   (f"work_visit_{user_id}", date_str))
+    conn.commit()
+    conn.close()
+
+
+def get_work_visit_date(user_id: int) -> str:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT value FROM meta_config WHERE key = ?", (f"work_visit_{user_id}",))
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else ""
+
+
+def acknowledge_work_day(user_id: int, date_str: str):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR REPLACE INTO meta_config (key, value) VALUES (?, ?)",
+                   (f"work_ack_{user_id}", date_str))
+    conn.commit()
+    conn.close()
+
+
+def is_work_day_acknowledged(user_id: int, date_str: str) -> bool:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT value FROM meta_config WHERE key = ?", (f"work_ack_{user_id}",))
+    row = cursor.fetchone()
+    conn.close()
+    return row is not None and row[0] == date_str
+
+
+def was_email_sent_today(user_id: int, date_str: str) -> bool:
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT value FROM meta_config WHERE key = ?", (f"email_reminder_{user_id}",))
+    row = cursor.fetchone()
+    conn.close()
+    return row is not None and row[0] == date_str
+
+
+def mark_email_sent(user_id: int, date_str: str):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR REPLACE INTO meta_config (key, value) VALUES (?, ?)",
+                   (f"email_reminder_{user_id}", date_str))
+    conn.commit()
+    conn.close()
+
+
+def check_and_send_reminders():
+    from zoneinfo import ZoneInfo
+    from datetime import datetime
+    today_str = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
+    current_hour = datetime.now(ZoneInfo("Asia/Shanghai")).hour
+    check_hour = int(os.getenv("REMINDER_CHECK_HOUR", "20"))
+    if current_hour < check_hour:
+        return []
+    results = []
+    for uid in [1, 2]:
+        if was_email_sent_today(uid, today_str):
+            continue
+        if is_work_day_acknowledged(uid, today_str):
+            continue
+        items = get_work_items(uid, today_str)
+        if items:
+            continue
+        results.append(uid)
+    return results
 
