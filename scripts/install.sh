@@ -8,6 +8,21 @@ BINDIR="$PREFIX/bin"
 cd "$(dirname "$0")/.."
 
 echo "building psess..."
+
+# If GOPROXY is empty or malformed (e.g. "," or "off" with no usable
+# entries), Go cannot download dependencies. Fall back to the official
+# default in that case. A valid existing GOPROXY is left untouched.
+normalized_proxy="$(go env GOPROXY 2>/dev/null || true)"
+normalized_proxy="${normalized_proxy//[[:space:]]/}"
+if [ -z "$normalized_proxy" ] \
+    || [ "$normalized_proxy" = "," ] \
+    || [ "$normalized_proxy" = "off" ] \
+    || [ "$normalized_proxy" = "direct" ] \
+    || [ "${normalized_proxy#*://}" = "$normalized_proxy" ]; then
+    export GOPROXY="https://proxy.golang.org,direct"
+    echo "note: GOPROXY was empty/invalid; using $GOPROXY for this build"
+fi
+
 # CGO_ENABLED=0 produces a fully static, self-contained binary.
 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o psess ./cmd/psess
 
