@@ -8,7 +8,8 @@ BINDIR="$PREFIX/bin"
 cd "$(dirname "$0")/.."
 
 echo "building psess..."
-go build -o psess ./cmd/psess
+# CGO_ENABLED=0 produces a fully static, self-contained binary.
+CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o psess ./cmd/psess
 
 mkdir -p "$BINDIR"
 install -m755 psess "$BINDIR/psess"

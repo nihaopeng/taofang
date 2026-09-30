@@ -56,6 +56,25 @@ Or use the helper script:
 ./scripts/install.sh
 ```
 
+### Single static binary
+
+`psess` compiles to **one self-contained executable** — all Go sources and
+dependencies (`creack/pty`, `x/term`) are linked in; there is no runtime data
+directory of scripts or libraries to install. To produce a fully static,
+portable binary (no libc dependency at all):
+
+```sh
+CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o psess ./cmd/psess
+```
+
+This yields a single ~2.7 MB `psess` binary that can be copied to any machine
+with the same OS/architecture and run directly. Cross-compile with `GOOS`/`GOARCH`
+as usual.
+
+> Note: the hidden `psess __daemon` process is **the same binary** re-executed.
+> When `psess new` starts a session it re-runs its own executable path, so do
+> not delete or move the binary while sessions are running.
+
 ## Usage
 
 ```sh
