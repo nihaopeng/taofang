@@ -120,11 +120,20 @@ echo "$PSESS"           # "1" inside a session; empty outside
 ```
 
 Your `TERM`, prompt and other environment are left untouched, so at a plain
-shell prompt the two look identical. To make the distinction visible, add
-something like this to the shell's own startup file (`~/.bashrc`):
+shell prompt the two look identical. To make the distinction visible,
+`scripts/install.sh` appends an idempotent snippet to `~/.bashrc` so the
+session name appears in the prompt:
+
+```
+<dev> user@host:~/project$
+```
+
+The snippet is wrapped in the markers `# >>> psess prompt >>>` and
+`# <<< psess prompt <<<`; remove the lines between them to undo. If you prefer
+to add it yourself (or use another shell), the equivalent line is:
 
 ```sh
-[ -n "$PSESS_SESSION" ] && PS1="[$PSESS_SESSION] $PS1"
+[ -n "$PSESS_SESSION" ] && PS1="<$PSESS_SESSION> $PS1"
 ```
 
 ### Detaching
