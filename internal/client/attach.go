@@ -27,6 +27,12 @@ var ErrDetached = errors.New("detached")
 //
 // It returns the child's exit code and whether the session has exited.
 func Attach(name string, tail bool) (exitCode int, exited bool, err error) {
+	// attach requires an interactive terminal: without one there is no way to
+	// forward keystrokes and the session would be occupied for nothing.
+	if !isTerminal(int(os.Stdin.Fd())) {
+		return 0, false, errors.New("stdin is not a terminal; attach requires an interactive terminal")
+	}
+
 	sockPath, err := socketPathFor(name)
 	if err != nil {
 		return 0, false, err
@@ -58,21 +64,18 @@ func Attach(name string, tail bool) (exitCode int, exited bool, err error) {
 		return 0, false, fmt.Errorf("unexpected frame from daemon: %#x", frame.Type)
 	}
 
-	// Only enter raw mode when stdin is a real terminal.
-	var ts *termState
-	if isTerminal(int(os.Stdin.Fd())) {
-		ts, err = makeRaw(int(os.Stdin.Fd()))
-		if err != nil {
-			return 0, false, fmt.Errorf("failed to set raw mode: %w", err)
-		}
+	fmt.Printf("[psess] attached to session %q — detach with Ctrl-] then d\r\n", name)
+
+	// Enter raw mode.
+	ts, err := makeRaw(int(os.Stdin.Fd()))
+	if err != nil {
+		return 0, false, fmt.Errorf("failed to set raw mode: %w", err)
 	}
 	// Guarantee terminal restoration on every exit path.
 	defer ts.restore()
 
-	if ts != nil {
-		if rows, cols, serr := terminalSize(int(os.Stdout.Fd())); serr == nil {
-			_ = protocol.WriteFrame(conn, protocol.TypeResize, protocol.EncodeResize(rows, cols))
-		}
+	if rows, cols, serr := terminalSize(int(os.Stdout.Fd())); serr == nil {
+		_ = protocol.WriteFrame(conn, protocol.TypeResize, protocol.EncodeResize(rows, cols))
 	}
 
 	// Forward SIGWINCH as RESIZE frames.
@@ -127,6 +130,11 @@ func Attach(name string, tail bool) (exitCode int, exited bool, err error) {
 		if err != nil {
 			return 0, false, err
 		}
+		// stdin reached EOF (terminal closed or input redirected away).
+		// Treat it as a detach so the daemon releases the client slot
+		// immediately instead of waiting for the socket to be reaped.
+		_ = protocol.WriteFrame(conn, protocol.TypeDetach, nil)
+		return 0, false, nil
 	}
 	return 0, false, nil
 }

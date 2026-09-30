@@ -141,7 +141,6 @@ func New(name string, argv []string, detach bool) error {
 		return nil
 	}
 
-	fmt.Printf("[psess: attached to %s]\n", name)
 	code, exited, err := Attach(name, false)
 	if err != nil {
 		return err

@@ -88,6 +88,13 @@ psess kill -f <name>              # terminate immediately (SIGKILL)
 psess logs <name>                 # dump the in-memory recent-output buffer
 ```
 
+If no command is given, `psess new <name>` starts `$SHELL` (falling back to
+`/bin/sh`).
+
+`psess attach` requires an interactive terminal on stdin; running it with
+redirected or closed stdin fails fast with an error instead of occupying the
+session.
+
 Detach from an attached session with **`Ctrl-]` then `d`**. Pressing
 `Ctrl-] Ctrl-]` sends a literal `Ctrl-]` to the remote program instead.
 
@@ -104,7 +111,7 @@ psess new -d server ./run-server
 
 ```
 $ psess new dev bash
-[psess: attached to dev]
+[psess] attached to session "dev" — detach with Ctrl-] then d
 
 user@host:~$ echo hello
 hello

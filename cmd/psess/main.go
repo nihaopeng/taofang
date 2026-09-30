@@ -74,12 +74,20 @@ func cmdNew(args []string) int {
 		return 2
 	}
 	rest := fs.Args()
-	if len(rest) < 2 {
-		fmt.Fprintln(os.Stderr, "psess: usage: psess new [-d] NAME COMMAND [ARGS...]")
+	if len(rest) < 1 {
+		fmt.Fprintln(os.Stderr, "psess: usage: psess new [-d] NAME [COMMAND [ARGS...]]")
 		return 2
 	}
 	name := rest[0]
 	argv := rest[1:]
+	if len(argv) == 0 {
+		// No command given: default to the user's login shell.
+		shell := os.Getenv("SHELL")
+		if shell == "" {
+			shell = "/bin/sh"
+		}
+		argv = []string{shell}
+	}
 	if err := client.New(name, argv, *detach); err != nil {
 		fmt.Fprintf(os.Stderr, "psess: %v\n", err)
 		return 1
@@ -99,7 +107,6 @@ func cmdAttach(args []string) int {
 		return 2
 	}
 	name := rest[0]
-	fmt.Printf("[psess: attached to %s]\n", name)
 	code, exited, err := client.Attach(name, *tail)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "psess: %v\n", err)
