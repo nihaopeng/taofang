@@ -45,7 +45,7 @@ recent raw output.
 
 ## Install
 
-Requires Go 1.24+.
+Requires Go 1.21+.
 
 ```sh
 git clone https://github.com/nihaopeng/taofang.git
