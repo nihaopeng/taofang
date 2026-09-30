@@ -43,19 +43,34 @@ main goroutine ── accept loop ──► per-connection handlers
      └── client writer goroutine (drains per-client output queue)
 ```
 
-- **PTY reader** is the *only* reader of the PTY master. It appends every chunk
-  to the ring buffer and, if a client is attached, enqueues it for delivery.
-  This goroutine runs for the entire lifetime of the session, so a child that
-  writes lots of output never blocks on a full PTY kernel buffer.
+- **PTY reader** is the *only* reader of the PTY master. Under a single lock
+  it appends every chunk to the ring buffer and enqueues it to every attached
+  client. This goroutine runs for the entire lifetime of the session, so a
+  child that writes lots of output never blocks on a full PTY kernel buffer.
 - **Child waiter** calls `cmd.Wait()`, records the exit code, briefly drains
-  remaining output, notifies the client with an EXIT frame and closes the
+  remaining output, notifies all clients with an EXIT frame and closes the
   session.
-- **Client writer** owns the socket write side. It pulls from an unbounded-to-a-
-  limit byte queue. If the queue would exceed 8 MiB the client is disconnected,
+- **Client writers** each own their socket write side. A client pulls from its
+  own byte queue. If the queue would exceed 8 MiB the client is disconnected,
   which protects the PTY reader from a slow client.
 
-Only one interactive client is allowed per session. A second attach is rejected
-with `session is already attached`.
+Any number of clients may be attached simultaneously. Output is broadcast to
+all of them and input from all of them is written to the same PTY.
+
+### Attach ordering (no duplicates, no gaps)
+
+A new client must receive recent history *and* the live stream without seeing
+any byte twice or missing one. This is achieved by performing the ring-buffer
+append + client broadcast and the replay-snapshot + client-registration under
+the **same lock**:
+
+1. The PTY reader takes `s.mu`, appends the chunk to the ring and enqueues it
+   to all registered clients.
+2. A new client takes `s.mu`, snapshots up to 4 MiB from the ring into its own
+   queue, and registers itself.
+
+Because both use `s.mu`, a chunk lands either wholly in the replay snapshot or
+wholly in the live queue -- never both, never neither.
 
 ## 4. Lifetime and signals
 
@@ -89,7 +104,7 @@ with `session is already attached`.
 | `0x52` KILL | client → daemon | `[force]` |
 | `0x60` ERROR | daemon → client | human-readable error |
 
-Modes: attach, attach-with-tail, status, log, kill.
+Modes: attach, attach-with-replay, status, log, kill.
 
 ## 6. Terminal safety
 
@@ -122,7 +137,8 @@ otherwise forwards bytes untouched.
 
 A `sync.Mutex`-guarded fixed-size circular byte buffer (4 MiB). It is
 byte-oriented; it never aligns writes to UTF-8, line or ANSI boundaries.
-`--tail` replays at most the last 1 MiB on attach. Replay is explicitly
+`attach-with-replay` replays at most the last 4 MiB on attach (the whole ring
+buffer). Replay is explicitly
 best-effort and is not a screen restoration.
 
 ## 9. Runtime layout

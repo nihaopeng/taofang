@@ -141,7 +141,7 @@ func New(name string, argv []string, detach bool) error {
 		return nil
 	}
 
-	code, exited, err := Attach(name, false)
+	code, exited, err := Attach(name, true)
 	if err != nil {
 		return err
 	}

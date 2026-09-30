@@ -181,38 +181,33 @@ func handleKill(conn net.Conn, sess *session) {
 	sess.terminate(force)
 }
 
-// handleAttach runs the interactive loop for a single client.
-func handleAttach(conn net.Conn, sess *session, tail bool) {
+// handleAttach runs the interactive loop for one client. Multiple clients may
+// be attached at once; each receives the broadcast PTY output and all of their
+// input is written to the PTY.
+func handleAttach(conn net.Conn, sess *session, replay bool) {
 	c := newClientConn(conn)
 
-	if !sess.attachClient(c) {
-		_ = protocol.WriteFrame(conn, protocol.TypeError, protocol.EncodeError("session is already attached"))
-		_ = conn.Close()
-		return
-	}
-	defer sess.detachClient(c)
-
-	// If the child already exited, report and return immediately.
+	// If the child already exited, report and return immediately without
+	// attaching.
 	if st := sess.status(); st.Exited {
 		_ = protocol.WriteFrame(conn, protocol.TypeHelloOK, nil)
 		_ = protocol.WriteFrame(conn, protocol.TypeExit, protocol.EncodeExit(st.ExitCode))
+		_ = conn.Close()
 		return
 	}
+
+	// Register the client and seed its queue with recent output (if enabled)
+	// atomically with respect to the PTY reader, so nothing is duplicated or
+	// lost.
+	sess.attachWithReplay(c, replay, replayLimit)
+	defer sess.detachClient(c)
 
 	if err := protocol.WriteFrame(conn, protocol.TypeHelloOK, []byte{protocol.Version}); err != nil {
 		return
 	}
 
-	// Optional best-effort raw history replay.
-	if tail {
-		if data := sess.ring.Tail(tailReplayLimit); len(data) > 0 {
-			if err := protocol.WriteFrame(conn, protocol.TypeStdout, data); err != nil {
-				return
-			}
-		}
-	}
-
-	// Start the writer goroutine that drains queued output.
+	// Start the writer goroutine. It drains whatever is queued (replay first,
+	// then live output).
 	go c.writer()
 
 	// Read client input until detach/EOF.

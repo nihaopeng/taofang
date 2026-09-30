@@ -55,12 +55,16 @@ func usage() {
 	fmt.Fprint(os.Stderr, `psess - persistent PTY session manager
 
 Usage:
-  psess new [-d] NAME COMMAND [ARGS...]   create a session
-  psess attach [--tail] NAME              attach to a session
-  psess list | ls                         list sessions
-  psess kill [-f] NAME                    terminate a session
-  psess logs NAME                         dump recent output
-  psess version                           print version
+  psess new [-d] NAME [COMMAND [ARGS...]]   create a session
+  psess attach [--no-replay] NAME           attach to a session
+  psess list | ls                           list sessions
+  psess kill [-f] NAME                      terminate a session
+  psess logs NAME                           dump recent output
+  psess version                             print version
+
+Multiple clients may attach to the same session at once; output is mirrored
+to all of them. A new attach replays up to 4 MiB of recent raw output first
+unless --no-replay is given (full-screen programs may need a Ctrl-L redraw).
 
 Detach from an attached session with Ctrl-] then d.
 `)
@@ -97,17 +101,17 @@ func cmdNew(args []string) int {
 
 func cmdAttach(args []string) int {
 	fs := flag.NewFlagSet("attach", flag.ContinueOnError)
-	tail := fs.Bool("tail", false, "replay recent raw output before attaching")
+	noReplay := fs.Bool("no-replay", false, "do not replay recent output before attaching")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	rest := fs.Args()
 	if len(rest) != 1 {
-		fmt.Fprintln(os.Stderr, "psess: usage: psess attach [--tail] NAME")
+		fmt.Fprintln(os.Stderr, "psess: usage: psess attach [--no-replay] NAME")
 		return 2
 	}
 	name := rest[0]
-	code, exited, err := client.Attach(name, *tail)
+	code, exited, err := client.Attach(name, !*noReplay)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "psess: %v\n", err)
 		return 1

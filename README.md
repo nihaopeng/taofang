@@ -30,7 +30,12 @@ interprets or rewrites the byte stream.
   screen are not saved.
 - **No reboot survival.** "Persistent" means "beyond the terminal/SSH
   lifecycle", not across a machine reboot.
-- **No multiple simultaneous writers.** One interactive client per session.
+- **Multiple simultaneous clients are allowed**, but they share one PTY:
+  output is mirrored to all of them and all of their input is merged into the
+  same session. There is no per-window screen. A new attach replays up to
+  4 MiB of recent raw output (disable with `--no-replay`), which works well for
+  line-oriented programs (shells, REPLs, log streams) and may look garbled for
+  full-screen TUIs, which need a `Ctrl-L` redraw.
 
 What *does* survive a detach: the process, its PTY, the shell's `cwd`,
 environment, in-memory shell history and child processes, plus up to 4 MiB of
@@ -80,8 +85,8 @@ as usual.
 ```sh
 psess new <name> [command...]     # create a session (attaches by default)
 psess new -d <name> <command>     # create without attaching
-psess attach <name>               # attach to a session
-psess attach --tail <name>        # attach after replaying recent raw output
+psess attach <name>               # attach to a session (replays recent output)
+psess attach --no-replay <name>   # attach without replaying recent output
 psess list                        # list sessions (alias: ls)
 psess kill <name>                 # terminate a session
 psess kill -f <name>              # terminate immediately (SIGKILL)
@@ -90,6 +95,15 @@ psess logs <name>                 # dump the in-memory recent-output buffer
 
 If no command is given, `psess new <name>` starts `$SHELL` (falling back to
 `/bin/sh`).
+
+Any number of clients may attach to the same session at the same time. Output
+is mirrored to all attached clients and input from all of them is written to
+the same PTY, so multiple windows act as views onto one session.
+
+A new attach replays up to 4 MiB of recent raw output before the live stream,
+so you land back in context. Because this is a raw byte replay and not a screen
+restore, full-screen programs (vim, htop, less) may need a `Ctrl-L` to redraw.
+Use `--no-replay` for a clean empty screen.
 
 `psess attach` requires an interactive terminal on stdin; running it with
 redirected or closed stdin fails fast with an error instead of occupying the
@@ -195,9 +209,12 @@ the remote program never sees the detach key press.
 
 `psess` deliberately does **not** implement, and will not accept:
 panes, windows, layouts, splits, terminal rendering, copy mode, scrollback UI,
-mouse support, keymap configuration, screen restore, ANSI parsing, multiple
-simultaneous writers, network/TCP attach, authentication, encryption,
-cross-host attach, daemon crash recovery, session migration or a web UI.
+mouse support, keymap configuration, **screen restore**, ANSI parsing,
+network/TCP attach, authentication, encryption, cross-host attach, daemon crash
+recovery, session migration or a web UI.
+
+(Sharing a PTY between multiple attached clients is supported, but that is
+mirroring a byte stream -- not a virtual terminal and not screen restore.)
 
 If a future change cannot be described by this sentence, it is scope creep:
 
@@ -216,7 +233,8 @@ go test ./...          # unit + end-to-end integration tests
 ```
 
 The integration tests exercise: create/detach/re-attach state persistence,
-listing, ring-buffer logs and `--tail` replay, process-group kill, survival of
+listing, ring-buffer logs and default replay, multiple clients receiving the
+same broadcast output, process-group kill, survival of
 a `kill -9`'d client, exit-code propagation, duplicate-session rejection,
 UTF-8 pass-through, resize, PTY draining with no client, and daemon survival
 after the launcher dies.

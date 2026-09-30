@@ -26,7 +26,11 @@ var ErrDetached = errors.New("detached")
 // detaches, the session exits, or the connection fails.
 //
 // It returns the child's exit code and whether the session has exited.
-func Attach(name string, tail bool) (exitCode int, exited bool, err error) {
+//
+// When replay is true the daemon first sends up to 4 MiB of recent raw output
+// before the live stream. This is the default; pass replay=false to attach to
+// an empty screen.
+func Attach(name string, replay bool) (exitCode int, exited bool, err error) {
 	// attach requires an interactive terminal: without one there is no way to
 	// forward keystrokes and the session would be occupied for nothing.
 	if !isTerminal(int(os.Stdin.Fd())) {
@@ -44,7 +48,7 @@ func Attach(name string, tail bool) (exitCode int, exited bool, err error) {
 	defer conn.Close()
 
 	mode := protocol.ModeAttach
-	if tail {
+	if replay {
 		mode = protocol.ModeAttachWithTail
 	}
 	if err := protocol.WriteFrame(conn, protocol.TypeHello, protocol.EncodeHello(mode)); err != nil {

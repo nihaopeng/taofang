@@ -20,8 +20,10 @@ const ringSize = 4 << 20 // 4 MiB
 // client before it is disconnected. This keeps the PTY reader unblocked.
 const maxClientQueue = 8 << 20 // 8 MiB
 
-// tailReplayLimit caps how much history --tail replays at once.
-const tailReplayLimit = 1 << 20 // 1 MiB
+// replayLimit caps how much recent output is replayed to a newly attached
+// client. It matches the ring buffer size (4 MiB), so a fresh attach sees
+// everything still buffered.
+const replayLimit = ringSize // 4 MiB
 
 // exitGrace is how long the daemon waits after the child exits before the
 // session is considered finished, allowing final output to drain.
@@ -42,7 +44,8 @@ type Status struct {
 	BufferSize int
 }
 
-// session owns a single PTY + child process and serves an optional client.
+// session owns a single PTY + child process and serves any number of
+// simultaneously attached clients.
 type session struct {
 	name    string
 	argv    []string
@@ -52,7 +55,7 @@ type session struct {
 	started time.Time
 
 	mu       sync.Mutex
-	client   *clientConn
+	clients  map[*clientConn]struct{}
 	exited   bool
 	exitCode int32
 	rows     uint16
@@ -82,6 +85,7 @@ func newSession(name string, argv []string, rows, cols uint16) (*session, error)
 		ptmx:    ptmx,
 		ring:    ring.New(ringSize),
 		started: time.Now(),
+		clients: make(map[*clientConn]struct{}),
 		rows:    rows,
 		cols:    cols,
 		done:    make(chan struct{}),
@@ -103,15 +107,20 @@ func (s *session) pgid() int {
 }
 
 // readLoop continuously drains the PTY master, appends to the ring buffer and
-// forwards to the attached client if any. It must be the only reader of ptmx.
+// broadcasts to all attached clients. It must be the only reader of ptmx.
+//
+// The ring append and the client broadcast happen under the same lock so that
+// a client attaching concurrently either sees a chunk in its replay snapshot
+// or receives it live -- never both, never neither.
 func (s *session) readLoop() {
 	buf := make([]byte, 32*1024)
 	for {
 		n, err := s.ptmx.Read(buf)
 		if n > 0 {
-			chunk := buf[:n]
-			_, _ = s.ring.Write(chunk)
-			s.forward(chunk)
+			// Copy the chunk: buf is reused on the next read.
+			chunk := make([]byte, n)
+			copy(chunk, buf[:n])
+			s.broadcast(chunk)
 		}
 		if err != nil {
 			return
@@ -119,16 +128,21 @@ func (s *session) readLoop() {
 	}
 }
 
-// forward queues output for the current client without blocking.
-func (s *session) forward(p []byte) {
+// broadcast appends p to the ring buffer and enqueues it to every attached
+// client without blocking. Slow clients are disconnected so the PTY reader
+// never stalls.
+func (s *session) broadcast(p []byte) {
 	s.mu.Lock()
-	c := s.client
-	s.mu.Unlock()
-	if c == nil {
-		return
+	_, _ = s.ring.Write(p)
+	slow := make([]*clientConn, 0)
+	for c := range s.clients {
+		if !c.enqueue(p) {
+			slow = append(slow, c)
+		}
 	}
-	if !c.enqueue(p) {
-		// Slow client: disconnect it rather than blocking the PTY reader.
+	s.mu.Unlock()
+
+	for _, c := range slow {
 		s.detachClient(c)
 	}
 }
@@ -154,15 +168,18 @@ func (s *session) waitLoop() {
 	s.mu.Lock()
 	s.exited = true
 	s.exitCode = code
-	c := s.client
-	s.client = nil
+	clients := make([]*clientConn, 0, len(s.clients))
+	for c := range s.clients {
+		clients = append(clients, c)
+	}
+	s.clients = make(map[*clientConn]struct{})
 	s.mu.Unlock()
 
-	if c != nil {
-		// Flush any pending output, then emit EXIT and close. Wait briefly
-		// for the writer to drain so the client sees final output and the
-		// exit code rather than a truncated stream.
+	// Flush any pending output to each client, then emit EXIT and close.
+	for _, c := range clients {
 		c.queueExit(code)
+	}
+	for _, c := range clients {
 		c.waitDrained(exitGrace)
 	}
 
@@ -178,7 +195,7 @@ func (s *session) status() Status {
 		PID:        s.pid(),
 		Command:    joinArgv(s.argv),
 		StartTime:  s.started,
-		Attached:   s.client != nil,
+		Attached:   s.attachedLocked(),
 		Exited:     s.exited,
 		ExitCode:   s.exitCode,
 		Rows:       s.rows,
@@ -187,24 +204,42 @@ func (s *session) status() Status {
 	}
 }
 
-// attachClient registers c as the active client. It returns false if another
-// client is already attached.
-func (s *session) attachClient(c *clientConn) bool {
+// attachedLocked reports whether at least one client is attached. Callers must
+// hold s.mu.
+func (s *session) attachedLocked() bool { return len(s.clients) > 0 }
+
+// attachClient registers c as an attached client. Any number of clients may be
+// attached simultaneously; output is broadcast to all of them.
+func (s *session) attachClient(c *clientConn) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.client != nil {
-		return false
-	}
-	s.client = c
-	return true
+	s.clients[c] = struct{}{}
+	s.mu.Unlock()
 }
 
-// detachClient removes c if it is still the active client.
+// attachWithReplay registers c and, when replay is true, seeds its output
+// queue with up to maxReplay most recent bytes from the ring buffer.
+//
+// The snapshot and the registration happen under s.mu, and broadcast() appends
+// to the ring and enqueues to clients under the same lock, so a chunk is
+// delivered exactly once: either in the replay snapshot or live, never both.
+func (s *session) attachWithReplay(c *clientConn, replay bool, maxReplay int) {
+	s.mu.Lock()
+	if replay {
+		if data := s.ring.Tail(maxReplay); len(data) > 0 {
+			// Seed directly; the writer goroutine has not started yet.
+			c.mu.Lock()
+			c.out = append(c.out, data...)
+			c.mu.Unlock()
+		}
+	}
+	s.clients[c] = struct{}{}
+	s.mu.Unlock()
+}
+
+// detachClient removes c and closes its connection.
 func (s *session) detachClient(c *clientConn) {
 	s.mu.Lock()
-	if s.client == c {
-		s.client = nil
-	}
+	delete(s.clients, c)
 	s.mu.Unlock()
 	c.close()
 }
@@ -253,11 +288,14 @@ func (s *session) closeFinal() {
 		return
 	}
 	s.closed = true
-	c := s.client
-	s.client = nil
+	clients := make([]*clientConn, 0, len(s.clients))
+	for c := range s.clients {
+		clients = append(clients, c)
+	}
+	s.clients = make(map[*clientConn]struct{})
 	s.mu.Unlock()
 
-	if c != nil {
+	for _, c := range clients {
 		c.close()
 	}
 	_ = s.ptmx.Close()

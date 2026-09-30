@@ -31,7 +31,7 @@ if [ ! -x "$BIN" ]; then
     (cd "$ROOT" && go build -o psess ./cmd/psess)
 fi
 
-# attach_with INPUT NAME [--tail] ; runs attach under a pty, fed INPUT.
+# attach_with INPUT NAME [extra attach args...] ; runs attach under a pty.
 #
 # The input is followed by the Ctrl-] d detach sequence so the session is NOT
 # terminated. (GNU `script` itself writes "exit" to the pty when its stdin
@@ -64,7 +64,7 @@ if grep -q "\[1, 2, 3\]" <<<"$out"; then ok "python state survived"; else bad "p
 "$BIN" kill -f py >/dev/null 2>&1
 
 say "Test 5: terminal restored after detach"
-if [ -c /dev/tty ] && stty -a < /dev/tty >/dev/null 2>&1; then
+if stty -a < /dev/tty >/dev/null 2>&1; then
     before="$(stty -a < /dev/tty 2>/dev/null | tr ',' '\n' | grep -E 'icanon|echo' || true)"
     "$BIN" new -d dev3 bash --norc --noprofile >/dev/null 2>&1
     attach_with 'echo bye\n' dev3 >/dev/null
@@ -113,6 +113,33 @@ attach_with 'echo LOGMARK_123\n' dev7 >/dev/null
 sleep 0.3
 if "$BIN" logs dev7 | grep -q "LOGMARK_123"; then ok "logs contain output"; else bad "logs missing output"; fi
 "$BIN" kill -f dev7 >/dev/null 2>&1
+
+say "Test 12: multiple clients see the same output (broadcast)"
+"$BIN" new -d shared bash --norc --noprofile >/dev/null 2>&1
+# Client 1 stays attached while client 2 attaches and runs a command.
+( sleep 4; printf '\x1dd'; sleep 0.3 ) \
+    | timeout 8 script -qec "$BIN attach --no-replay shared" /dev/null >/tmp/psess-c1.out 2>&1 &
+c1=$!
+sleep 1
+attach_with 'echo BROADCAST_MARK\n' shared >/dev/null
+wait "$c1" 2>/dev/null || true
+if grep -q "BROADCAST_MARK" /tmp/psess-c1.out; then
+    ok "client 1 received client 2's output"
+else
+    bad "client 1 did not receive broadcast: $(cat -v /tmp/psess-c1.out)"
+fi
+rm -f /tmp/psess-c1.out
+"$BIN" kill -f shared >/dev/null 2>&1
+
+say "Test 13: new attach replays recent output"
+"$BIN" new -d replay bash --norc --noprofile >/dev/null 2>&1
+attach_with 'echo REPLAY_ME\n' replay >/dev/null
+sleep 0.3
+out="$( ( sleep 1; printf '\x1dd'; sleep 0.3 ) | timeout 8 script -qec "$BIN attach replay" /dev/null 2>&1 )"
+if grep -q "REPLAY_ME" <<<"$out"; then ok "default attach replayed history"; else bad "no replay: $out"; fi
+out="$( ( sleep 1; printf '\x1dd'; sleep 0.3 ) | timeout 8 script -qec "$BIN attach --no-replay replay" /dev/null 2>&1 )"
+if grep -q "REPLAY_ME" <<<"$out"; then bad "--no-replay still replayed"; else ok "--no-replay starts clean"; fi
+"$BIN" kill -f replay >/dev/null 2>&1
 
 printf '\n\033[1m%d passed, %d failed\033[0m\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

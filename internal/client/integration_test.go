@@ -76,12 +76,13 @@ func (b *safeBuffer) String() string {
 	return b.buf.String()
 }
 
-// startAttach runs `psess attach NAME` (optionally --tail) under a PTY.
-func startAttach(t *testing.T, bin, name string, env []string, tail bool) *ptySession {
+// startAttach runs `psess attach NAME` under a PTY. When replay is false the
+// --no-replay flag is passed.
+func startAttach(t *testing.T, bin, name string, env []string, replay bool) *ptySession {
 	t.Helper()
 	args := []string{"attach"}
-	if tail {
-		args = append(args, "--tail")
+	if !replay {
+		args = append(args, "--no-replay")
 	}
 	args = append(args, name)
 	cmd := exec.Command(bin, args...)
@@ -237,11 +238,11 @@ func TestLogsAndTail(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	// --tail should replay it on attach.
+	// A re-attach must replay the recent output before the live stream.
 	ps2 := startAttach(t, bin, name, env, true)
 	defer ps2.detach()
 	if !ps2.waitFor("LOG_LINE_XYZ", 5*time.Second) {
-		t.Fatalf("tail replay missing: %q", ps2.buf.String())
+		t.Fatalf("replay missing: %q", ps2.buf.String())
 	}
 }
 
@@ -438,5 +439,86 @@ func TestDaemonSurvivesLauncherDeath(t *testing.T) {
 	ps.write("echo STILL_ALIVE\n")
 	if !ps.waitFor("STILL_ALIVE", 5*time.Second) {
 		t.Fatalf("session unresponsive: %q", ps.buf.String())
+	}
+}
+
+// TestMultipleClientsBroadcast verifies that two clients can be attached at the
+// same time and both receive the same output, and that input from either client
+// reaches the session.
+func TestMultipleClientsBroadcast(t *testing.T) {
+	bin := psessBin(t)
+	env := testEnv(t)
+	name := "t12"
+	defer cleanKill(t, env, bin, name)
+
+	runCmd(t, env, bin, "new", "-d", name, "bash", "--norc", "--noprofile")
+
+	c1 := startAttach(t, bin, name, env, false)
+	defer c1.detach()
+	time.Sleep(400 * time.Millisecond)
+
+	// Second client attaches while the first is still attached.
+	c2 := startAttach(t, bin, name, env, false)
+	defer c2.detach()
+	time.Sleep(400 * time.Millisecond)
+
+	// Both clients must still be alive (not rejected).
+	if c1.cmd.ProcessState != nil {
+		t.Fatalf("first client exited unexpectedly")
+	}
+
+	// Output from the shared session is broadcast to both.
+	c1.write("echo BROADCAST_XYZ\n")
+	if !c1.waitFor("BROADCAST_XYZ", 5*time.Second) {
+		t.Fatalf("client 1 did not see output: %q", c1.buf.String())
+	}
+	if !c2.waitFor("BROADCAST_XYZ", 5*time.Second) {
+		t.Fatalf("client 2 did not receive broadcast: %q", c2.buf.String())
+	}
+
+	// Input from the second client also reaches the session, and is visible
+	// to the first.
+	c2.write("echo FROM_CLIENT2\n")
+	if !c1.waitFor("FROM_CLIENT2", 5*time.Second) {
+		t.Fatalf("client 1 did not see client 2 input: %q", c1.buf.String())
+	}
+	if !c2.waitFor("FROM_CLIENT2", 5*time.Second) {
+		t.Fatalf("client 2 did not see its own output: %q", c2.buf.String())
+	}
+}
+
+// TestAttachReplayByDefault verifies that a freshly attached client receives
+// recent output produced while it was not attached.
+func TestAttachReplayByDefault(t *testing.T) {
+	bin := psessBin(t)
+	env := testEnv(t)
+	name := "t13"
+	defer cleanKill(t, env, bin, name)
+
+	runCmd(t, env, bin, "new", "-d", name, "bash", "--norc", "--noprofile")
+
+	// Produce output while no client is attached.
+	c1 := startAttach(t, bin, name, env, false)
+	time.Sleep(300 * time.Millisecond)
+	c1.write("echo REPLAY_MARKER_42\n")
+	if !c1.waitFor("REPLAY_MARKER_42", 5*time.Second) {
+		t.Fatalf("setup output missing: %q", c1.buf.String())
+	}
+	c1.detach()
+	time.Sleep(300 * time.Millisecond)
+
+	// A default attach must replay the marker.
+	c2 := startAttach(t, bin, name, env, true)
+	defer c2.detach()
+	if !c2.waitFor("REPLAY_MARKER_42", 5*time.Second) {
+		t.Fatalf("default attach did not replay history: %q", c2.buf.String())
+	}
+
+	// A --no-replay attach must NOT replay it (starts from an empty screen).
+	c3 := startAttach(t, bin, name, env, false)
+	defer c3.detach()
+	time.Sleep(400 * time.Millisecond)
+	if strings.Contains(c3.buf.String(), "REPLAY_MARKER_42") {
+		t.Fatalf("--no-replay should not replay history: %q", c3.buf.String())
 	}
 }
