@@ -109,6 +109,30 @@ Use `--no-replay` for a clean empty screen.
 redirected or closed stdin fails fast with an error instead of occupying the
 session.
 
+### Telling whether you are inside a session
+
+For processes started by a session, `psess` sets two environment variables
+(mirroring how tmux sets `$TMUX`):
+
+```sh
+echo "$PSESS_SESSION"   # session name, e.g. "dev"; empty outside a session
+echo "$PSESS"           # "1" inside a session; empty outside
+```
+
+Your `TERM`, prompt and other environment are left untouched, so at a plain
+shell prompt the two look identical. To make the distinction visible, add
+something like this to the shell's own startup file (`~/.bashrc`):
+
+```sh
+[ -n "$PSESS_SESSION" ] && PS1="[$PSESS_SESSION] $PS1"
+```
+
+### Detaching
+
+Press **`Ctrl-]` then `d`**. To send a literal `Ctrl-]` to the program inside
+the session, press **`Ctrl-]` then `Ctrl-]`**. Closing the terminal or losing
+SSH is equivalent to detaching: the session survives.
+
 Detach from an attached session with **`Ctrl-]` then `d`**. Pressing
 `Ctrl-] Ctrl-]` sends a literal `Ctrl-]` to the remote program instead.
 

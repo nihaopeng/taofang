@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -71,7 +72,7 @@ func newSession(name string, argv []string, rows, cols uint16) (*session, error)
 		return nil, errors.New("no command given")
 	}
 	cmd := exec.Command(argv[0], argv[1:]...)
-	cmd.Env = os.Environ()
+	cmd.Env = sessionEnv(name)
 
 	ptmx, err := startPTY(cmd, rows, cols)
 	if err != nil {
@@ -425,4 +426,21 @@ func joinArgv(argv []string) string {
 		out += a
 	}
 	return out
+}
+
+// sessionEnv builds the environment for the session's child process. It starts
+// from the daemon's environment and adds PSESS_SESSION and PSESS so processes
+// inside the session can tell that they are running under psess (mirroring how
+// tmux sets $TMUX). Any inherited value of these variables is replaced.
+func sessionEnv(name string) []string {
+	base := os.Environ()
+	env := make([]string, 0, len(base)+2)
+	for _, kv := range base {
+		if strings.HasPrefix(kv, "PSESS_SESSION=") || strings.HasPrefix(kv, "PSESS=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	env = append(env, "PSESS_SESSION="+name, "PSESS=1")
+	return env
 }

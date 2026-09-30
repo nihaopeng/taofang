@@ -522,3 +522,26 @@ func TestAttachReplayByDefault(t *testing.T) {
 		t.Fatalf("--no-replay should not replay history: %q", c3.buf.String())
 	}
 }
+
+// TestSessionEnv verifies that processes inside a session see PSESS_SESSION and
+// PSESS, while the launching process does not.
+func TestSessionEnv(t *testing.T) {
+	bin := psessBin(t)
+	env := testEnv(t)
+	name := "t14"
+	defer cleanKill(t, env, bin, name)
+
+	// The outer environment must not carry the marker.
+	if os.Getenv("PSESS_SESSION") != "" {
+		t.Fatalf("outer environment unexpectedly has PSESS_SESSION")
+	}
+
+	runCmd(t, env, bin, "new", "-d", name, "bash", "--norc", "--noprofile")
+	ps := startAttach(t, bin, name, env, false)
+	defer ps.detach()
+	time.Sleep(300 * time.Millisecond)
+	ps.write("echo \"ENV:[$PSESS_SESSION][$PSESS]\"\n")
+	if !ps.waitFor("ENV:["+name+"][1]", 5*time.Second) {
+		t.Fatalf("session env not injected: %q", ps.buf.String())
+	}
+}

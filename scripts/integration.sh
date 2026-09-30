@@ -141,5 +141,14 @@ out="$( ( sleep 1; printf '\x1dd'; sleep 0.3 ) | timeout 8 script -qec "$BIN att
 if grep -q "REPLAY_ME" <<<"$out"; then bad "--no-replay still replayed"; else ok "--no-replay starts clean"; fi
 "$BIN" kill -f replay >/dev/null 2>&1
 
+say "Test 14: PSESS_SESSION is set inside a session"
+if [ -n "${PSESS_SESSION:-}" ]; then
+    bad "outer environment already has PSESS_SESSION"
+fi
+"$BIN" new -d envdemo bash --norc --noprofile >/dev/null 2>&1
+out="$(attach_with 'printf "ENV:%s:%s\n" "$PSESS_SESSION" "$PSESS"\n' envdemo)"
+if grep -q "ENV:envdemo:1" <<<"$out"; then ok "PSESS_SESSION and PSESS injected"; else bad "env not injected: $out"; fi
+"$BIN" kill -f envdemo >/dev/null 2>&1
+
 printf '\n\033[1m%d passed, %d failed\033[0m\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

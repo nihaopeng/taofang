@@ -83,6 +83,20 @@ wholly in the live queue -- never both, never neither.
 - The daemon treats `SIGTERM`/`SIGINT`/`SIGHUP` as "end the session" and kills
   the child group before exiting, preventing orphans.
 
+### Child environment
+
+The child inherits the daemon's environment (which is the environment of
+`psess new`) with two additions, so processes can detect that they run under
+psess:
+
+- `PSESS_SESSION=<name>`
+- `PSESS=1`
+
+Any inherited value of these two variables is replaced. Everything else --
+notably `TERM` -- is left exactly as the user's terminal set it; psess never
+masquerades as `tmux-256color` or `screen`, because there is no virtual
+terminal.
+
 ## 5. Wire protocol
 
 ```
