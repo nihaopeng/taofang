@@ -106,9 +106,9 @@ func Attach(name string, replay bool) (exitCode int, exited bool, err error) {
 	}()
 
 	// Daemon -> stdout.
-	outErr := make(chan error, 1)
+	outCh := make(chan outResult, 1)
 	go func() {
-		outErr <- pumpOutput(conn)
+		outCh <- pumpOutput(conn)
 	}()
 
 	// stdin -> daemon, with detach sequence detection.
@@ -118,13 +118,16 @@ func Attach(name string, replay bool) (exitCode int, exited bool, err error) {
 	}()
 
 	select {
-	case err := <-outErr:
-		if errors.Is(err, io.EOF) {
+	case res := <-outCh:
+		if res.exited {
+			return int(res.code), true, nil
+		}
+		if errors.Is(res.err, io.EOF) {
 			// Daemon closed: session probably exited. Read is done.
 			return 0, true, nil
 		}
-		if err != nil {
-			return 0, false, err
+		if res.err != nil {
+			return 0, false, res.err
 		}
 	case err := <-inErr:
 		if errors.Is(err, ErrDetached) {
@@ -143,25 +146,33 @@ func Attach(name string, replay bool) (exitCode int, exited bool, err error) {
 	return 0, false, nil
 }
 
-// pumpOutput reads STDOUT/EXIT/ERROR frames and writes them to stdout.
-func pumpOutput(conn net.Conn) error {
+// outResult is what pumpOutput reports once the output stream ends.
+type outResult struct {
+	code   int32
+	exited bool
+	err    error
+}
+
+// pumpOutput reads STDOUT/EXIT/ERROR frames and writes them to stdout. It
+// reports the session's exit code to the caller, which is the only place that
+// prints the final status line (printing here too produced a duplicate, and
+// wrong, "exited with code 0" message).
+func pumpOutput(conn net.Conn) outResult {
 	for {
 		frame, err := protocol.ReadFrame(conn)
 		if err != nil {
-			return err
+			return outResult{err: err}
 		}
 		switch frame.Type {
 		case protocol.TypeStdout:
 			if _, werr := os.Stdout.Write(frame.Payload); werr != nil {
-				return werr
+				return outResult{err: werr}
 			}
 		case protocol.TypeExit:
 			code, _ := protocol.DecodeExit(frame.Payload)
-			fmt.Fprintf(os.Stderr, "\r\n[psess: session exited with code %d]\r\n", code)
-			return io.EOF
+			return outResult{code: code, exited: true}
 		case protocol.TypeError:
-			fmt.Fprintf(os.Stderr, "\r\n[psess: %s]\r\n", string(frame.Payload))
-			return io.EOF
+			return outResult{err: fmt.Errorf("%s", frame.Payload)}
 		}
 	}
 }

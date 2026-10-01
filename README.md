@@ -229,9 +229,22 @@ This is the most reliability-critical part of the project. The attach client:
 - saves the terminal state and switches to raw mode only when stdin is a TTY;
 - restores the terminal on **every** exit path via `defer`: normal detach,
   daemon disconnect, EOF, socket error, `SIGINT`/`SIGTERM`/`SIGHUP`, and
-  command exit.
+  command exit;
+- clears the terminal-wide *input* modes a full-screen program may have left
+  enabled (mouse tracking, focus reporting, bracketed paste and the kitty
+  keyboard protocol) before it exits.
 
-It must never leave the terminal in `-echo` / `-icanon` state.
+It must never leave the terminal in `-echo` / `-icanon` state, and it must not
+leave mouse/kitty reporting enabled either.
+
+The second point is why `term.Restore` alone is not enough. Those DECSET/kitty
+escapes are consumed by the **real** terminal emulator, not by the PTY, so
+`psess` (a transparent PTY owner) forwards them untouched and termios
+restoration cannot undo them. If an app inside the session (codex, vim, htop,
+...) is killed or crashes before disabling them, the terminal keeps feeding the
+next shell mouse reports and key-release events that look like garbage input.
+The client therefore writes a small, unconditional "turn everything off"
+escape sequence to the terminal while restoring.
 
 Detach sequences are handled entirely by the client, never by the daemon, so
 the remote program never sees the detach key press.

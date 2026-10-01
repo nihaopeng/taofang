@@ -127,11 +127,23 @@ The attach client:
 1. Saves the termios state with `term.GetState`.
 2. Enters raw mode with `term.MakeRaw`.
 3. `defer`s `term.Restore`.
+4. On restore, also writes a fixed escape sequence that turns off the
+   terminal-wide input modes a full-screen program may have enabled: mouse
+   tracking (`?1000/1002/1003/1005/1006/1015`), focus reporting (`?1004`),
+   bracketed paste (`?2004`) and the kitty keyboard protocol (`CSI < u`).
+
+Step 4 matters because those DECSET/kitty escapes live in the **real** terminal
+emulator, not in the PTY. psess forwards them untouched; `term.Restore` only
+resets termios and cannot clear them, so an app that crashes or is killed
+before disabling them would otherwise leave the terminal injecting mouse
+events and key-release reports into the next shell (see `terminalModeResets`
+in `internal/client/terminal.go`).
 
 Additionally a signal handler for `SIGINT`/`SIGTERM`/`SIGHUP` restores the
 terminal and exits, so an externally killed client cannot leave the terminal in
-raw mode. On the normal detach path the terminal is restored before any status
-line is printed.
+raw mode. `restore` is guarded by a `sync.Once`, so the deferred path and the
+signal path cannot race. On the normal detach path the terminal is restored
+before any status line is printed.
 
 ## 7. Detach state machine
 

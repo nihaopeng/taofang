@@ -523,6 +523,89 @@ func TestAttachReplayByDefault(t *testing.T) {
 	}
 }
 
+// TestDetachResetsTerminalModes reproduces the "garbage input" bug: a
+// full-screen program inside the session enables mouse tracking / bracketed
+// paste / the kitty keyboard protocol, then the client exits without the
+// program disabling them. The attach client must clear those terminal-wide
+// modes on its way out, because termios restoration alone cannot: the modes
+// live in the real terminal emulator, not in the PTY.
+func TestDetachResetsTerminalModes(t *testing.T) {
+	bin := psessBin(t)
+	env := testEnv(t)
+	name := "t15"
+	defer cleanKill(t, env, bin, name)
+
+	runCmd(t, env, bin, "new", "-d", name, "bash", "--norc", "--noprofile")
+	ps := startAttach(t, bin, name, env, false)
+	time.Sleep(300 * time.Millisecond)
+
+	// Simulate a TUI turning on every input-reporting mode.
+	ps.write("printf '\\033[?1000h\\033[?1003h\\033[?2004h\\033[>1u'\n")
+	if !ps.waitFor("\x1b[?1000h", 5*time.Second) {
+		t.Fatalf("mode-enable sequence not seen: %q", ps.buf.String())
+	}
+
+	ps.detach()
+
+	// The client writes the reset sequence as it restores the terminal, just
+	// before exiting, so give the reader a moment to drain it.
+	want := []string{"\x1b[?1000l", "\x1b[?1003l", "\x1b[?2004l", "\x1b[<u"}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		out := ps.buf.String()
+		all := true
+		for _, w := range want {
+			if !strings.Contains(out, w) {
+				all = false
+				break
+			}
+		}
+		if all {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("terminal modes not reset on detach: %q", ps.buf.String())
+}
+
+// TestSessionExitResetsTerminalModes covers the other exit path: the session's
+// own process exits (it is not the user detaching). Attach returns on the EXIT
+// frame, so the deferred restore must still clear the input modes before the
+// client prints its final status line.
+func TestSessionExitResetsTerminalModes(t *testing.T) {
+	bin := psessBin(t)
+	env := testEnv(t)
+	name := "t16"
+
+	// Enable the modes, then exit on our own a moment later.
+	runCmd(t, env, bin, "new", "-d", name, "sh", "-c",
+		`printf '\033[?1000h\033[?1003h\033[?2004h\033[>1u'; sleep 1`)
+	ps := startAttach(t, bin, name, env, false)
+
+	if !ps.waitFor("exited with code", 8*time.Second) {
+		t.Fatalf("session exit not reported: %q", ps.buf.String())
+	}
+	_ = ps.cmd.Wait()
+
+	want := []string{"\x1b[?1000l", "\x1b[?1003l", "\x1b[?2004l", "\x1b[<u"}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		out := ps.buf.String()
+		all := true
+		for _, w := range want {
+			if !strings.Contains(out, w) {
+				all = false
+				break
+			}
+		}
+		if all {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("terminal modes not reset on session exit: %q", ps.buf.String())
+}
+
 // TestSessionEnv verifies that processes inside a session see PSESS_SESSION and
 // PSESS, while the launching process does not.
 func TestSessionEnv(t *testing.T) {
