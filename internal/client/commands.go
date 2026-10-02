@@ -257,6 +257,68 @@ func Logs(name string) error {
 	return err
 }
 
+// sendChunkSize bounds each STDIN frame sent by Send. It is well below
+// protocol.MaxPayload and large enough to keep the frame count low.
+const sendChunkSize = 64 << 10
+
+// Send injects data into a session's PTY without attaching. It is the client
+// half of `psess send`.
+//
+// The bytes reach exactly the same place as keystrokes typed while attached:
+// Send has no idea what is running in the session, and does not wait for the
+// program to consume the input. A nil error means the daemon wrote the bytes
+// to the PTY master and acknowledged it, not that the program acted on them.
+func Send(name string, data []byte) error {
+	sockPath, err := runtime.SocketPath(name)
+	if err != nil {
+		return err
+	}
+	conn, err := net.Dial("unix", sockPath)
+	if err != nil {
+		return fmt.Errorf("session %q does not exist", name)
+	}
+	defer conn.Close()
+
+	if err := protocol.WriteFrame(conn, protocol.TypeHello, protocol.EncodeHello(protocol.ModeSend)); err != nil {
+		return err
+	}
+
+	// Stream the payload in bounded frames.
+	for len(data) > 0 {
+		n := len(data)
+		if n > sendChunkSize {
+			n = sendChunkSize
+		}
+		if err := protocol.WriteFrame(conn, protocol.TypeStdin, data[:n]); err != nil {
+			return err
+		}
+		data = data[n:]
+	}
+
+	// Half-close so the daemon knows the payload is complete; it treats EOF as
+	// "done sending". Failing to half-close would leave the daemon waiting.
+	if uc, ok := conn.(*net.UnixConn); ok {
+		_ = uc.CloseWrite()
+	}
+
+	// Wait for the daemon's acknowledgement (HELLO_OK) or an error.
+	for {
+		frame, rerr := protocol.ReadFrame(conn)
+		if rerr != nil {
+			if errors.Is(rerr, io.EOF) || errors.Is(rerr, io.ErrUnexpectedEOF) {
+				return errors.New("session closed before acknowledging the input")
+			}
+			return rerr
+		}
+		if frame.Type == protocol.TypeError {
+			return errors.New(string(frame.Payload))
+		}
+		if frame.Type == protocol.TypeHelloOK {
+			return nil
+		}
+	}
+}
+
 // queryStatus connects and requests a one-shot status.
 func queryStatus(sockPath string) (daemon.Status, error) {
 	var st daemon.Status

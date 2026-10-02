@@ -55,7 +55,9 @@ main goroutine ── accept loop ──► per-connection handlers
   which protects the PTY reader from a slow client.
 
 Any number of clients may be attached simultaneously. Output is broadcast to
-all of them and input from all of them is written to the same PTY.
+all of them and input from all of them is written to the same PTY. Writes to
+the PTY master are serialized by a single mutex, so a payload from one client
+(or from `psess send`) is never interleaved byte-for-byte with another's.
 
 ### Attach ordering (no duplicates, no gaps)
 
@@ -118,7 +120,14 @@ terminal.
 | `0x52` KILL | client → daemon | `[force]` |
 | `0x60` ERROR | daemon → client | human-readable error |
 
-Modes: attach, attach-with-replay, status, log, kill.
+Modes: attach, attach-with-replay, status, log, kill, send.
+
+The `send` mode reuses the `STDIN` frame: the client streams zero or more
+`STDIN` frames and then half-closes its side of the socket. The daemon writes
+each frame to the PTY master and replies with `HELLO_OK` to acknowledge that
+the bytes were handed to the PTY (it does not know whether the program acted on
+them). It never parses the payload and never checks what is running in the
+session, so the bytes land wherever typed input would.
 
 ## 6. Terminal safety
 

@@ -35,6 +35,7 @@ const (
 	ModeStatus         Mode = 2 // one-shot status query
 	ModeLog            Mode = 3 // one-shot ring buffer dump
 	ModeKill           Mode = 4 // terminate the session
+	ModeSend           Mode = 5 // one-shot: inject raw input into the PTY
 )
 
 // String renders a mode for logs and error messages.
@@ -50,6 +51,8 @@ func (m Mode) String() string {
 		return "log"
 	case ModeKill:
 		return "kill"
+	case ModeSend:
+		return "send"
 	default:
 		return "unknown"
 	}

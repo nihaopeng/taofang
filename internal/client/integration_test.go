@@ -606,6 +606,148 @@ func TestSessionExitResetsTerminalModes(t *testing.T) {
 	t.Fatalf("terminal modes not reset on session exit: %q", ps.buf.String())
 }
 
+// runCmdStdin is runCmd with data fed to the command's stdin.
+func runCmdStdin(t *testing.T, env []string, bin string, stdin []byte, args ...string) (string, int) {
+	t.Helper()
+	cmd := exec.Command(bin, args...)
+	cmd.Env = env
+	cmd.Stdin = bytes.NewReader(stdin)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	err := cmd.Run()
+	code := 0
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			code = ee.ExitCode()
+		} else {
+			t.Fatalf("run %v: %v", args, err)
+		}
+	}
+	return out.String(), code
+}
+
+// logsBytes returns the raw recent-output buffer of a session.
+func logsBytes(t *testing.T, env []string, bin, name string) []byte {
+	t.Helper()
+	cmd := exec.Command(bin, "logs", name)
+	cmd.Env = env
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("logs %s: %v", name, err)
+	}
+	return out.Bytes()
+}
+
+// startRawCat starts a session whose PTY is in raw mode and running `cat`, so
+// bytes injected with `psess send` are echoed back unchanged. This is how the
+// tests observe the exact bytes a send delivered.
+func startRawCat(t *testing.T, env []string, bin, name string) {
+	t.Helper()
+	runCmd(t, env, bin, "new", "-d", name, "sh", "-c", "stty raw -echo; exec cat")
+	time.Sleep(500 * time.Millisecond)
+}
+
+// waitLogsContains polls the session's recent-output buffer for want.
+func waitLogsContains(t *testing.T, env []string, bin, name string, want []byte) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if bytes.Contains(logsBytes(t, env, bin, name), want) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("session %s logs never contained %q", name, want)
+}
+
+// TestSendExecutesInShell injects a command (with Enter) into a shell session
+// without attaching, and verifies it ran.
+func TestSendExecutesInShell(t *testing.T) {
+	bin := psessBin(t)
+	env := testEnv(t)
+	name := "t17"
+	defer cleanKill(t, env, bin, name)
+
+	runCmd(t, env, bin, "new", "-d", name, "bash", "--norc", "--noprofile")
+	if out, code := runCmd(t, env, bin, "send", name, "echo SENT_MARKER_9", "-e"); code != 0 {
+		t.Fatalf("send failed (%d): %s", code, out)
+	}
+	waitLogsContains(t, env, bin, name, []byte("SENT_MARKER_9"))
+}
+
+// TestSendRawBytesFromStdin verifies byte-exact delivery, including control
+// bytes, a NUL and invalid-UTF-8 bytes, streamed from stdin in multiple frames.
+func TestSendRawBytesFromStdin(t *testing.T) {
+	bin := psessBin(t)
+	env := testEnv(t)
+	name := "t18"
+	defer cleanKill(t, env, bin, name)
+
+	startRawCat(t, env, bin, name)
+
+	payload := []byte{0x01, 0x1b, '[', 'A', 'h', 'i', '\n', 0x7f, 0x00, 0xff, 0xc3, 0xa9}
+	if out, code := runCmdStdin(t, env, bin, payload, "send", name, "-"); code != 0 {
+		t.Fatalf("send - failed (%d): %s", code, out)
+	}
+	waitLogsContains(t, env, bin, name, payload)
+}
+
+// TestSendLargePayloadStreamsMultipleFrames sends more than sendChunkSize so
+// the client has to emit several STDIN frames.
+func TestSendLargePayloadStreamsMultipleFrames(t *testing.T) {
+	bin := psessBin(t)
+	env := testEnv(t)
+	name := "t19"
+	defer cleanKill(t, env, bin, name)
+
+	startRawCat(t, env, bin, name)
+
+	payload := bytes.Repeat([]byte("0123456789abcdef"), 20000) // 320 KiB
+	if out, code := runCmdStdin(t, env, bin, payload, "send", name, "-"); code != 0 {
+		t.Fatalf("send - failed (%d): %s", code, out)
+	}
+	waitLogsContains(t, env, bin, name, payload)
+}
+
+// TestSendSuffixFlags checks the exact bytes produced by --enter, --newline
+// and neither, and that separate sends preserve their order.
+func TestSendSuffixFlags(t *testing.T) {
+	bin := psessBin(t)
+	env := testEnv(t)
+	name := "t20"
+	defer cleanKill(t, env, bin, name)
+
+	startRawCat(t, env, bin, name)
+
+	for _, args := range [][]string{
+		{"send", name, "A", "--enter"},
+		{"send", name, "B", "--newline"},
+		{"send", name, "C"},
+	} {
+		if out, code := runCmd(t, env, bin, args...); code != 0 {
+			t.Fatalf("%v failed (%d): %s", args, code, out)
+		}
+	}
+	waitLogsContains(t, env, bin, name, []byte("A\rB\nC"))
+}
+
+// TestSendToMissingSessionFails verifies a clear error when there is no such
+// session.
+func TestSendToMissingSessionFails(t *testing.T) {
+	bin := psessBin(t)
+	env := testEnv(t)
+
+	out, code := runCmd(t, env, bin, "send", "does-not-exist", "hello")
+	if code == 0 {
+		t.Fatalf("expected failure, got success: %s", out)
+	}
+	if !strings.Contains(out, "does not exist") {
+		t.Fatalf("unexpected error message: %q", out)
+	}
+}
+
 // TestSessionEnv verifies that processes inside a session see PSESS_SESSION and
 // PSESS, while the launching process does not.
 func TestSessionEnv(t *testing.T) {

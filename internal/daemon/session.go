@@ -3,6 +3,7 @@ package daemon
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -61,6 +62,11 @@ type session struct {
 	exitCode int32
 	rows     uint16
 	cols     uint16
+
+	// writeMu serializes writes to the PTY master. Every attached client may
+	// write input concurrently, and `psess send` adds more writers; without
+	// this lock two payloads could interleave byte-for-byte.
+	writeMu sync.Mutex
 
 	done   chan struct{} // closed when the child has exited and output drained
 	closed bool
@@ -254,10 +260,23 @@ func (s *session) resize(rows, cols uint16) {
 	_ = resizePTY(s.ptmx, rows, cols)
 }
 
-// writeStdin forwards client input to the PTY master.
+// writeStdin forwards input to the PTY master. Writes are serialized so a
+// payload from one client is never interleaved with another's mid-payload, and
+// a short write is retried. It blocks while the PTY's input buffer is full.
 func (s *session) writeStdin(p []byte) error {
-	_, err := s.ptmx.Write(p)
-	return err
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	for len(p) > 0 {
+		n, err := s.ptmx.Write(p)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+		p = p[n:]
+	}
+	return nil
 }
 
 // terminate signals the entire child process group, escalating to SIGKILL

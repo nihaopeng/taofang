@@ -91,6 +91,8 @@ psess list                        # list sessions (alias: ls)
 psess kill <name>                 # terminate a session
 psess kill -f <name>              # terminate immediately (SIGKILL)
 psess logs <name>                 # dump the in-memory recent-output buffer
+psess send <name> <text>          # inject input into a session without attaching
+psess send -e <name> <text>       # ... and press Enter (append CR)
 ```
 
 If no command is given, `psess new <name>` starts `$SHELL` (falling back to
@@ -135,6 +137,36 @@ to add it yourself (or use another shell), the equivalent line is:
 ```sh
 [ -n "$PSESS_SESSION" ] && PS1="<$PSESS_SESSION> $PS1"
 ```
+
+### Injecting input without attaching
+
+`psess send` writes bytes straight to a session's PTY, as if someone typed
+them while attached:
+
+```sh
+psess send dev 'echo hello'          # type text (no newline: nothing runs yet)
+psess send -e dev 'make -j8'         # ... and press Enter
+psess send -n dev $'line one\nline two'   # Ctrl-J newline inside a TUI editor
+printf 'raw bytes' | psess send dev - # read the payload from stdin
+```
+
+Flags:
+
+- `-e`, `--enter` append `CR` (`\r`), the byte a real Enter key sends.
+- `-n`, `--newline` append `LF` (`\n`), which most editable TUIs treat as
+  *insert newline* rather than *submit*.
+- `-e` and `-n` are mutually exclusive. With neither, the payload is sent
+  byte-for-byte with nothing appended.
+- `TEXT` is a **single** argument sent literally; use the shell's `$'...'`
+  quoting for control characters. Omit `TEXT` (or use `-`) to read raw bytes
+  from stdin.
+
+This is a generic *key-injection* primitive. `psess` does not look at what is
+running: the bytes go to whatever currently owns the terminal, exactly like a
+keystroke, so `send -e dev 'rm -rf x'` runs a shell command only if the
+session's foreground process is the shell. If it is a full-screen program, the
+bytes are delivered to that program as keys. A successful `send` means "the
+daemon wrote the bytes to the PTY", not "the program acted on them".
 
 ### Detaching
 
@@ -258,6 +290,11 @@ panes, windows, layouts, splits, terminal rendering, copy mode, scrollback UI,
 mouse support, keymap configuration, **screen restore**, ANSI parsing,
 network/TCP attach, authentication, encryption, cross-host attach, daemon crash
 recovery, session migration or a web UI.
+
+`psess send` is in scope precisely because it adds no interpretation: it
+writes the same raw bytes `attach` would forward. It deliberately does **not**
+translate key names (`C-c`, `Up`, ...), wrap bracketed paste, inspect the
+foreground process, or wait for output.
 
 (Sharing a PTY between multiple attached clients is supported, but that is
 mirroring a byte stream -- not a virtual terminal and not screen restore.)

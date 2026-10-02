@@ -9,7 +9,11 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
+	"strings"
+
+	"golang.org/x/term"
 
 	"github.com/nihaopeng/psess/internal/client"
 	"github.com/nihaopeng/psess/internal/daemon"
@@ -36,6 +40,8 @@ func run(args []string) int {
 		return cmdKill(args[1:])
 	case "logs":
 		return cmdLogs(args[1:])
+	case "send":
+		return cmdSend(args[1:])
 	case "__daemon":
 		return cmdDaemon(args[1:])
 	case "version", "--version", "-v":
@@ -60,6 +66,7 @@ Usage:
   psess list | ls                           list sessions
   psess kill [-f] NAME                      terminate a session
   psess logs NAME                           dump recent output
+  psess send [-e|-n] NAME [--] [TEXT]       inject input into a session
   psess version                             print version
 
 Multiple clients may attach to the same session at once; output is mirrored
@@ -157,6 +164,79 @@ func cmdLogs(args []string) int {
 		return 2
 	}
 	if err := client.Logs(args[0]); err != nil {
+		fmt.Fprintf(os.Stderr, "psess: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+// cmdSend implements `psess send`: inject raw input into a session's PTY
+// without attaching.
+//
+// It is a generic key-injection primitive and makes no attempt to decide
+// whether the session is at a shell prompt or running a full-screen program:
+// the bytes go to whatever currently owns the terminal, exactly like typed
+// input. TEXT is sent literally; use the shell's $'...' quoting for escape
+// sequences, or pass `-` to read raw bytes from stdin.
+func cmdSend(args []string) int {
+	var enter, newline bool
+	var pos []string
+
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--":
+			pos = append(pos, args[i+1:]...)
+			i = len(args)
+		case a == "-e" || a == "--enter":
+			enter = true
+		case a == "-n" || a == "--newline":
+			newline = true
+		case strings.HasPrefix(a, "-") && a != "-":
+			fmt.Fprintf(os.Stderr, "psess send: unknown flag %q\n", a)
+			fmt.Fprintln(os.Stderr, "psess: usage: psess send [-e|-n] NAME [--] [TEXT]")
+			return 2
+		default:
+			pos = append(pos, a)
+		}
+	}
+
+	if enter && newline {
+		fmt.Fprintln(os.Stderr, "psess send: --enter and --newline are mutually exclusive")
+		return 2
+	}
+	if len(pos) < 1 || len(pos) > 2 {
+		fmt.Fprintln(os.Stderr, "psess: usage: psess send [-e|-n] NAME [--] [TEXT]")
+		return 2
+	}
+
+	name := pos[0]
+	var data []byte
+	switch {
+	case len(pos) == 2 && pos[1] != "-":
+		data = []byte(pos[1])
+	default:
+		// No TEXT, or `-`: read raw bytes from stdin.
+		if term.IsTerminal(int(os.Stdin.Fd())) {
+			fmt.Fprintln(os.Stderr, "psess send: no input given; pass TEXT or pipe data to '-'")
+			return 2
+		}
+		b, rerr := io.ReadAll(os.Stdin)
+		if rerr != nil {
+			fmt.Fprintf(os.Stderr, "psess send: reading stdin: %v\n", rerr)
+			return 1
+		}
+		data = b
+	}
+
+	if enter {
+		data = append(data, '\r')
+	}
+	if newline {
+		data = append(data, '\n')
+	}
+
+	if err := client.Send(name, data); err != nil {
 		fmt.Fprintf(os.Stderr, "psess: %v\n", err)
 		return 1
 	}

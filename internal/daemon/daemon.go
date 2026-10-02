@@ -147,6 +147,8 @@ func handleConn(conn net.Conn, sess *session) {
 		handleLog(conn, sess)
 	case protocol.ModeKill:
 		handleKill(conn, sess)
+	case protocol.ModeSend:
+		handleSend(conn, sess)
 	case protocol.ModeAttach, protocol.ModeAttachWithTail:
 		handleAttach(conn, sess, mode == protocol.ModeAttachWithTail)
 	default:
@@ -179,6 +181,42 @@ func handleKill(conn net.Conn, sess *session) {
 		force = len(f.Payload) > 0 && f.Payload[0] == 1
 	}
 	sess.terminate(force)
+}
+
+// handleSend injects raw input into the session's PTY. It is the daemon side
+// of `psess send`.
+//
+// The client streams zero or more STDIN frames and then half-closes its side;
+// EOF means "nothing more to send". The daemon writes every frame to the PTY
+// master, then replies with HELLO_OK to acknowledge that the bytes were handed
+// to the PTY. It deliberately does not care what is running in the session:
+// the bytes go to whatever currently owns the terminal, exactly like typed
+// input.
+func handleSend(conn net.Conn, sess *session) {
+	defer conn.Close()
+
+	if st := sess.status(); st.Exited {
+		_ = protocol.WriteFrame(conn, protocol.TypeError, protocol.EncodeError("session has exited"))
+		return
+	}
+
+	for {
+		frame, err := protocol.ReadFrame(conn)
+		if err != nil {
+			// EOF (or a read error) means the client is done sending.
+			break
+		}
+		if frame.Type != protocol.TypeStdin {
+			// Ignore anything else for forward compatibility.
+			continue
+		}
+		if werr := sess.writeStdin(frame.Payload); werr != nil {
+			_ = protocol.WriteFrame(conn, protocol.TypeError, protocol.EncodeError("write to session failed: "+werr.Error()))
+			return
+		}
+	}
+
+	_ = protocol.WriteFrame(conn, protocol.TypeHelloOK, []byte{protocol.Version})
 }
 
 // handleAttach runs the interactive loop for one client. Multiple clients may
