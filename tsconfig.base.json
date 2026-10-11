@@ -20,6 +20,7 @@
     "types": [],
     "paths": {
       "@starvalley/protocol": ["./packages/protocol/src/index.ts"],
+      "@starvalley/render-protocol": ["./packages/render-protocol/src/index.ts"],
       "@starvalley/manager": ["./packages/manager/src/index.ts"],
       "@starvalley/router": ["./packages/router/src/index.ts"]
     }

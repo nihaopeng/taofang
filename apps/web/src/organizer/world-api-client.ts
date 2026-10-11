@@ -1,30 +1,30 @@
 /**
- * Transport adapter for the Phase-3 world endpoints:
+ * Transport adapter for the Phase-4 primitive world endpoints:
  *
- * - `GET  /api/world`        -> `GetWorldResponse`
- * - `POST /api/actor/move`   -> `MoveActorResponse`
+ * - `GET  /api/world`   -> `GetWorldResponse`      (full authoritative snapshot)
+ * - `POST /api/command` -> `SubmitCommandResponse` (authoritative event delta)
  *
  * As with `api-client.ts`, this is the only place in the world feature that knows
  * about HTTP. Payloads are decoded by `transport.requestJson` and then validated
  * with the canonical Protocol guards (`parseGetWorldResponse`,
- * `parseMoveActorResponse`). Failures surface only as `ApiError`, which the world
- * store reduces to a user-presentable string.
+ * `parseSubmitCommandResponse`). Failures surface only as `ApiError`, which the
+ * world store reduces to a user-presentable string.
  *
- * The move command deliberately carries **no actor id**: the actor is resolved by
+ * The command deliberately carries **no actor id**: the actor is resolved by
  * Router from transport context. This adapter serialises the caller-supplied
- * canonical `MoveActorCommand` verbatim and never adds a wire field.
+ * canonical `ActorMoveCommand` verbatim and never adds a wire field.
  *
  * The injectable fetch implementation is per-resource: `setWorldFetch` does not
  * affect the game-info client and vice versa.
  */
 
 import {
-  MOVE_ACTOR_PATH,
+  COMMAND_PATH,
   WORLD_PATH,
   parseGetWorldResponse,
-  parseMoveActorResponse,
+  parseSubmitCommandResponse,
 } from '@starvalley/protocol';
-import type { MoveActorCommand, MoveActorResult, WorldSnapshot } from '@starvalley/protocol';
+import type { ActorMoveCommand, SubmitCommandResponse, WorldSnapshot } from '@starvalley/protocol';
 
 import { defaultFetch, parseContract, requestJson, resolveApiUrl } from './transport';
 import type { FetchLike } from './transport';
@@ -46,9 +46,9 @@ export function resolveWorldUrl(): string {
   return resolveApiUrl(WORLD_PATH);
 }
 
-/** Origin-relative URL for the actor move command endpoint. */
-export function resolveMoveActorUrl(): string {
-  return resolveApiUrl(MOVE_ACTOR_PATH);
+/** Origin-relative URL for the command endpoint. */
+export function resolveCommandUrl(): string {
+  return resolveApiUrl(COMMAND_PATH);
 }
 
 /**
@@ -71,15 +71,15 @@ export async function fetchWorld(): Promise<WorldSnapshot> {
 }
 
 /**
- * Send a movement command and validate its result.
+ * Send a game command and validate the authoritative event delta.
  *
  * The command is built by the store from the requested direction only; the actor
  * is resolved server-side from transport context, so this adapter must not add an
- * actor/player field. Resolves the Protocol `MoveActorResult` (not the envelope).
- * Rejects only with `ApiError`.
+ * actor/player field. Resolves the Protocol `SubmitCommandResponse` (not the raw
+ * response). Rejects only with `ApiError`.
  */
-export async function requestMoveActor(command: MoveActorCommand): Promise<MoveActorResult> {
-  const payload = await requestJson(fetchImpl, resolveMoveActorUrl(), {
+export async function submitCommand(command: ActorMoveCommand): Promise<SubmitCommandResponse> {
+  const payload = await requestJson(fetchImpl, resolveCommandUrl(), {
     method: 'POST',
     headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
     body: JSON.stringify(command),
@@ -87,7 +87,7 @@ export async function requestMoveActor(command: MoveActorCommand): Promise<MoveA
 
   return parseContract(
     payload,
-    (value) => parseMoveActorResponse(value).result,
-    'Game server response did not match the movement protocol.',
+    (value) => parseSubmitCommandResponse(value),
+    'Game server response did not match the command protocol.',
   );
 }

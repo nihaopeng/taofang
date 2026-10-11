@@ -1,0 +1,13 @@
+{
+  "name": "@starvalley/render-protocol",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Render ISA: framework-free render primitives executed by a render runtime. Never imports Three.js, React, or Node.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  }
+}

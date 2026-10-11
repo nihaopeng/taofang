@@ -19,8 +19,8 @@ export {
 
 export { useGameInfo } from './use-game-info';
 
-// World / actor / movement feature.
-export type { ControlledActorViewModel, MoveDirection, WorldViewModel } from './world-view-model';
+// World / entity / command feature.
+export type { EntityViewModel, MoveDirection, WorldViewModel } from './world-view-model';
 export type { WorldState, WorldStatus } from './world-store';
 
 export {

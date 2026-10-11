@@ -2,19 +2,25 @@
 /**
  * UI tests for `WorldView` / the page shell's world wiring.
  *
- * These tests mount real components in a DOM (so effects, event listeners, and
+ * These mount real components in a DOM (so effects, event listeners, and
  * re-renders actually run). They consume only the Organizer-facing API
  * (`organizer/index.ts`) plus its test-only fetch hook, `setWorldFetch`; they
  * never import Protocol, backend, or Node modules, and they never call `fetch`
  * themselves.
  *
- * After the Phase-3 identity migration the client controls an **actor**. The
- * move command carries only a direction: the client cannot name the actor it
- * acts as, so the request body must not contain an actor/player id.
+ * The world itself is rendered by Three.js through the Render ISA, which needs a
+ * real WebGL context. The runtime module is therefore mocked with a recording
+ * responder for this file: these tests cover the HUD (controls, keyboard, status,
+ * retry, mount) while `scene-view.test.tsx` covers the bridge/runtime wiring.
+ *
+ * After the Phase-4 primitive migration the client controls an **actor** named by
+ * `controlledActorId`. The move command carries only a direction: the client
+ * cannot name the actor it acts as, so the request body must not contain an
+ * actor/player id.
  */
 
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   getWorldState,
@@ -28,6 +34,40 @@ import {
 } from '../src/organizer/index.ts';
 import { App } from '../src/ui/App.tsx';
 import { WorldView } from '../src/ui/WorldView.tsx';
+import type { RenderFrame } from '../src/render/bridge.ts';
+
+/** Shared recorder for the mocked Three.js runtime (hoisted for `vi.mock`). */
+const mockRuntime = vi.hoisted(() => ({
+  frames: [] as RenderFrame[],
+  mountCalls: 0,
+}));
+
+// Replace the WebGL runtime with a recording no-op so mounting `<App />` /
+// `<WorldView />` under jsdom never needs a canvas or WebGL context.
+vi.mock('../src/render/three/runtime.ts', () => ({
+  createThreeRuntime: () => ({
+    mount: () => {
+      mockRuntime.mountCalls += 1;
+    },
+    apply: (frame: RenderFrame) => {
+      mockRuntime.frames.push(frame);
+    },
+    update: () => {},
+    inspect: () => ({
+      mounted: false,
+      lights: 0,
+      ground: false,
+      camera: { left: 0, right: 0, top: 0, bottom: 0 },
+      nodes: [],
+    }),
+    dispose: () => {},
+  }),
+}));
+
+/** Does any recorded frame contain a command of `type`? */
+function hasCommand(frames: readonly RenderFrame[], type: RenderFrame[number]['type']): boolean {
+  return frames.some((frame) => frame.some((command) => command.type === type));
+}
 
 const SERVER_TIME = '2025-01-02T03:04:05.000Z';
 
@@ -36,15 +76,18 @@ const SERVER_TIME = '2025-01-02T03:04:05.000Z';
 // using the contract constant. It is only here to shape a valid fixture.
 const ARBITRARY_PROTOCOL_VERSION = 1;
 
-const VALID_ACTOR = {
+const VALID_ENTITY = {
+  entityId: 'entity-a',
   actorId: 'actor-1',
-  name: 'Alex',
-  position: { x: 3, y: 4 },
+  kind: 'character',
+  transform: { x: 3, y: 4 },
+  visible: true,
 };
 
 const VALID_SNAPSHOT = {
   size: { width: 10, height: 8 },
-  actor: VALID_ACTOR,
+  entities: [VALID_ENTITY],
+  controlledActorId: 'actor-1',
   serverTime: SERVER_TIME,
 };
 
@@ -69,19 +112,15 @@ function fakeResponse(body: unknown, init: { ok?: boolean; status?: number } = {
   return response as unknown as Response;
 }
 
-/** Build a valid `MoveActorResponse` body. */
-function moveResponse(position: { x: number; y: number }, moved = true): unknown {
+/** Build a valid `SubmitCommandResponse` body from a transformed entity. */
+function moveResponse(x: number, y: number): unknown {
   return {
-    result: {
-      actor: { ...VALID_ACTOR, position },
-      moved,
-      serverTime: SERVER_TIME,
-    },
+    events: [{ type: 'transform.changed', entityId: 'entity-a', transform: { x, y } }],
+    serverTime: SERVER_TIME,
   };
 }
 
 interface CapturedRequest {
-  url: string;
   method: string | undefined;
   body: unknown;
 }
@@ -94,13 +133,12 @@ async function loadValidWorld(): Promise<void> {
 
 /** Record move requests made through the Organizer's injectable fetch. */
 function captureMoves(requests: CapturedRequest[]): void {
-  setWorldFetch(async (url, init) => {
+  setWorldFetch(async (_url, init) => {
     requests.push({
-      url: String(url),
       method: init?.method,
       body: typeof init?.body === 'string' ? JSON.parse(init.body) : undefined,
     });
-    return fakeResponse(moveResponse({ x: 4, y: 4 }));
+    return fakeResponse(moveResponse(4, 4));
   });
 }
 
@@ -121,6 +159,8 @@ function pressKey(key: string, init: KeyboardEventInit = {}): boolean {
 }
 
 beforeEach(() => {
+  mockRuntime.frames.length = 0;
+  mockRuntime.mountCalls = 0;
   resetGameInfoState();
   resetGameInfoFetch();
   resetWorldState();
@@ -136,23 +176,28 @@ afterEach(() => {
 });
 
 describe('WorldView rendering', () => {
-  it('renders the grid with the Organizer dimensions and the marker on the controlled actor tile', async () => {
+  it('renders the scene canvas and the controlled actor tile coordinates', async () => {
     await loadValidWorld();
 
     render(<WorldView />);
 
-    const grid = screen.getByTestId('world-grid');
-    expect(grid.getAttribute('data-width')).toBe('10');
-    expect(grid.getAttribute('data-height')).toBe('8');
+    const canvas = screen.getByTestId('scene-canvas');
+    expect(canvas.tagName).toBe('CANVAS');
+    expect(canvas.getAttribute('class')).toBe('scene-view__canvas');
 
-    const marker = screen.getByTestId('controlled-actor');
-    expect(marker.getAttribute('data-x')).toBe('3');
-    expect(marker.getAttribute('data-y')).toBe('4');
+    // The recorder proves the bridge actually fed the runtime a create command,
+    // rather than the assertions merely querying the DOM that always mounts.
+    await waitFor(() => {
+      expect(mockRuntime.mountCalls).toBe(1);
+      expect(hasCommand(mockRuntime.frames, 'node.create')).toBe(true);
+    });
 
-    // The actor's name and tile coordinates are exposed to the user.
     const info = screen.getByTestId('controlled-actor-info');
-    expect(within(info).getByText('Alex')).toBeTruthy();
     expect(info.textContent).toContain('(3, 4)');
+
+    // The DOM grid and player marker are gone: the scene is the renderer.
+    expect(screen.queryByTestId('world-grid')).toBeNull();
+    expect(screen.queryByTestId('controlled-actor')).toBeNull();
   });
 
   it('renders a loading indication before the world is ready', () => {
@@ -160,8 +205,12 @@ describe('WorldView rendering', () => {
 
     const panel = screen.getByTestId('world-panel');
     expect(panel.getAttribute('data-status')).toBe('idle');
-    expect(within(panel).getByText(/Loading world/i)).toBeTruthy();
-    expect(screen.queryByTestId('world-grid')).toBeNull();
+    const loading = within(panel).getByText(/Loading world/i);
+    expect(loading.tagName).toBe('P');
+    expect(loading.getAttribute('role')).toBe('status');
+    expect(screen.queryByTestId('controlled-actor-info')).toBeNull();
+    // No world snapshot -> no runtime is created, but the canvas still renders.
+    expect(screen.getByTestId('scene-canvas').tagName).toBe('CANVAS');
   });
 });
 
@@ -190,13 +239,18 @@ describe('WorldView direction controls', () => {
     // The UI's intent is the direction alone: the server resolves which actor
     // the caller controls, so the client must not be able to name one.
     expect(requests[0].method).toBe('POST');
-    expect(requests[0].body).toEqual({ direction: 'east' });
+    expect(requests[0].body).toEqual({ type: 'actor.move', direction: 'east' });
     expect(requests[0].body).not.toHaveProperty('actorId');
     expect(requests[0].body).not.toHaveProperty('playerId');
 
     // And exactly one: no duplicate dispatch on top of the click.
     await Promise.resolve();
     expect(requests).toHaveLength(1);
+
+    // The move also reached the render runtime as an interpolation target.
+    await waitFor(() => {
+      expect(hasCommand(mockRuntime.frames, 'transform.setTarget')).toBe(true);
+    });
   });
 });
 
@@ -215,9 +269,7 @@ describe('WorldView keyboard input', () => {
     await waitFor(() => {
       expect(requests).toHaveLength(1);
     });
-    expect(requests[0].body).toEqual({ direction: 'east' });
-    expect(requests[0].body).not.toHaveProperty('actorId');
-    expect(requests[0].body).not.toHaveProperty('playerId');
+    expect(requests[0].body).toEqual({ type: 'actor.move', direction: 'east' });
 
     // A repeat event is the same physical press held down; it must not move again.
     pressKey('ArrowRight', { repeat: true });
@@ -245,7 +297,7 @@ describe('WorldView keyboard input', () => {
     await waitFor(() => {
       expect(requests).toHaveLength(1);
     });
-    expect(requests[0].body).toEqual({ direction: 'east' });
+    expect(requests[0].body).toEqual({ type: 'actor.move', direction: 'east' });
   });
 });
 
@@ -272,13 +324,13 @@ describe('WorldView load failure', () => {
       throw new Error('expected the organizer to expose an error message');
     }
     expect(alert.textContent).toContain(message);
-    expect(screen.queryByTestId('world-grid')).toBeNull();
+    expect(screen.queryByTestId('controlled-actor-info')).toBeNull();
 
     fireEvent.click(within(alert).getByRole('button', { name: 'Retry' }));
 
-    await screen.findByTestId('world-grid');
+    await screen.findByTestId('controlled-actor-info');
     expect(worldCalls).toBe(2);
-    expect(within(panel).getByTestId('world-grid').getAttribute('data-width')).toBe('10');
+    expect(screen.getByTestId('controlled-actor-info').textContent).toContain('(3, 4)');
   });
 });
 
@@ -295,10 +347,10 @@ describe('App mount', () => {
 
     // The mount effect has already driven the store out of `idle`. Remove the
     // `useEffect(() => void loadWorld(), [])` in App and this fails: the store
-    // stays `idle` and the grid never appears.
+    // stays `idle` and the controlled actor never appears.
     expect(getWorldState().status).not.toBe('idle');
 
-    await screen.findByTestId('world-grid');
+    await screen.findByTestId('controlled-actor-info');
     expect(worldCalls).toBe(1);
     expect(getWorldState().status).toBe('ready');
   });

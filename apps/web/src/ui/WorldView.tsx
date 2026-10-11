@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useRef } from 'react';
-import type { CSSProperties } from 'react';
+import { useEffect, useRef } from 'react';
 
 import { loadWorld, moveActor, useWorld } from '../organizer';
 import type { MoveDirection } from '../organizer';
+import { SceneView } from './SceneView';
 
 /** Direction controls, in a stable order, with accessible names. */
 const DIRECTIONS: ReadonlyArray<{ direction: MoveDirection; label: string; glyph: string }> = [
@@ -32,23 +32,24 @@ const KEY_TO_DIRECTION: Readonly<Record<string, MoveDirection | undefined>> = {
 };
 
 /**
- * Pure presentation of the Organizer's world/actor state.
+ * Presentation of the Organizer's world/actor state.
  *
- * Renders a `width x height` tile grid plus a marker at the authoritative tile
- * of the actor the client controls, collects directional intent (buttons +
- * keyboard), and shows loading / error affordances. It never calls the backend:
- * every intent goes through `moveActor` / `loadWorld` from the Organizer. The UI
- * deliberately does not know (or send) which actor it controls — that identity is
- * resolved by the server from transport context.
+ * The world itself is rendered by `<SceneView />` (Three.js executing the Render
+ * ISA). This component keeps only the HUD: directional intent (buttons +
+ * keyboard), the loading affordance, the error affordance with `Retry`, and a
+ * short status line for the controlled actor. It never calls the backend: every
+ * intent goes through `moveActor` / `loadWorld` from the Organizer. The UI
+ * deliberately does not know (or send) which actor it controls — that identity
+ * is resolved by the server from transport context.
  */
 export function WorldView() {
   const state = useWorld();
-  const { status, world, controlledActor, error } = state;
+  const { status, entities, controlledActorId, error } = state;
 
   // Movement is only meaningful once an authoritative controlled actor exists.
   // Keeping this in a ref lets the `keydown` listener attach exactly once (and
   // detach on unmount) instead of being re-registered on every state transition.
-  const canMove = status === 'ready' && controlledActor !== null;
+  const canMove = status === 'ready' && controlledActorId !== null;
   const canMoveRef = useRef(canMove);
   canMoveRef.current = canMove;
 
@@ -87,69 +88,25 @@ export function WorldView() {
     };
   }, []);
 
-  // Tiles are pure decoration keyed by tile coordinate; rebuilding only when the
-  // world dimensions change keeps normal movement renders allocation-light.
-  const tiles = useMemo(() => {
-    if (world === null) {
-      return null;
-    }
-    const cells = [];
-    for (let y = 0; y < world.height; y += 1) {
-      for (let x = 0; x < world.width; x += 1) {
-        cells.push(<div key={`${x},${y}`} className="world__tile" />);
-      }
-    }
-    return cells;
-  }, [world]);
-
-  const boardStyle: CSSProperties | undefined =
-    world === null
-      ? undefined
-      : {
-          gridTemplateColumns: `repeat(${world.width}, 1fr)`,
-          aspectRatio: `${world.width} / ${world.height}`,
-        };
-
-  const actorStyle: CSSProperties | undefined =
-    world === null || controlledActor === null
-      ? undefined
-      : {
-          left: `${(controlledActor.x / world.width) * 100}%`,
-          top: `${(controlledActor.y / world.height) * 100}%`,
-          width: `${100 / world.width}%`,
-          height: `${100 / world.height}%`,
-        };
+  // The controlled entity is the one linked to the controlled actor. It is
+  // derived from Organizer state; the UI invents no identity of its own.
+  const controlledEntity =
+    controlledActorId === null
+      ? null
+      : (entities.find((entity) => entity.actorId === controlledActorId) ?? null);
 
   return (
     <section className="world" data-testid="world-panel" data-status={status}>
       <h2 className="world__heading">World</h2>
 
-      {controlledActor !== null ? (
+      <SceneView />
+
+      {controlledEntity !== null ? (
         <p className="world__actor-info" data-testid="controlled-actor-info">
-          <span className="world__actor-name">{controlledActor.name}</span>{' '}
           <span className="world__actor-coords">
-            ({controlledActor.x}, {controlledActor.y})
+            ({controlledEntity.x}, {controlledEntity.y})
           </span>
         </p>
-      ) : null}
-
-      {world !== null && controlledActor !== null ? (
-        <div
-          className="world__board"
-          data-testid="world-grid"
-          data-width={world.width}
-          data-height={world.height}
-          style={boardStyle}
-        >
-          {tiles}
-          <div
-            className="world__actor"
-            data-testid="controlled-actor"
-            data-x={controlledActor.x}
-            data-y={controlledActor.y}
-            style={actorStyle}
-          />
-        </div>
       ) : null}
 
       {status === 'idle' || status === 'loading' ? (

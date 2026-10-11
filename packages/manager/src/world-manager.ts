@@ -1,31 +1,32 @@
 import type {
-  Actor,
   ActorId,
-  MoveActorCommand,
-  MoveActorResult,
+  EntityId,
+  EntityState,
+  GameCommand,
   MoveDirection,
-  Position,
+  Transform,
   WorldSize,
   WorldSnapshot,
+  SubmitCommandResponse,
 } from '@starvalley/protocol';
-import { parseActorId } from '@starvalley/protocol';
+import { parseActorId, parseEntityId } from '@starvalley/protocol';
 
 /**
  * Default authoritative world dimensions for this slice.
  *
- * Frozen by the Phase-2 contract; a world with these dimensions has its centre
+ * Frozen by the Phase-4 contract; a world with these dimensions has its centre
  * at `{ x: 6, y: 4 }`.
  */
 export const DEFAULT_WORLD_SIZE: WorldSize = { width: 12, height: 8 };
 
 const DEFAULT_ACTOR_ID: ActorId = parseActorId('actor-1');
-const DEFAULT_ACTOR_NAME = 'Player';
+const DEFAULT_ENTITY_ID: EntityId = parseEntityId('entity-1');
 
 /**
  * Cardinal direction deltas. Origin is top-left: `north` decreases `y`, `east`
  * increases `x`. Frozen alongside the Protocol `MoveDirection` contract.
  */
-const DIRECTION_DELTAS: Record<MoveDirection, Position> = {
+const DIRECTION_DELTAS: Record<MoveDirection, Transform> = {
   north: { x: 0, y: -1 },
   south: { x: 0, y: 1 },
   east: { x: 1, y: 0 },
@@ -48,30 +49,35 @@ export class UnknownActorError extends Error {
 }
 
 /**
- * Typed input for {@link WorldManager.moveActor}: the actor identity comes only
- * from this out-of-band input, never from `command` (which has no actor field).
+ * Result of {@link WorldManager.submitCommand}.
+ *
+ * Aliased directly to the Protocol `SubmitCommandResponse` so the manager result
+ * and the wire contract cannot drift apart. `events` is the authoritative delta
+ * produced by the command; a **refused** command yields an empty array — that
+ * emptiness *is* the refusal; there is no `moved`/`ok` boolean anywhere in the
+ * contract. `serverTime` stamps the call.
  */
-export interface MoveActorInput {
-  actorId: ActorId;
-  command: MoveActorCommand;
-}
+export type SubmitCommandResult = SubmitCommandResponse;
 
 /**
  * Read-only, transport-neutral access to the authoritative world state.
  *
  * Every operation is scoped to an actor supplied as typed input; there is no
- * implicit "current actor".
+ * implicit "current actor", and identity is never read from the command (a
+ * command has no actor field).
  */
 export interface WorldManager {
-  /** Point-in-time authoritative world + actor view for `input.actorId`. Always a fresh object. */
+  /** Point-in-time authoritative world view for `input.actorId`. Always a fresh object graph. */
   getSnapshot(input: { actorId: ActorId }): WorldSnapshot;
   /**
-   * Attempt to step `input.actorId` one tile in `input.command.direction`.
+   * Apply `input.command` on behalf of `input.actorId` and return the resulting
+   * authoritative events.
    *
-   * A step that would leave the world is refused (`moved: false`) with the
-   * unchanged position; it is not an error. Unknown actors throw.
+   * A command that the world rules refuse produces no events (an empty array)
+   * and leaves authoritative state untouched; it is not an error. Unknown actors
+   * throw {@link UnknownActorError}.
    */
-  moveActor(input: MoveActorInput): MoveActorResult;
+  submitCommand(input: { actorId: ActorId; command: GameCommand }): SubmitCommandResult;
 }
 
 /** Construction-time dependencies for {@link createWorldManager}. */
@@ -80,8 +86,8 @@ export interface CreateWorldManagerDeps {
   worldSize?: WorldSize;
   /** Identifier of the single known actor. Defaults to `parseActorId('actor-1')`. */
   actorId?: ActorId;
-  /** Display name of the single known actor. Defaults to `'Player'`. */
-  actorName?: string;
+  /** Identifier of the single world entity. Defaults to `parseEntityId('entity-1')`. */
+  entityId?: EntityId;
   /** Time source. Defaults to `() => new Date()`. */
   clock?: () => Date;
 }
@@ -96,9 +102,10 @@ function assertPositiveInteger(value: number, field: string): void {
  * Create an authoritative `WorldManager`.
  *
  * Pure, synchronous, in-memory: no I/O, no transport, no persistence. The world
- * size, actor identity, and clock are captured at creation; the actor starts at
- * the world centre. All returned DTOs are defensive copies so callers cannot
- * mutate authoritative state.
+ * size, actor/entity identity, and clock are captured at creation; the single
+ * character entity starts at the world centre. Every returned DTO (including
+ * nested `transform` objects, the `entities` array, and event payloads) is a
+ * defensive copy so callers cannot mutate authoritative state.
  */
 export function createWorldManager(deps: CreateWorldManagerDeps = {}): WorldManager {
   const requested = deps.worldSize ?? DEFAULT_WORLD_SIZE;
@@ -107,19 +114,21 @@ export function createWorldManager(deps: CreateWorldManagerDeps = {}): WorldMana
   const size: WorldSize = { width: requested.width, height: requested.height };
 
   const actorId = deps.actorId ?? DEFAULT_ACTOR_ID;
-  const actorName = deps.actorName ?? DEFAULT_ACTOR_NAME;
+  const entityId = deps.entityId ?? DEFAULT_ENTITY_ID;
   const clock = deps.clock ?? ((): Date => new Date());
 
-  // Single authoritative position. Never handed out directly.
-  const position: Position = {
+  // Single authoritative transform. Never handed out directly.
+  const transform: Transform = {
     x: Math.floor(size.width / 2),
     y: Math.floor(size.height / 2),
   };
 
-  const actorSnapshot = (): Actor => ({
+  const entitySnapshot = (): EntityState => ({
+    entityId,
     actorId,
-    name: actorName,
-    position: { x: position.x, y: position.y },
+    kind: 'character',
+    transform: { x: transform.x, y: transform.y },
+    visible: true,
   });
 
   return {
@@ -130,31 +139,56 @@ export function createWorldManager(deps: CreateWorldManagerDeps = {}): WorldMana
 
       return {
         size: { width: size.width, height: size.height },
-        actor: actorSnapshot(),
+        entities: [entitySnapshot()],
+        controlledActorId: actorId,
         serverTime: clock().toISOString(),
       };
     },
 
-    moveActor(input: MoveActorInput): MoveActorResult {
+    submitCommand(input: { actorId: ActorId; command: GameCommand }): SubmitCommandResult {
       if (input.actorId !== actorId) {
         throw new UnknownActorError(input.actorId);
       }
 
-      const delta = DIRECTION_DELTAS[input.command.direction];
-      const targetX = position.x + delta.x;
-      const targetY = position.y + delta.y;
       const serverTime = clock().toISOString();
+      const command = input.command;
 
-      const outOfBounds =
-        targetX < 0 || targetX >= size.width || targetY < 0 || targetY >= size.height;
+      // Exhaustive dispatch on the command discriminant. `command.type` (rather
+      // than the object) is narrowed to `never` when every `GameCommand` member
+      // has a case, so adding a command primitive is a compile error here until
+      // it is handled.
+      switch (command.type) {
+        case 'actor.move': {
+          const delta = DIRECTION_DELTAS[command.direction];
+          const targetX = transform.x + delta.x;
+          const targetY = transform.y + delta.y;
+          const inBounds =
+            targetX >= 0 && targetX < size.width && targetY >= 0 && targetY < size.height;
 
-      if (outOfBounds) {
-        return { actor: actorSnapshot(), moved: false, serverTime };
+          if (!inBounds) {
+            // A refused step changes nothing observable: empty event list.
+            return { events: [], serverTime };
+          }
+
+          transform.x = targetX;
+          transform.y = targetY;
+
+          return {
+            events: [
+              {
+                type: 'transform.changed',
+                entityId,
+                transform: { x: targetX, y: targetY },
+              },
+            ],
+            serverTime,
+          };
+        }
+        default: {
+          const exhaustive: never = command.type;
+          throw new Error(`Unhandled game command: ${String(exhaustive)}`);
+        }
       }
-
-      position.x = targetX;
-      position.y = targetY;
-      return { actor: actorSnapshot(), moved: true, serverTime };
     },
   };
 }

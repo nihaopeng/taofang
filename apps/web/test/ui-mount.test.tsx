@@ -15,15 +15,31 @@
  */
 
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   getGameInfoState,
   resetGameInfoFetch,
   resetGameInfoState,
+  resetWorldFetch,
+  resetWorldState,
   setGameInfoFetch,
+  setWorldFetch,
 } from '../src/organizer/index.ts';
 import { App } from '../src/ui/App.tsx';
+
+// `<App />` now embeds the Three.js `<SceneView />`. This file is about the
+// page-shell startup path, not rendering, so the WebGL runtime is replaced with
+// a no-op and the world fetch is stubbed to keep the test hermetic.
+vi.mock('../src/render/three/runtime.ts', () => ({
+  createThreeRuntime: () => ({
+    mount: () => {},
+    apply: () => {},
+    update: () => {},
+    inspect: () => ({ mounted: false, nodes: [] }),
+    dispose: () => {},
+  }),
+}));
 
 // Arbitrary: the protocol guard accepts any finite integer, the UI never reads
 // this field, and a real client-side version gate belongs in the Organizer
@@ -39,6 +55,16 @@ const VALID_GAME_INFO = {
 
 const VALID_RESPONSE = { gameInfo: VALID_GAME_INFO };
 
+// A minimal valid world so `<App />`'s world load settles without network access.
+const VALID_WORLD_RESPONSE = {
+  world: {
+    size: { width: 10, height: 8 },
+    entities: [],
+    controlledActorId: null,
+    serverTime: VALID_GAME_INFO.serverTime,
+  },
+};
+
 /** Minimal `Response` stand-in: the organizer only reads `ok`, `status`, `json`. */
 function fakeResponse(body: unknown, init: { ok?: boolean; status?: number } = {}): Response {
   const response = {
@@ -52,12 +78,17 @@ function fakeResponse(body: unknown, init: { ok?: boolean; status?: number } = {
 beforeEach(() => {
   resetGameInfoState();
   resetGameInfoFetch();
+  resetWorldState();
+  resetWorldFetch();
+  setWorldFetch(async () => fakeResponse(VALID_WORLD_RESPONSE));
 });
 
 afterEach(() => {
   cleanup();
   resetGameInfoState();
   resetGameInfoFetch();
+  resetWorldState();
+  resetWorldFetch();
 });
 
 describe('App mount', () => {

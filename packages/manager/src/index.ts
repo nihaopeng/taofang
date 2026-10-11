@@ -14,4 +14,8 @@ export {
   UnknownActorError,
   createWorldManager,
 } from './world-manager.ts';
-export type { CreateWorldManagerDeps, MoveActorInput, WorldManager } from './world-manager.ts';
+export type {
+  CreateWorldManagerDeps,
+  SubmitCommandResult,
+  WorldManager,
+} from './world-manager.ts';

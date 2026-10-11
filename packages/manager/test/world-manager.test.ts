@@ -1,18 +1,21 @@
 import { describe, expect, it } from 'vitest';
 
-import { isMoveActorResult, isWorldSnapshot, parseActorId } from '@starvalley/protocol';
-import type { ActorId, MoveDirection } from '@starvalley/protocol';
-
 import {
-  DEFAULT_WORLD_SIZE,
-  UnknownActorError,
-  createWorldManager,
-} from '../src/index.ts';
+  isSubmitCommandResponse,
+  isTransformChangedEvent,
+  isWorldSnapshot,
+  parseActorId,
+  parseEntityId,
+} from '@starvalley/protocol';
+import type { ActorId, GameCommand, MoveDirection } from '@starvalley/protocol';
+
+import { DEFAULT_WORLD_SIZE, UnknownActorError, createWorldManager } from '../src/index.ts';
 
 const START = new Date('2025-01-02T03:04:05.000Z');
 
-/** The default known actor id, produced through the protocol parser (branded). */
+/** The default known actor/entity ids, produced through the protocol parsers (branded). */
 const ACTOR_ID = parseActorId('actor-1');
+const ENTITY_ID = parseEntityId('entity-1');
 
 /** Deterministic, mutable clock for exercising time-dependent semantics. */
 function fakeClock(start: Date) {
@@ -25,23 +28,33 @@ function fakeClock(start: Date) {
   };
 }
 
+/** Build a `GameCommand`; a command deliberately carries no actor field. */
+function actorMove(direction: MoveDirection): GameCommand {
+  return { type: 'actor.move', direction };
+}
+
 describe('DEFAULT_WORLD_SIZE', () => {
-  it('is the frozen Phase-2 default', () => {
+  it('is the frozen default', () => {
     expect(DEFAULT_WORLD_SIZE).toEqual({ width: 12, height: 8 });
   });
 });
 
 describe('createWorldManager defaults', () => {
-  it('starts the actor at the world centre', () => {
+  it('starts the single character entity at the world centre', () => {
     const manager = createWorldManager();
 
     expect(manager.getSnapshot({ actorId: ACTOR_ID })).toEqual({
       size: { width: 12, height: 8 },
-      actor: {
-        actorId: 'actor-1',
-        name: 'Player',
-        position: { x: 6, y: 4 },
-      },
+      entities: [
+        {
+          entityId: 'entity-1',
+          actorId: 'actor-1',
+          kind: 'character',
+          transform: { x: 6, y: 4 },
+          visible: true,
+        },
+      ],
+      controlledActorId: 'actor-1',
       serverTime: expect.any(String),
     });
   });
@@ -51,37 +64,71 @@ describe('createWorldManager defaults', () => {
     expect(isWorldSnapshot(manager.getSnapshot({ actorId: ACTOR_ID }))).toBe(true);
   });
 
-  it('uses the branded ActorId from parseActorId as the default identity', () => {
+  it('uses the branded ActorId/EntityId parsers for the default identity', () => {
     const manager = createWorldManager();
-    const { actor } = manager.getSnapshot({ actorId: ACTOR_ID });
+    const [entity] = manager.getSnapshot({ actorId: ACTOR_ID }).entities;
 
-    // The branded value parsed from the same string is accepted and echoed back.
-    expect(actor.actorId).toBe(ACTOR_ID);
-    expect(actor.actorId).toBe(parseActorId('actor-1'));
+    // The branded values parsed from the same strings are accepted and echoed back.
+    expect(entity.actorId).toBe(ACTOR_ID);
+    expect(entity.actorId).toBe(parseActorId('actor-1'));
+    expect(entity.entityId).toBe(ENTITY_ID);
+    expect(entity.entityId).toBe(parseEntityId('entity-1'));
   });
 
-  it('honours custom worldSize, actorId and actorName', () => {
+  it('honours custom worldSize, actorId and entityId', () => {
     const customActorId = parseActorId('farmer-42');
+    const customEntityId = parseEntityId('entity-42');
     const manager = createWorldManager({
       worldSize: { width: 5, height: 3 },
       actorId: customActorId,
-      actorName: 'Abigail',
+      entityId: customEntityId,
     });
 
-    expect(manager.getSnapshot({ actorId: customActorId })).toEqual({
+    const snapshot = manager.getSnapshot({ actorId: customActorId });
+    expect(snapshot).toEqual({
       size: { width: 5, height: 3 },
-      actor: { actorId: 'farmer-42', name: 'Abigail', position: { x: 2, y: 1 } },
+      entities: [
+        {
+          entityId: 'entity-42',
+          actorId: 'farmer-42',
+          kind: 'character',
+          transform: { x: 2, y: 1 },
+          visible: true,
+        },
+      ],
+      controlledActorId: 'farmer-42',
       serverTime: expect.any(String),
     });
+    // The Phase-4 EntityState contract carries no display name: the entity
+    // exposes exactly these five keys and nothing else.
+    expect(Object.keys(snapshot.entities[0]).sort()).toEqual(
+      ['actorId', 'entityId', 'kind', 'transform', 'visible'].sort(),
+    );
   });
+});
 
-  it('returns a snapshot shaped as { size, actor, serverTime } with no player key', () => {
+describe('snapshot shape', () => {
+  it('exposes entities + controlledActorId and no phase-3 actor/player key', () => {
     const manager = createWorldManager();
     const snapshot = manager.getSnapshot({ actorId: ACTOR_ID });
 
-    expect(Object.keys(snapshot).sort()).toEqual(['actor', 'serverTime', 'size'].sort());
-    expect('player' in snapshot).toBe(false);
+    expect(Object.keys(snapshot).sort()).toEqual(
+      ['controlledActorId', 'entities', 'serverTime', 'size'].sort(),
+    );
+    expect(snapshot).not.toHaveProperty('actor');
     expect(snapshot).not.toHaveProperty('player');
+  });
+
+  it('entity has exactly entityId/actorId/kind/transform/visible, matching the configured actor', () => {
+    const manager = createWorldManager();
+    const [entity] = manager.getSnapshot({ actorId: ACTOR_ID }).entities;
+
+    expect(Object.keys(entity).sort()).toEqual(
+      ['actorId', 'entityId', 'kind', 'transform', 'visible'].sort(),
+    );
+    expect(entity.actorId).toBe(ACTOR_ID);
+    expect(entity.kind).toBe('character');
+    expect(entity.transform).toEqual({ x: 6, y: 4 });
   });
 });
 
@@ -100,111 +147,126 @@ describe('construction validation', () => {
 });
 
 describe('movement in each direction', () => {
-  const cases: Array<{ direction: MoveDirection; from: { x: number; y: number }; to: { x: number; y: number } }> = [
-    { direction: 'north', from: { x: 6, y: 4 }, to: { x: 6, y: 3 } },
-    { direction: 'south', from: { x: 6, y: 4 }, to: { x: 6, y: 5 } },
-    { direction: 'east', from: { x: 6, y: 4 }, to: { x: 7, y: 4 } },
-    { direction: 'west', from: { x: 6, y: 4 }, to: { x: 5, y: 4 } },
+  const cases: Array<{ direction: MoveDirection; to: { x: number; y: number } }> = [
+    { direction: 'north', to: { x: 6, y: 3 } },
+    { direction: 'south', to: { x: 6, y: 5 } },
+    { direction: 'east', to: { x: 7, y: 4 } },
+    { direction: 'west', to: { x: 5, y: 4 } },
   ];
 
-  it.each(cases)('$direction moves exactly one tile to rule-computed position', ({ direction, from, to }) => {
-    const clock = fakeClock(START);
-    const manager = createWorldManager({ clock: clock.now });
+  it.each(cases)(
+    '$direction emits exactly one transform.changed event carrying the NEW transform',
+    ({ direction, to }) => {
+      const clock = fakeClock(START);
+      const manager = createWorldManager({ clock: clock.now });
 
-    const result = manager.moveActor({ actorId: ACTOR_ID, command: { direction } });
+      const result = manager.submitCommand({ actorId: ACTOR_ID, command: actorMove(direction) });
 
-    expect(result).toEqual({
-      actor: { actorId: 'actor-1', name: 'Player', position: to },
-      moved: true,
-      serverTime: START.toISOString(),
-    });
-    expect(isMoveActorResult(result)).toBe(true);
+      expect(result).toEqual({
+        events: [
+          { type: 'transform.changed', entityId: ENTITY_ID, transform: to },
+        ],
+        serverTime: START.toISOString(),
+      });
+      expect(result.events).toHaveLength(1);
+      expect(isTransformChangedEvent(result.events[0])).toBe(true);
+      expect(isSubmitCommandResponse(result)).toBe(true);
 
-    // Authoritative state advanced too.
-    expect(manager.getSnapshot({ actorId: ACTOR_ID }).actor.position).toEqual(to);
-    // The starting centre is what we expected.
-    expect(from).toEqual({ x: 6, y: 4 });
-  });
+      // Authoritative state advanced too, and the snapshot reflects the event.
+      expect(manager.getSnapshot({ actorId: ACTOR_ID }).entities[0].transform).toEqual(to);
+    },
+  );
 });
 
 describe('edge refusal', () => {
-  it('refuses a west step at x=0, leaves position unchanged, and stays recoverable', () => {
+  it('refuses a west step at x=0 with events: [] and leaves the snapshot unchanged', () => {
     const clock = fakeClock(START);
     const manager = createWorldManager({ worldSize: { width: 3, height: 3 }, clock: clock.now });
     // Centre is (1,1). Walk west once to x=0.
-    expect(manager.moveActor({ actorId: ACTOR_ID, command: { direction: 'west' } }).moved).toBe(true);
+    expect(manager.submitCommand({ actorId: ACTOR_ID, command: actorMove('west') }).events).toHaveLength(1);
+    const before = manager.getSnapshot({ actorId: ACTOR_ID });
 
-    const refused = manager.moveActor({ actorId: ACTOR_ID, command: { direction: 'west' } });
+    const refused = manager.submitCommand({ actorId: ACTOR_ID, command: actorMove('west') });
 
-    expect(refused).toEqual({
-      actor: { actorId: 'actor-1', name: 'Player', position: { x: 0, y: 1 } },
-      moved: false,
-      serverTime: START.toISOString(),
-    });
-    expect(manager.getSnapshot({ actorId: ACTOR_ID }).actor.position).toEqual({ x: 0, y: 1 });
+    expect(refused).toEqual({ events: [], serverTime: START.toISOString() });
+    expect(manager.getSnapshot({ actorId: ACTOR_ID }).entities[0].transform).toEqual({ x: 0, y: 1 });
+    expect(manager.getSnapshot({ actorId: ACTOR_ID }).entities[0].transform).toEqual(
+      before.entities[0].transform,
+    );
 
-    // Recoverable: a valid move still works.
-    expect(manager.moveActor({ actorId: ACTOR_ID, command: { direction: 'east' } }).moved).toBe(true);
-    expect(manager.getSnapshot({ actorId: ACTOR_ID }).actor.position).toEqual({ x: 1, y: 1 });
+    // Recoverable: a valid move still works and emits an event.
+    expect(manager.submitCommand({ actorId: ACTOR_ID, command: actorMove('east') }).events).toHaveLength(1);
+    expect(manager.getSnapshot({ actorId: ACTOR_ID }).entities[0].transform).toEqual({ x: 1, y: 1 });
   });
 
-  it('refuses an east step at x=width-1, leaves position unchanged, and stays recoverable', () => {
+  it('refuses an east step at x=width-1 with events: [] and stays recoverable', () => {
     const manager = createWorldManager({ worldSize: { width: 3, height: 3 } });
-    expect(manager.moveActor({ actorId: ACTOR_ID, command: { direction: 'east' } }).moved).toBe(true); // x=2
+    expect(manager.submitCommand({ actorId: ACTOR_ID, command: actorMove('east') }).events).toHaveLength(1); // x=2
+    const before = manager.getSnapshot({ actorId: ACTOR_ID });
 
-    const refused = manager.moveActor({ actorId: ACTOR_ID, command: { direction: 'east' } });
+    const refused = manager.submitCommand({ actorId: ACTOR_ID, command: actorMove('east') });
 
-    expect(refused.moved).toBe(false);
-    expect(refused.actor.position).toEqual({ x: 2, y: 1 });
-    expect(manager.getSnapshot({ actorId: ACTOR_ID }).actor.position).toEqual({ x: 2, y: 1 });
+    expect(refused.events).toEqual([]);
+    expect(manager.getSnapshot({ actorId: ACTOR_ID }).entities[0].transform).toEqual({ x: 2, y: 1 });
+    expect(manager.getSnapshot({ actorId: ACTOR_ID }).entities[0].transform).toEqual(
+      before.entities[0].transform,
+    );
 
-    expect(manager.moveActor({ actorId: ACTOR_ID, command: { direction: 'west' } }).moved).toBe(true);
-    expect(manager.getSnapshot({ actorId: ACTOR_ID }).actor.position).toEqual({ x: 1, y: 1 });
+    expect(manager.submitCommand({ actorId: ACTOR_ID, command: actorMove('west') }).events).toHaveLength(1);
+    expect(manager.getSnapshot({ actorId: ACTOR_ID }).entities[0].transform).toEqual({ x: 1, y: 1 });
   });
 
-  it('refuses a north step at y=0, leaves position unchanged, and stays recoverable', () => {
+  it('refuses a north step at y=0 with events: [] and stays recoverable', () => {
     const manager = createWorldManager({ worldSize: { width: 3, height: 3 } });
-    expect(manager.moveActor({ actorId: ACTOR_ID, command: { direction: 'north' } }).moved).toBe(true); // y=0
+    expect(manager.submitCommand({ actorId: ACTOR_ID, command: actorMove('north') }).events).toHaveLength(1); // y=0
+    const before = manager.getSnapshot({ actorId: ACTOR_ID });
 
-    const refused = manager.moveActor({ actorId: ACTOR_ID, command: { direction: 'north' } });
+    const refused = manager.submitCommand({ actorId: ACTOR_ID, command: actorMove('north') });
 
-    expect(refused.moved).toBe(false);
-    expect(refused.actor.position).toEqual({ x: 1, y: 0 });
-    expect(manager.getSnapshot({ actorId: ACTOR_ID }).actor.position).toEqual({ x: 1, y: 0 });
+    expect(refused.events).toEqual([]);
+    expect(manager.getSnapshot({ actorId: ACTOR_ID }).entities[0].transform).toEqual({ x: 1, y: 0 });
+    expect(manager.getSnapshot({ actorId: ACTOR_ID }).entities[0].transform).toEqual(
+      before.entities[0].transform,
+    );
 
-    expect(manager.moveActor({ actorId: ACTOR_ID, command: { direction: 'south' } }).moved).toBe(true);
-    expect(manager.getSnapshot({ actorId: ACTOR_ID }).actor.position).toEqual({ x: 1, y: 1 });
+    expect(manager.submitCommand({ actorId: ACTOR_ID, command: actorMove('south') }).events).toHaveLength(1);
+    expect(manager.getSnapshot({ actorId: ACTOR_ID }).entities[0].transform).toEqual({ x: 1, y: 1 });
   });
 
-  it('refuses a south step at y=height-1, leaves position unchanged, and stays recoverable', () => {
+  it('refuses a south step at y=height-1 with events: [] and stays recoverable', () => {
     const manager = createWorldManager({ worldSize: { width: 3, height: 3 } });
-    expect(manager.moveActor({ actorId: ACTOR_ID, command: { direction: 'south' } }).moved).toBe(true); // y=2
+    expect(manager.submitCommand({ actorId: ACTOR_ID, command: actorMove('south') }).events).toHaveLength(1); // y=2
+    const before = manager.getSnapshot({ actorId: ACTOR_ID });
 
-    const refused = manager.moveActor({ actorId: ACTOR_ID, command: { direction: 'south' } });
+    const refused = manager.submitCommand({ actorId: ACTOR_ID, command: actorMove('south') });
 
-    expect(refused.moved).toBe(false);
-    expect(refused.actor.position).toEqual({ x: 1, y: 2 });
-    expect(manager.getSnapshot({ actorId: ACTOR_ID }).actor.position).toEqual({ x: 1, y: 2 });
+    expect(refused.events).toEqual([]);
+    expect(manager.getSnapshot({ actorId: ACTOR_ID }).entities[0].transform).toEqual({ x: 1, y: 2 });
+    expect(manager.getSnapshot({ actorId: ACTOR_ID }).entities[0].transform).toEqual(
+      before.entities[0].transform,
+    );
 
-    expect(manager.moveActor({ actorId: ACTOR_ID, command: { direction: 'north' } }).moved).toBe(true);
-    expect(manager.getSnapshot({ actorId: ACTOR_ID }).actor.position).toEqual({ x: 1, y: 1 });
+    expect(manager.submitCommand({ actorId: ACTOR_ID, command: actorMove('north') }).events).toHaveLength(1);
+    expect(manager.getSnapshot({ actorId: ACTOR_ID }).entities[0].transform).toEqual({ x: 1, y: 1 });
   });
 
-  it('does not throw for an out-of-bounds step', () => {
+  it('does not throw for an out-of-bounds step and reports an empty event list', () => {
     const manager = createWorldManager({ worldSize: { width: 1, height: 1 } });
-    expect(() => manager.moveActor({ actorId: ACTOR_ID, command: { direction: 'north' } })).not.toThrow();
-    expect(manager.moveActor({ actorId: ACTOR_ID, command: { direction: 'north' } }).moved).toBe(false);
+    expect(() =>
+      manager.submitCommand({ actorId: ACTOR_ID, command: actorMove('north') }),
+    ).not.toThrow();
+    expect(manager.submitCommand({ actorId: ACTOR_ID, command: actorMove('north') }).events).toEqual([]);
   });
 });
 
 describe('UnknownActorError', () => {
-  it('moveActor throws for a non-matching actorId and populates actorId', () => {
+  it('submitCommand throws for a non-matching actorId and populates actorId', () => {
     const manager = createWorldManager();
     const ghost = parseActorId('ghost');
 
     let caught: unknown;
     try {
-      manager.moveActor({ actorId: ghost, command: { direction: 'north' } });
+      manager.submitCommand({ actorId: ghost, command: actorMove('north') });
     } catch (error) {
       caught = error;
     }
@@ -237,12 +299,12 @@ describe('UnknownActorError', () => {
     const manager = createWorldManager({ actorId: customActorId });
 
     expect(() =>
-      manager.moveActor({ actorId: ACTOR_ID, command: { direction: 'north' } }),
+      manager.submitCommand({ actorId: ACTOR_ID, command: actorMove('north') }),
     ).toThrow(UnknownActorError);
     expect(() => manager.getSnapshot({ actorId: ACTOR_ID })).toThrow(UnknownActorError);
     expect(
-      manager.moveActor({ actorId: customActorId, command: { direction: 'north' } }).moved,
-    ).toBe(true);
+      manager.submitCommand({ actorId: customActorId, command: actorMove('north') }).events,
+    ).toHaveLength(1);
   });
 });
 
@@ -251,14 +313,21 @@ describe('typed-input actor scoping', () => {
     const customActorId = parseActorId('farmer-7');
     const manager = createWorldManager({ actorId: customActorId });
 
-    const result = manager.moveActor({ actorId: customActorId, command: { direction: 'east' } });
-    expect(result.actor.actorId).toBe(customActorId);
+    const result = manager.submitCommand({ actorId: customActorId, command: actorMove('east') });
+    const [event] = result.events;
+    expect(event.type).toBe('transform.changed');
 
     const snapshot = manager.getSnapshot({ actorId: customActorId });
-    expect(snapshot.actor.actorId).toBe(customActorId);
+    expect(snapshot.controlledActorId).toBe(customActorId);
+    expect(snapshot.entities[0].actorId).toBe(customActorId);
     // The branded value survives the round-trip.
-    const actorIdAsActorId: ActorId = snapshot.actor.actorId;
-    expect(actorIdAsActorId).toBe(customActorId);
+    const entityActorId: ActorId | null = snapshot.entities[0].actorId;
+    expect(entityActorId).toBe(customActorId);
+  });
+
+  it('a command carries only type + direction, never an actor field', () => {
+    const command = actorMove('north');
+    expect(Object.keys(command).sort()).toEqual(['direction', 'type']);
   });
 });
 
@@ -271,13 +340,13 @@ describe('serverTime', () => {
 
     clock.advance(1_000);
     expect(
-      manager.moveActor({ actorId: ACTOR_ID, command: { direction: 'north' } }).serverTime,
+      manager.submitCommand({ actorId: ACTOR_ID, command: actorMove('north') }).serverTime,
     ).toBe('2025-01-02T03:04:06.000Z');
 
     // A refused step still stamps the call time.
     const edgeManager = createWorldManager({ worldSize: { width: 1, height: 1 }, clock: clock.now });
-    const refused = edgeManager.moveActor({ actorId: ACTOR_ID, command: { direction: 'north' } });
-    expect(refused.moved).toBe(false);
+    const refused = edgeManager.submitCommand({ actorId: ACTOR_ID, command: actorMove('north') });
+    expect(refused.events).toEqual([]);
     expect(refused.serverTime).toBe('2025-01-02T03:04:06.000Z');
 
     clock.advance(1_000);
@@ -290,41 +359,71 @@ describe('defensive copies', () => {
     const manager = createWorldManager();
 
     const snapshot = manager.getSnapshot({ actorId: ACTOR_ID });
-    snapshot.actor.position.x = 999;
-    snapshot.actor.name = 'Hacked';
+    snapshot.entities[0].transform.x = 999;
+    snapshot.entities[0].transform.y = 999;
+    snapshot.entities[0].actorId = parseActorId('hacked');
+    snapshot.entities.push({ ...snapshot.entities[0] });
     snapshot.size.width = 999;
+    snapshot.controlledActorId = parseActorId('hacked');
 
     expect(manager.getSnapshot({ actorId: ACTOR_ID })).toEqual({
       size: { width: 12, height: 8 },
-      actor: { actorId: 'actor-1', name: 'Player', position: { x: 6, y: 4 } },
+      entities: [
+        {
+          entityId: 'entity-1',
+          actorId: 'actor-1',
+          kind: 'character',
+          transform: { x: 6, y: 4 },
+          visible: true,
+        },
+      ],
+      controlledActorId: 'actor-1',
       serverTime: expect.any(String),
     });
   });
 
-  it('mutating a move result does not corrupt authoritative state', () => {
+  it('mutating a submitCommand result does not corrupt authoritative state', () => {
     const manager = createWorldManager();
 
-    const result = manager.moveActor({ actorId: ACTOR_ID, command: { direction: 'east' } });
-    result.actor.position.x = -50;
-    result.actor.position.y = -50;
-    result.moved = false;
+    const result = manager.submitCommand({ actorId: ACTOR_ID, command: actorMove('east') });
+    const [event] = result.events;
+    if (event.type === 'transform.changed') {
+      event.transform.x = -50;
+      event.transform.y = -50;
+    }
+    result.events.push({ type: 'transform.changed', entityId: ENTITY_ID, transform: { x: 1, y: 1 } });
 
     const snapshot = manager.getSnapshot({ actorId: ACTOR_ID });
-    expect(snapshot.actor.position).toEqual({ x: 7, y: 4 });
+    expect(snapshot.entities[0].transform).toEqual({ x: 7, y: 4 });
 
     // The manager still advances correctly afterwards.
-    expect(
-      manager.moveActor({ actorId: ACTOR_ID, command: { direction: 'east' } }).actor.position,
-    ).toEqual({ x: 8, y: 4 });
+    const next = manager.submitCommand({ actorId: ACTOR_ID, command: actorMove('east') });
+    const [nextEvent] = next.events;
+    expect(nextEvent.type).toBe('transform.changed');
+    if (nextEvent.type === 'transform.changed') {
+      expect(nextEvent.transform).toEqual({ x: 8, y: 4 });
+    }
   });
 
-  it('returns fresh nested position objects each read', () => {
+  it('returns fresh nested objects and arrays each read', () => {
     const manager = createWorldManager();
     const first = manager.getSnapshot({ actorId: ACTOR_ID });
     const second = manager.getSnapshot({ actorId: ACTOR_ID });
-    expect(first.actor.position).not.toBe(second.actor.position);
-    expect(first.actor).not.toBe(second.actor);
+
+    expect(first).not.toBe(second);
     expect(first.size).not.toBe(second.size);
+    expect(first.entities).not.toBe(second.entities);
+    expect(first.entities[0]).not.toBe(second.entities[0]);
+    expect(first.entities[0].transform).not.toBe(second.entities[0].transform);
+  });
+
+  it('returns a fresh events array per command call', () => {
+    const manager = createWorldManager();
+    const first = manager.submitCommand({ actorId: ACTOR_ID, command: actorMove('east') });
+    const second = manager.submitCommand({ actorId: ACTOR_ID, command: actorMove('west') });
+
+    expect(first.events).not.toBe(second.events);
+    expect(first.events[0]).not.toBe(second.events[0]);
   });
 });
 
@@ -333,11 +432,11 @@ describe('manager instances', () => {
     const a = createWorldManager();
     const b = createWorldManager({ worldSize: { width: 4, height: 4 } });
 
-    a.moveActor({ actorId: ACTOR_ID, command: { direction: 'east' } });
-    a.moveActor({ actorId: ACTOR_ID, command: { direction: 'east' } });
+    a.submitCommand({ actorId: ACTOR_ID, command: actorMove('east') });
+    a.submitCommand({ actorId: ACTOR_ID, command: actorMove('east') });
 
-    expect(a.getSnapshot({ actorId: ACTOR_ID }).actor.position).toEqual({ x: 8, y: 4 });
-    expect(b.getSnapshot({ actorId: ACTOR_ID }).actor.position).toEqual({ x: 2, y: 2 });
+    expect(a.getSnapshot({ actorId: ACTOR_ID }).entities[0].transform).toEqual({ x: 8, y: 4 });
+    expect(b.getSnapshot({ actorId: ACTOR_ID }).entities[0].transform).toEqual({ x: 2, y: 2 });
     expect(a.getSnapshot({ actorId: ACTOR_ID }).size).toEqual({ width: 12, height: 8 });
     expect(b.getSnapshot({ actorId: ACTOR_ID }).size).toEqual({ width: 4, height: 4 });
   });

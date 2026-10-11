@@ -1,16 +1,16 @@
 import {
+  COMMAND_PATH,
   GAME_INFO_PATH,
   HEALTH_PATH,
-  MOVE_ACTOR_PATH,
   WORLD_PATH,
-  parseMoveActorCommand,
+  parseGameCommand,
 } from '@starvalley/protocol';
 import type {
   ActorId,
   GetGameInfoResponse,
   GetWorldResponse,
   HealthStatus,
-  MoveActorResponse,
+  SubmitCommandResponse,
 } from '@starvalley/protocol';
 import type { GameInfoManager, WorldManager } from '@starvalley/manager';
 
@@ -36,11 +36,7 @@ export interface RouteContext {
 /** A serialized, Protocol-compliant success payload. */
 export interface RouteResponse {
   readonly status: number;
-  readonly body:
-    | GetGameInfoResponse
-    | GetWorldResponse
-    | HealthStatus
-    | MoveActorResponse;
+  readonly body: GetWorldResponse | SubmitCommandResponse | GetGameInfoResponse | HealthStatus;
 }
 
 /** A declarative route entry: method + path + thin handler. */
@@ -77,14 +73,18 @@ export const ROUTES: readonly RouteDefinition[] = [
   },
   {
     method: 'POST',
-    path: MOVE_ACTOR_PATH,
+    path: COMMAND_PATH,
     handle: ({ world, actorId, body }) => {
-      // Router validates shape and delegates the decision (including world-edge
-      // refusal) to the Manager; it never reimplements movement rules. The
-      // command carries no actor: `actorId` comes from the transport seam.
-      const command = parseMoveActorCommand(body);
-      const result = world.moveActor({ actorId, command });
-      const responseBody: MoveActorResponse = { result };
+      // Router validates the command envelope (including the `type`
+      // discriminant) and forwards it verbatim. It never switches on
+      // `command.type` and never applies movement/world rules: `events` is the
+      // Manager's authoritative delta, and an empty array is a refusal.
+      const command = parseGameCommand(body);
+      const result = world.submitCommand({ actorId, command });
+      const responseBody: SubmitCommandResponse = {
+        events: result.events,
+        serverTime: result.serverTime,
+      };
       return { status: 200, body: responseBody };
     },
   },

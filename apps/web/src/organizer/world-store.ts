@@ -1,48 +1,60 @@
 /**
- * Client-side store for the world/actor feature.
+ * Client-side store for the world feature.
  *
  * Owns the world request lifecycle (`idle -> loading -> ready | error`), the
- * movement command pipeline, subscriptions, and the mapping from internal
- * transport failures to user-presentable strings. It is intentionally a *second*
- * module singleton, separate from `game-info-store`, so the two resources never
- * share state or in-flight bookkeeping.
+ * command pipeline, subscriptions, and the mapping from internal transport
+ * failures to user-presentable strings. It is intentionally a *second* module
+ * singleton, separate from `game-info-store`, so the two resources never share
+ * state or in-flight bookkeeping.
  *
- * Authoritative server state only. There is no prediction or interpolation: the
- * visible position changes *only* when a validated server response is reconciled
- * into the view model.
+ * The client is **event-driven over the primitive contract**: a command returns an
+ * authoritative `{ events, serverTime }` delta, and the store applies those events
+ * to its entity state. An empty `events` array is the server *refusing* the
+ * command; it is not an error and changes nothing.
  *
- * After the Phase-3 identity migration the client controls an **Actor**, not a
- * player. `controlledActor` is the actor the client believes it controls; the
- * actor resolved by the server (from transport context) is authoritative and the
- * move command carries only a direction.
+ * Authoritative server state only. There is no prediction, interpolation, deltas,
+ * or bounds checking: the visible world changes *only* when a validated snapshot
+ * or event is reconciled into the view model.
  */
 
-import type { MoveActorCommand, MoveActorResult } from '@starvalley/protocol';
+import type { ActorMoveCommand, GameEvent } from '@starvalley/protocol';
 
 import { ApiError, describeApiError } from './transport';
-import { fetchWorld, requestMoveActor } from './world-api-client';
-import { toControlledActorViewModel, toWorldViewModel } from './world-view-model';
-import type { ControlledActorViewModel, MoveDirection, WorldViewModel } from './world-view-model';
+import { fetchWorld, submitCommand } from './world-api-client';
+import {
+  compareEntityViewModels,
+  toEntityViewModels,
+  toEntityViewModel,
+  toWorldViewModel,
+} from './world-view-model';
+import type { EntityViewModel, MoveDirection, WorldViewModel } from './world-view-model';
 
 /** World request lifecycle as observed by the UI. */
 export type WorldStatus = 'idle' | 'loading' | 'ready' | 'error';
 
-/** Observable state. `world`/`controlledActor` are populated once a snapshot is `ready`. */
+/** Observable state. `world`/`entities` are populated once a snapshot is `ready`. */
 export interface WorldState {
   status: WorldStatus;
   world: WorldViewModel | null;
-  controlledActor: ControlledActorViewModel | null;
+  /** Authoritative entities, ordered deterministically by `entityId`. */
+  entities: readonly EntityViewModel[];
+  /** The actor the caller controls, or `null` when the caller controls nothing. */
+  controlledActorId: string | null;
   /** User-presentable message; never a raw error/response object. */
   error: string | null;
 }
 
 type Listener = (state: WorldState) => void;
 
+/** Shared empty list so idle/loading states are reference-stable. */
+const NO_ENTITIES: readonly EntityViewModel[] = Object.freeze([]);
+
 /** Canonical initial state. Reused so `getWorldState` is reference-stable. */
 const IDLE_STATE: WorldState = {
   status: 'idle',
   world: null,
-  controlledActor: null,
+  entities: NO_ENTITIES,
+  controlledActorId: null,
   error: null,
 };
 
@@ -56,10 +68,10 @@ let inFlightLoad: Promise<void> | null = null;
 const listeners = new Set<Listener>();
 
 /**
- * Movement serialization.
+ * Command serialization.
  *
- * Exactly one move request may be in flight at a time (`activeMoveToken`). While
- * one is in flight, `moveActor` records only the *latest* requested direction
+ * Exactly one command may be in flight at a time (`activeMoveToken`). While one
+ * is in flight, `moveActor` records only the *latest* requested direction
  * (`queuedDirection`) and returns a promise that settles once the in-flight
  * request that superseded it (or its own request) has settled. This bounds
  * held-key input to one request per settle and keeps ordering deterministic.
@@ -112,7 +124,8 @@ export function resetWorldState(): void {
  * Load the authoritative world snapshot. Never rejects: the returned promise
  * resolves once the state has settled (`ready` or `error`). Concurrent calls
  * while a request is in flight share the same promise and do not trigger a
- * second fetch.
+ * second fetch. A successful snapshot **replaces** the world and entity state
+ * wholesale.
  */
 export function loadWorld(): Promise<void> {
   if (inFlightLoad !== null) {
@@ -132,7 +145,13 @@ export function loadWorld(): Promise<void> {
 }
 
 async function runLoad(requestGeneration: number): Promise<void> {
-  setState({ status: 'loading', world: null, controlledActor: null, error: null });
+  setState({
+    status: 'loading',
+    world: null,
+    entities: NO_ENTITIES,
+    controlledActorId: null,
+    error: null,
+  });
 
   try {
     const snapshot = await fetchWorld();
@@ -142,7 +161,8 @@ async function runLoad(requestGeneration: number): Promise<void> {
     setState({
       status: 'ready',
       world: toWorldViewModel(snapshot),
-      controlledActor: toControlledActorViewModel(snapshot.actor),
+      entities: toEntityViewModels(snapshot.entities),
+      controlledActorId: snapshot.controlledActorId,
       error: null,
     });
   } catch (error) {
@@ -152,7 +172,8 @@ async function runLoad(requestGeneration: number): Promise<void> {
     setState({
       status: 'error',
       world: null,
-      controlledActor: null,
+      entities: NO_ENTITIES,
+      controlledActorId: null,
       error: describeApiError(error, 'Something went wrong while loading the world.'),
     });
   }
@@ -161,19 +182,19 @@ async function runLoad(requestGeneration: number): Promise<void> {
 /**
  * UI intent: move the controlled actor one tile in `direction`.
  *
- * The store owns the wire command: the command is built from the direction
- * alone. The server resolves *which* actor the caller controls from transport
- * context, so no actor/player id is ever sent (and none may be invented here).
- * Semantics:
+ * The store owns the wire command: the primitive is built from the direction
+ * alone as `{ type: 'actor.move', direction }`. The server resolves *which* actor
+ * the caller controls from transport context, so no actor/player id is ever sent
+ * (and none may be invented here). Semantics:
  *
  * - **No world loaded yet:** safe no-op that resolves without sending anything
  *   (there is no authoritative controlled actor to move).
- * - **A move already in flight:** no second concurrent request; the latest
+ * - **A command already in flight:** no second concurrent request; the latest
  *   direction is queued and dispatched when the current request settles.
  * - **Never rejects:** failures settle the store into `error` and resolve.
  */
 export function moveActor(direction: MoveDirection): Promise<void> {
-  if (state.controlledActor === null) {
+  if (state.controlledActorId === null) {
     // No authoritative snapshot yet; refuse the step rather than send a command
     // the server would have to reject.
     return Promise.resolve();
@@ -253,40 +274,41 @@ async function runMoveLoop(
 }
 
 async function performMove(direction: MoveDirection, loopGeneration: number): Promise<void> {
-  if (state.controlledActor === null) {
+  if (state.controlledActorId === null) {
     return;
   }
 
-  const command: MoveActorCommand = { direction };
+  const command: ActorMoveCommand = { type: 'actor.move', direction };
 
   try {
-    const result = await requestMoveActor(command);
+    const response = await submitCommand(command);
     if (loopGeneration !== generation) {
       return;
     }
     // A concurrent `loadWorld`/`resetWorldState` invalidates this result.
-    if (state.controlledActor === null) {
+    if (state.controlledActorId === null) {
       return;
     }
-    applyMoveResult(result);
+    applyEvents(response.events);
   } catch (error) {
     if (loopGeneration !== generation) {
       return;
     }
-    // Preserve the last authoritative world/actor so the map stays visible;
+    // Preserve the last authoritative world/entities so the map stays visible;
     // only the status/error signal the failure.
     setState({
       status: 'error',
       world: state.world,
-      controlledActor: state.controlledActor,
+      entities: state.entities,
+      controlledActorId: state.controlledActorId,
       error: toMoveErrorMessage(error),
     });
   }
 }
 
 /**
- * Map a movement failure to a user-presentable message. An unknown actor (404)
- * is the one transport status with a specific, actionable meaning here.
+ * Map a command failure to a user-presentable message. An unknown actor (404) is
+ * the one transport status with a specific, actionable meaning here.
  */
 function toMoveErrorMessage(error: unknown): string {
   if (error instanceof ApiError && error.kind === 'status' && error.status === 404) {
@@ -296,17 +318,105 @@ function toMoveErrorMessage(error: unknown): string {
 }
 
 /**
- * Reconcile a server move result into state. `result.actor.position` is
- * authoritative; for a refused step (`moved: false`) it is unchanged, so the
- * visible position does not move and no error is raised.
+ * Reconcile the authoritative event delta into entity state.
+ *
+ * - `transform.changed` updates exactly that entity; it never creates one.
+ * - `entity.spawned` adds (or replaces) the entity.
+ * - `entity.removed` drops the entity.
+ *
+ * An **empty** event list is the server refusing the command: it is not an error,
+ * the status stays `ready`, the error stays `null`, and nothing changes. Events
+ * that would produce no observable change are also ignored so the state object
+ * (and therefore the `useSyncExternalStore` snapshot) stays reference-stable.
+ *
+ * Exported as an internal seam only (it is deliberately **not** re-exported from
+ * the public `organizer/index.ts` surface): the transport's Protocol guards reject
+ * an unknown event `type` before it reaches here, so this function's defensive
+ * tolerance for an unrecognised event can only be exercised directly.
  */
-function applyMoveResult(result: MoveActorResult): void {
+export function applyEvents(events: readonly GameEvent[]): void {
+  if (events.length === 0) {
+    return;
+  }
+
+  const byId = new Map<string, EntityViewModel>();
+  for (const entity of state.entities) {
+    byId.set(entity.entityId, entity);
+  }
+
+  let changed = false;
+  for (const event of events) {
+    switch (event.type) {
+      case 'entity.spawned': {
+        const next = toEntityViewModel(event.entity);
+        const previous = byId.get(next.entityId);
+        if (previous === undefined || !entityEquals(previous, next)) {
+          byId.set(next.entityId, next);
+          changed = true;
+        }
+        break;
+      }
+      case 'entity.removed': {
+        if (byId.delete(event.entityId)) {
+          changed = true;
+        }
+        break;
+      }
+      case 'transform.changed': {
+        const previous = byId.get(event.entityId);
+        // Create nothing and invent nothing: an unknown entity is ignored.
+        if (
+          previous !== undefined &&
+          (previous.x !== event.transform.x || previous.y !== event.transform.y)
+        ) {
+          byId.set(event.entityId, {
+            ...previous,
+            x: event.transform.x,
+            y: event.transform.y,
+          });
+          changed = true;
+        }
+        break;
+      }
+      default: {
+        // Exhaustiveness guard on the server-sent union. The `never`
+        // assignment is what makes a future `GameEvent` member a *compile*
+        // error here until it is handled above: `event` is narrowed to `never`
+        // only when every member has a case.
+        //
+        // At *runtime* an unknown event is tolerated, not thrown: the server
+        // may legitimately add an event this client build does not understand
+        // yet, and one unrecognised delta must never crash the client or drop
+        // the rest of the batch. Skip it and keep applying the others.
+        const exhaustive: never = event;
+        void exhaustive;
+        break;
+      }
+    }
+  }
+
+  if (!changed) {
+    return;
+  }
+
   setState({
     status: 'ready',
     world: state.world,
-    controlledActor: toControlledActorViewModel(result.actor),
+    entities: [...byId.values()].sort(compareEntityViewModels),
+    controlledActorId: state.controlledActorId,
     error: null,
   });
+}
+
+function entityEquals(a: EntityViewModel, b: EntityViewModel): boolean {
+  return (
+    a.entityId === b.entityId &&
+    a.actorId === b.actorId &&
+    a.kind === b.kind &&
+    a.x === b.x &&
+    a.y === b.y &&
+    a.visible === b.visible
+  );
 }
 
 function setState(next: WorldState): void {

@@ -223,23 +223,194 @@ interface RouterDependencies { gameInfo; world; resolveActorId: ResolveActorId }
   an `UNAUTHORIZED`/`FORBIDDEN` error code (it would be unused until sessions exist — and the
   error-code -> HTTP status map is a total `Record`, so adding one is a compile-checked change).
 
-### Orchestrator surfaces after the migration
+### Orchestrator surfaces intentionally superseded in phase 4
+
+The phase-3 manager/organizer surfaces (`MoveActorInput`, `MoveActorCommand`/`MoveActorResult`,
+`ControlledActorViewModel`, `WorldState.controlledActor`) no longer exist: phase 4 replaced them
+with the primitive contract (`submitCommand`, `EntityState`, `WorldState.entities` +
+`controlledActorId`). See "Phase 4 frozen contract — primitive-driven architecture" above for the
+current surface; this section is kept only so the phase-3 history is not silently rewritten.
+
+## Phase 4 frozen contract — primitive-driven architecture (two instruction sets)
+
+A feature is now expressed by **composing primitives**, not by adding a bespoke endpoint pair
+per feature. There are exactly two instruction sets, and neither may know the other's
+implementation:
+
+- **Game Protocol** (`@starvalley/protocol`) — game-semantic primitives crossing client <-> server.
+  A real wire contract: serialized, guarded, versioned.
+- **Render Protocol** (`@starvalley/render-protocol`) — render primitives crossing
+  Organizer world state -> render runtime. **In-process, not serialized, not versioned, no
+  runtime guards** (guards exist for untrusted wire data; this ISA is typed in-process).
+
+Three.js is merely one **executor** of the Render Protocol. It is not part of any contract.
+
+### Game Protocol primitives
 
 ```ts
-// @starvalley/manager
-interface MoveActorInput { actorId: ActorId; command: MoveActorCommand }
-interface WorldManager {
-  getSnapshot(input: { actorId: ActorId }): WorldSnapshot
-  moveActor(input: MoveActorInput): MoveActorResult
-}
-class UnknownActorError extends Error { readonly actorId: ActorId }
-createWorldManager(deps?: { worldSize?; actorId?: ActorId; actorName?: string; clock? })
+// value objects
+Transform    { x: number; y: number }
+EntityKind   = 'character'                    // closed union, grows as features land
+EntityState  { entityId: EntityId; actorId: ActorId | null; kind: EntityKind;
+               transform: Transform; visible: boolean }
+WorldSnapshot { size: WorldSize; entities: EntityState[];
+                controlledActorId: ActorId | null; serverTime: string }
 
-// apps/web/src/organizer — UI-facing: the client sees the actor IT CONTROLS
-interface ControlledActorViewModel { actorId: string; name: string; x: number; y: number }
-interface WorldState { status; world: WorldViewModel | null; controlledActor: ControlledActorViewModel | null; error: string | null }
-function moveActor(direction: MoveDirection): Promise<void>   // was movePlayer
+// commands (discriminated union on `type`; no `action: string` + `args: unknown`)
+type GameCommand = ActorMoveCommand
+ActorMoveCommand { type: 'actor.move'; direction: MoveDirection }   // no actor field
+
+// events (discriminated union on `type`)
+type GameEvent = EntitySpawnedEvent | EntityRemovedEvent | TransformChangedEvent
+EntitySpawnedEvent    { type: 'entity.spawned';    entity: EntityState }
+EntityRemovedEvent    { type: 'entity.removed';    entityId: EntityId }
+TransformChangedEvent { type: 'transform.changed'; entityId: EntityId; transform: Transform }
+
+// transport
+WORLD_PATH    = '/api/world'     // GET  -> GetWorldResponse { world: WorldSnapshot }
+COMMAND_PATH  = '/api/command'   // POST GameCommand -> SubmitCommandResponse
+SubmitCommandResponse { events: GameEvent[]; serverTime: string }
 ```
+
+Rules that make it an instruction set rather than an RPC surface:
+
+- Every command and event is its own strongly-typed interface in a discriminated union. There
+  is no `action: string` and no `args: any`/`unknown` catch-all, ever.
+- **No rendering concept appears here**: no mesh, material, node, animation, camera, or colour.
+  `EntityKind` is a game label; what it *looks like* is decided by the render bridge.
+- **A refused command produces no events.** An empty `events` array *is* the refusal — there is
+  no `moved` boolean. A step into a wall changes nothing observable.
+- Events are the authoritative delta; the snapshot is full state (initial load and recovery).
+- `controlledActorId` states which actor the caller controls, instead of assuming a single
+  `actor` field — this removes the phase-2 single-actor assumption from the contract.
+- Adding an entity kind is a semantic change and (because guards are exact) a version bump;
+  `PROTOCOL_VERSION` goes 2 -> 3 for this reshape.
+
+### Render Protocol primitives (Render ISA)
+
+```ts
+NodeId, AppearanceId                  // nominal ids; a NodeId is NOT an EntityId
+RenderTransform { x: number; y: number }
+
+type RenderCommand =
+  | NodeCreate     { type: 'node.create';       nodeId; appearance: AppearanceId; transform; visible }
+  | NodeDestroy    { type: 'node.destroy';      nodeId }
+  | TransformSet   { type: 'transform.set';     nodeId; transform }
+  | TransformSetTarget { type: 'transform.setTarget'; nodeId; transform; durationMs: number }
+  | AppearanceSet  { type: 'appearance.set';    nodeId; appearance: AppearanceId }
+  | VisibilitySet  { type: 'visibility.set';    nodeId; visible: boolean }
+
+type RenderFrame = readonly RenderCommand[]    // an ordered diff, applied in order
+```
+
+Rules:
+
+- The ISA says *what the scene should contain*, never *how Three.js does it*. No `Object3D`,
+  no `Vector3`, no matrix, no material type appears in it.
+- `transform.set` is instant (spawn/teleport/snap); `transform.setTarget` + `durationMs` asks
+  the runtime to interpolate. Render-side interpolation of an **authoritative** position is not
+  client prediction.
+- Appearance is an opaque id: the runtime owns the catalogue, the bridge chooses ids, and the
+  bridge's emitted ids are asserted to be a subset of the runtime's known catalogue. (There is no
+  animation primitive: `animation.play`/`AnimationId` were deleted because nothing could drive
+  them and their only honest implementation was unobservable state.)
+- A runtime must handle every command exhaustively (a `switch` with a `never` check), so adding
+  a primitive is a compile error in every runtime until implemented.
+
+### Ownership and dependency direction after phase 4
+
+```
+apps/web/src/ui/            SceneView: canvas + wiring only
+   │  imports: ../organizer, ../render/bridge, ../render/three/runtime
+   ▼
+apps/web/src/render/bridge.ts          pure world state -> RenderFrame   (NO Three.js)
+   │  imports: ../organizer (barrel), @starvalley/render-protocol
+   ▼
+apps/web/src/render/three/runtime.ts   the ONLY module importing three
+   │  imports: @starvalley/render-protocol, three      (NEVER ../organizer)
+   ▼
+@starvalley/render-protocol            types only; framework-free
+```
+
+Enforced by `eslint.config.js`: the Render ISA may not import Three/React/Node/game protocol;
+the bridge may not import Three, the game protocol, the backend or UI components; the Three
+runtime may not import the Organizer (it must not know game semantics) and is the only place
+`three` is importable; the Organizer may not import the Render ISA or Three; UI may not import
+Three, the Render ISA, the game protocol, or Organizer internals.
+
+### Movement, expressed as primitive composition (the migration case)
+
+```
+UI click / keypress
+  -> organizer.moveActor(direction)                    [UI intent; no wire detail]
+  -> GameCommand { type: 'actor.move', direction }      [protocol]
+  -> POST COMMAND_PATH                                  [router]
+  -> manager.submitCommand({ actorId, command })         [authoritative rules]
+       -> GameEvent { type: 'transform.changed', entityId, transform }
+  -> organizer applies the event to its entity state
+  -> bridge: state -> RenderFrame
+       node.create (first sight) / transform.setTarget { durationMs }
+  -> three runtime applies the frame to the scene graph
+```
+
+Adding planting, NPCs, trees, items or animations should be new *kinds*, new commands, or new
+events composed from these primitives — not a new per-feature endpoint pair.
+
+### Primitive stability (Main's assessment at phase-4 close)
+
+Classification is by whether a producer exists **today**, not by whether the primitive is
+implemented.
+
+**Triggered by the current game (stable core):** `actor.move` (command), `transform.changed`
+(event), `node.create`, `transform.setTarget` (render). Movement is exactly this composition.
+
+**Wired but not yet triggered (real producers exist in code; current game state never changes
+the relevant field):**
+- `node.destroy` — emitted whenever an entity disappears from the entity list.
+- `visibility.set`, `appearance.set` — emitted by the bridge's diff of the per-entity fields
+  `visible` and `kind`, both of which the game contract already carries. Nothing flips them yet.
+
+**Deleted in this slice (no producer, no driving state):**
+- `animation.play` — there was no animation data, no clip catalogue and no entity field that
+  could drive it, and its runtime implementation wrote unobservable state. Keeping a primitive
+  whose only honest implementation is a silent no-op is exactly the over-abstraction this phase
+  asked to avoid. Re-adding it is additive and cheap (the Render ISA is in-process).
+
+**Declared with no producer, kept deliberately (with the cost stated):**
+- `transform.set` — the instant counterpart of `transform.setTarget`, needed the first time an
+  entity must be snapped rather than interpolated (respawn/teleport). `node.create` carries the
+  initial transform, so nothing emits it today. Unlike `animation.play` it *is* fully
+  implementable and observable (`inspect()` reads real node positions), so it is a reservation
+  rather than dead weight.
+- `entity.spawned` / `entity.removed` — no despawn and no runtime entity creation exist. Kept
+  because the snapshot cannot express "this went away" as a delta, and because a client that
+  cannot remove a node leaks it. Note the asymmetry: keeping them costs nothing at runtime, but
+  *deleting* them later is a `PROTOCOL_VERSION` bump because the game contract's guards are
+  exact.
+
+Rule going forward: a primitive with no driving state and no producer should be deleted, not
+kept "for completeness" — and a null implementation is a stronger delete signal than a missing
+producer.
+
+### Phase-4 known limitations and verified-risk gaps
+
+Recorded so they are not mistaken for solved problems:
+
+1. **A disposed render runtime is not re-mountable.** `mount()` is a no-op while already mounted,
+   but after `dispose()` a second `mount()` is unsupported (the scene composition it released is
+   not rebuilt). `SceneView` always constructs a fresh runtime per mount, so this is unreachable
+   today; the contract is documented in the runtime rather than guarded, because a guard cannot be
+   tested without a WebGL context and untested defensive code is its own liability.
+2. **Two sequential `WebGLRenderer`s on one canvas (React StrictMode remount) is unverified.**
+   jsdom has no WebGL, so this needs a manual browser check; `forceContextLoss()` is deliberately
+   not called. The code says so rather than claiming it is handled.
+3. **Canvas resize/aspect is unexercised by the test suite.** The uniform-scale projection fixes
+   the vertical extent at the world height and derives the horizontal extent from the canvas
+   aspect, so on a canvas narrower than the world's aspect ratio the world is horizontally
+   cropped rather than squashed. That is the intended trade-off (square tiles over full
+   visibility), and it needs a manual browser check.
+4. **`transform.set`, `entity.spawned` and `entity.removed` are declared with no producer** — see
+   the primitive-stability notes above for why each is kept.
 
 ### Reserved identity vocabulary vs. dead exports (Main decision)
 

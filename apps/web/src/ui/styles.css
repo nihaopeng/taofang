@@ -135,43 +135,24 @@ body {
   margin: 0 0 0.75rem;
 }
 
-.world__actor-name {
-  font-weight: 600;
-}
-
 .world__actor-coords {
   color: #b9a583;
   font-variant-numeric: tabular-nums;
 }
 
-.world__board {
-  position: relative;
-  display: grid;
-  grid-auto-rows: 1fr;
+/*
+ * The Three.js scene canvas. The grid and player marker that used to be DOM are
+ * gone: the world is now rendered by the Render ISA executor, and this canvas is
+ * just its surface. The fixed block size keeps the scene from collapsing before
+ * the renderer sets a backing-store size.
+ */
+.scene-view__canvas {
+  display: block;
   width: 100%;
-  max-width: 24rem;
+  height: 20rem;
   border: 1px solid #1d1710;
   border-radius: 0.4rem;
   background: #1a140e;
-  overflow: hidden;
-}
-
-.world__tile {
-  border: 1px solid #241c14;
-  background: #221a12;
-}
-
-.world__tile:nth-child(even) {
-  background: #261d14;
-}
-
-.world__actor {
-  position: absolute;
-  margin: -0.15rem;
-  border-radius: 0.2rem;
-  background: radial-gradient(circle at 35% 30%, #f6e6a8 0%, var(--leaf) 55%, #4f7a2c 100%);
-  box-shadow: 0 0 0.6rem rgb(143 191 90 / 70%);
-  pointer-events: none;
 }
 
 .world__loading {

@@ -1,18 +1,17 @@
 /**
- * Main-owned integration test for the phase-3 vertical slice:
- * World + Player actor + Movement, with the caller identity resolved at the
- * transport boundary.
+ * Main-owned integration test for the phase-4 primitive path.
  *
- * Like `game-info.test.ts` this deliberately imports a client module
- * (`apps/web/src/organizer`) together with backend modules
- * (`@starvalley/router`, `@starvalley/manager`). The dependency rules in
- * AGENTS.md forbid that inside module code; here it is the point — this is the
- * cross-module integration evidence Main is responsible for.
+ * Movement is asserted as a COMPOSITION OF PRIMITIVES, not as a bespoke endpoint:
+ *   UI intent -> GameCommand { type: 'actor.move' } -> POST COMMAND_PATH
+ *   -> Manager rules -> GameEvent { type: 'transform.changed' }
+ *   -> Organizer entity state
  *
- * It boots the real Router/Manager over `node:http` and drives the real
- * Organizer against it over an HTTP loopback, so the whole
- * `UI -> Organizer -> Protocol -> Router -> Manager -> Organizer` chain is
- * exercised with nothing mocked.
+ * It boots the real Router/Manager over `node:http` and drives the real Organizer
+ * against it over an HTTP loopback, so the whole
+ * `UI -> Organizer -> Protocol -> Router -> Manager -> Organizer` chain is exercised
+ * with nothing mocked. Importing a client module together with backend modules is
+ * forbidden inside module code (AGENTS.md) and is the point here: this is the
+ * cross-module integration evidence Main owns.
  */
 
 import { createServer } from 'node:http';
@@ -21,10 +20,12 @@ import type { Server } from 'node:http';
 import { createGameInfoManager, createWorldManager } from '@starvalley/manager';
 import type { WorldManager } from '@starvalley/manager';
 import {
-  MOVE_ACTOR_PATH,
+  COMMAND_PATH,
+  PROTOCOL_VERSION,
   WORLD_PATH,
   parseActorId,
   parseGetWorldResponse,
+  parseSubmitCommandResponse,
 } from '@starvalley/protocol';
 import type { ActorId } from '@starvalley/protocol';
 import { createRequestListener } from '@starvalley/router';
@@ -46,23 +47,14 @@ const ACTOR_ID = parseActorId('actor-1');
 let server: Server;
 let baseUrl: string;
 
-/**
- * The player's authoritative position is mutable server state, so each test gets
- * a fresh `WorldManager`. The listener is built once against this stable facade
- * rather than against one manager instance, which would leak position across
- * tests.
- */
+/** Fresh world per test: authoritative position is mutable server state. */
 let currentWorld: WorldManager;
 const world: WorldManager = {
   getSnapshot: (input) => currentWorld.getSnapshot(input),
-  moveActor: (input) => currentWorld.moveActor(input),
+  submitCommand: (input) => currentWorld.submitCommand(input),
 };
 
-/**
- * Stands in for the future session -> PlayerId -> controlled ActorId lookup.
- * Mutable so a test can prove that the *resolver* decides the actor, never the
- * request body.
- */
+/** Stands in for the future session -> PlayerId -> controlled ActorId lookup. */
 let currentActorId: ActorId;
 
 beforeEach(() => {
@@ -71,10 +63,9 @@ beforeEach(() => {
 });
 
 beforeAll(async () => {
-  const gameInfo = createGameInfoManager();
   server = createServer(
     createRequestListener({
-      gameInfo,
+      gameInfo: createGameInfoManager(),
       world,
       resolveActorId: () => currentActorId,
     }),
@@ -108,25 +99,34 @@ afterEach(() => {
   resetWorldFetch();
 });
 
-/** Route the Organizer's origin-relative Protocol paths at the test server. */
 function useRealServer(): void {
   setWorldFetch((input, init) => fetch(new URL(input, baseUrl), init));
 }
 
-function actorPosition(): { x: number; y: number } {
-  const { controlledActor } = getWorldState();
-  if (controlledActor === null) {
-    throw new Error('expected a loaded controlled actor');
+/** The transform of the actor this client controls, read from Organizer state. */
+function actorTransform(): { x: number; y: number } {
+  const { entities, controlledActorId } = getWorldState();
+  const entity = entities.find((candidate) => candidate.actorId === controlledActorId);
+  if (entity === undefined) {
+    throw new Error('expected a controlled actor entity');
   }
-  return { x: controlledActor.x, y: controlledActor.y };
+  return { x: entity.x, y: entity.y };
 }
 
 async function step(direction: MoveDirection): Promise<void> {
   await moveActor(direction);
 }
 
-describe('vertical slice: organizer -> protocol -> router -> manager (movement)', () => {
-  it('loads the authoritative world with the controlled actor at the world centre', async () => {
+async function postCommand(body: unknown): Promise<Response> {
+  return fetch(new URL(COMMAND_PATH, baseUrl), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+describe('vertical slice: movement as primitive composition', () => {
+  it('loads full state as a snapshot: entities + controlledActorId', async () => {
     useRealServer();
 
     await loadWorld();
@@ -135,12 +135,17 @@ describe('vertical slice: organizer -> protocol -> router -> manager (movement)'
     expect(state.status).toBe('ready');
     expect(state.error).toBeNull();
     expect(state.world).toEqual({ width: 12, height: 8 });
-    expect(state.controlledActor).not.toBeNull();
-    expect(state.controlledActor?.actorId).toBe('actor-1');
-    expect(actorPosition()).toEqual({ x: 6, y: 4 });
+    expect(state.controlledActorId).toBe('actor-1');
+
+    expect(state.entities).toHaveLength(1);
+    const entity = state.entities[0];
+    expect(entity?.actorId).toBe('actor-1');
+    expect(entity?.kind).toBe('character');
+    expect(entity?.visible).toBe(true);
+    expect({ x: entity?.x, y: entity?.y }).toEqual({ x: 6, y: 4 });
   });
 
-  it('moves the actor one tile east through the real request/response loop', async () => {
+  it('moves through the real chain and receives a transform.changed event', async () => {
     useRealServer();
     await loadWorld();
 
@@ -148,7 +153,25 @@ describe('vertical slice: organizer -> protocol -> router -> manager (movement)'
 
     expect(getWorldState().status).toBe('ready');
     expect(getWorldState().error).toBeNull();
-    expect(actorPosition()).toEqual({ x: 7, y: 4 });
+    expect(actorTransform()).toEqual({ x: 7, y: 4 });
+  });
+
+  it('emits exactly one transform.changed event on the wire for a successful step', async () => {
+    // Wire-level proof that movement is a primitive composition: the response is a
+    // GameEvent list, not a bespoke move result.
+    const response = await postCommand({ type: 'actor.move', direction: 'north' });
+    expect(response.status).toBe(200);
+
+    const body = parseSubmitCommandResponse(await response.json());
+    expect(body.events).toHaveLength(1);
+
+    const event = body.events[0];
+    expect(event?.type).toBe('transform.changed');
+    if (event?.type !== 'transform.changed') {
+      throw new Error('expected a transform.changed event');
+    }
+    expect(event.transform).toEqual({ x: 6, y: 3 });
+    expect(typeof body.serverTime).toBe('string');
   });
 
   it('applies each direction with the frozen deltas', async () => {
@@ -156,13 +179,13 @@ describe('vertical slice: organizer -> protocol -> router -> manager (movement)'
     await loadWorld();
 
     await step('south');
-    expect(actorPosition()).toEqual({ x: 6, y: 5 });
+    expect(actorTransform()).toEqual({ x: 6, y: 5 });
     await step('west');
-    expect(actorPosition()).toEqual({ x: 5, y: 5 });
+    expect(actorTransform()).toEqual({ x: 5, y: 5 });
     await step('north');
-    expect(actorPosition()).toEqual({ x: 5, y: 4 });
+    expect(actorTransform()).toEqual({ x: 5, y: 4 });
     await step('east');
-    expect(actorPosition()).toEqual({ x: 6, y: 4 });
+    expect(actorTransform()).toEqual({ x: 6, y: 4 });
   });
 
   it('observes the idle -> loading -> ready lifecycle against a real server', async () => {
@@ -178,53 +201,51 @@ describe('vertical slice: organizer -> protocol -> router -> manager (movement)'
     expect(observed).toEqual(['loading', 'ready']);
   });
 
-  it('refuses to leave the world with 200 + moved:false, without reporting an error', async () => {
+  it('expresses a refused step as an EMPTY event list, not an error', async () => {
     useRealServer();
     await loadWorld();
 
     for (let i = 0; i < 5; i += 1) {
       await step('east');
     }
-    expect(actorPosition()).toEqual({ x: 11, y: 4 });
+    expect(actorTransform()).toEqual({ x: 11, y: 4 });
 
+    // Wire level: the refusal carries no events and is still a 200.
+    const refused = await postCommand({ type: 'actor.move', direction: 'east' });
+    expect(refused.status).toBe(200);
+    expect(parseSubmitCommandResponse(await refused.json()).events).toEqual([]);
+
+    // Client level: nothing changes and no error is reported.
     await step('east');
-
     const state = getWorldState();
     expect(state.status).toBe('ready');
     expect(state.error).toBeNull();
-    expect(actorPosition()).toEqual({ x: 11, y: 4 });
+    expect(actorTransform()).toEqual({ x: 11, y: 4 });
 
     await step('west');
-    expect(actorPosition()).toEqual({ x: 10, y: 4 });
+    expect(actorTransform()).toEqual({ x: 10, y: 4 });
   });
 
-  it('rejects a command that tries to name the actor, because the body has no actor field', async () => {
-    // End-to-end proof of the authorization boundary at the wire level: the
-    // Organizer never sends an actor id, and the server rejects one if a client
-    // tries to supply it.
+  it('rejects a body that tries to name the actor or invent a command primitive', async () => {
     for (const body of [
-      { actorId: 'ghost', direction: 'north' },
+      { type: 'actor.move', actorId: 'ghost', direction: 'north' },
+      { type: 'actor.move', playerId: 'player-1', direction: 'north' },
+      { type: 'actor.dance', direction: 'north' },
       { playerId: 'player-1', direction: 'north' },
     ]) {
-      const response = await fetch(new URL(MOVE_ACTOR_PATH, baseUrl), {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(body),
-      });
+      const response = await postCommand(body);
       expect(response.status).toBe(400);
-      const payload: unknown = await response.json();
-      expect(payload).toEqual({
+      expect(await response.json()).toEqual({
         error: { code: 'BAD_REQUEST', message: expect.any(String) as unknown as string },
       });
     }
   });
 
-  it('resolves the actor from transport context, not from the client, and 404s an unknown one', async () => {
+  it('resolves the actor from transport context and 404s an unknown one', async () => {
     useRealServer();
     await loadWorld();
-    expect(actorPosition()).toEqual({ x: 6, y: 4 });
+    expect(actorTransform()).toEqual({ x: 6, y: 4 });
 
-    // Simulate a session that maps to an actor the world does not know.
     currentActorId = parseActorId('ghost-actor');
 
     await step('north');
@@ -232,28 +253,45 @@ describe('vertical slice: organizer -> protocol -> router -> manager (movement)'
     const state = getWorldState();
     expect(state.status).toBe('error');
     expect(state.error).not.toBeNull();
-    // The Organizer keeps the last authoritative world so the UI can still render.
+    // The last authoritative world is kept so the UI can still render.
     expect(state.world).toEqual({ width: 12, height: 8 });
-    expect(actorPosition()).toEqual({ x: 6, y: 4 });
+    expect(actorTransform()).toEqual({ x: 6, y: 4 });
   });
 
-  it('exposes the actor on the wire and no longer exposes a player', async () => {
+  it('serves the primitive snapshot shape and the identity-era protocol version', async () => {
     const response = await fetch(new URL(WORLD_PATH, baseUrl));
     expect(response.status).toBe(200);
 
     const parsed = parseGetWorldResponse(await response.json());
-    expect(parsed.world.size).toEqual({ width: 12, height: 8 });
-    expect(parsed.world.actor.actorId).toBe('actor-1');
-    expect(parsed.world.actor.position).toEqual({ x: 6, y: 4 });
-    expect(Object.keys(parsed.world).sort()).toEqual(['actor', 'serverTime', 'size']);
+    expect(Object.keys(parsed.world).sort()).toEqual([
+      'controlledActorId',
+      'entities',
+      'serverTime',
+      'size',
+    ]);
+    expect(parsed.world.controlledActorId).toBe('actor-1');
+    expect(parsed.world.entities).toHaveLength(1);
+    expect(Object.keys(parsed.world.entities[0] ?? {}).sort()).toEqual([
+      'actorId',
+      'entityId',
+      'kind',
+      'transform',
+      'visible',
+    ]);
+
+    const info = await fetch(new URL('/api/game-info', baseUrl));
+    const payload = (await info.json()) as { gameInfo: { protocolVersion: number } };
+    expect(payload.gameInfo.protocolVersion).toBe(PROTOCOL_VERSION);
   });
 
-  it('no longer serves the phase-2 player-named move path', async () => {
-    const response = await fetch(new URL('/api/player/move', baseUrl), {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ direction: 'east' }),
-    });
-    expect(response.status).toBe(404);
+  it('no longer serves any per-feature move endpoint', async () => {
+    for (const path of ['/api/actor/move', '/api/player/move']) {
+      const response = await fetch(new URL(path, baseUrl), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ direction: 'east' }),
+      });
+      expect(response.status).toBe(404);
+    }
   });
 });

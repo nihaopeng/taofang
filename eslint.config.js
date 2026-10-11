@@ -108,9 +108,10 @@ export default tseslint.config(
                 'vite',
                 '@starvalley/router',
                 '@starvalley/server',
+                '@starvalley/render-protocol',
               ],
               message:
-                'manager must not depend on HTTP/WebSocket frameworks or client code (AGENTS.md: Manager).',
+                'manager must not depend on HTTP/WebSocket frameworks, rendering, or client code (AGENTS.md: Manager).',
             },
           ],
         },
@@ -132,10 +133,11 @@ export default tseslint.config(
                 'three',
                 'vite',
                 '@starvalley/web',
+                '@starvalley/render-protocol',
                 'vitest',
               ],
               message:
-                'router/server must not depend on client code or test frameworks (AGENTS.md: Router).',
+                'router/server must not depend on client code, rendering, or test frameworks (AGENTS.md: Router).',
             },
           ],
         },
@@ -146,7 +148,7 @@ export default tseslint.config(
     // UI: presentation only. Must not know how the backend is called.
     // Covers all client files EXCEPT the Organizer (which owns transport).
     files: ['apps/web/src/**/*.{ts,tsx}'],
-    ignores: ['apps/web/src/organizer/**'],
+    ignores: ['apps/web/src/organizer/**', 'apps/web/src/render/**'],
     rules: {
       'no-restricted-imports': [
         'error',
@@ -158,11 +160,25 @@ export default tseslint.config(
                 '@starvalley/router',
                 '@starvalley/manager',
                 '@starvalley/server',
+                '@starvalley/render-protocol',
                 'node:*',
                 'axios',
+                '../organizer/*',
+                '../../*',
+                '../../../*',
+                '../../../../*',
               ],
               message:
-                'ui must consume the Organizer API only; it must not import wire/protocol or backend code (AGENTS.md: UI).',
+                'ui must consume the Organizer barrel and the render bridge/runtime only; importing wire/protocol, render-ISA, backend code, or Organizer internals is forbidden (AGENTS.md: UI).',
+            },
+            {
+              // NOTE: this MUST be a regex, not a `group` glob. `group` entries are
+              // matched gitignore-style, so a bare 'three' also matches the local
+              // *directory segment* in '../render/three/runtime' - the exact import
+              // the architecture requires. The regex pins the npm package only.
+              regex: '^three(/.*)?$',
+              message:
+                'ui must not import Three.js directly: it is an executor of the render ISA, reachable only through the injected render runtime (AGENTS.md: UI).',
             },
           ],
         },
@@ -220,31 +236,13 @@ export default tseslint.config(
             'ui must not send network beacons directly; use an Organizer action instead (AGENTS.md: UI).',
         },
       ],
-      // Identifier-based rules above are not sufficient: a UI file could import
-      // the Organizer's *internal* transport client (`../organizer/world-api-client`)
-      // or reach outside the client tree entirely, and then issue HTTP itself with
-      // no forbidden identifier in sight. Enforce the module surface instead: UI may
-      // import its own local modules and the Organizer barrel, nothing else.
+      // The specifier patterns above enforce the *module surface* (a UI file may
+      // import its own local modules, the Organizer barrel, and the render bridge/
+      // runtime — nothing else, including Organizer internals and deep relative
+      // escapes). What patterns cannot express is dynamic and computed access, so
+      // those forms are covered here.
       'no-restricted-syntax': [
         'error',
-        {
-          selector:
-            "ImportDeclaration[source.value=/^\\.\\.\\//]:not([source.value='../organizer'])",
-          message:
-            "ui may only reach the Organizer barrel ('../organizer'); importing Organizer internals, protocol, or backend sources is forbidden (AGENTS.md: UI).",
-        },
-        {
-          selector:
-            "ImportExpression[source.value=/^\\.\\.\\//]:not([source.value='../organizer'])",
-          message:
-            "ui may only reach the Organizer barrel ('../organizer'); dynamic imports of Organizer internals, protocol, or backend sources are forbidden (AGENTS.md: UI).",
-        },
-        {
-          selector:
-            "ExportNamedDeclaration[source.value=/^\\.\\.\\//]:not([source.value='../organizer'])",
-          message:
-            "ui may only re-export from the Organizer barrel ('../organizer') (AGENTS.md: UI).",
-        },
         {
           selector:
             "ImportExpression[source.value=/^(@starvalley\\/(protocol|router|manager|server)|node:|axios)$/]",
@@ -279,12 +277,95 @@ export default tseslint.config(
                 '@starvalley/router',
                 '@starvalley/manager',
                 '@starvalley/server',
+                '@starvalley/render-protocol',
+                'three',
                 'node:*',
+                '**/ui/**',
+                '**/render/**',
+                '../ui/*',
+              ],
+              message:
+                'organizer must not import backend implementation, rendering, or UI code (AGENTS.md: Organizer).',
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
+    // The render ISA itself: an instruction set, so it must stay framework-free.
+    files: ['packages/render-protocol/src/**/*.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['node:*', 'react', 'react-dom', 'three', 'three/*', 'vite', '@starvalley/*'],
+              message:
+                'the render ISA is executed by many possible runtimes: it must stay framework-free and dependency-free (no Three.js, no React, no Node, no game protocol).',
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
+    // Render bridge: pure game-state -> render-command mapping. Must not touch Three.js.
+    files: ['apps/web/src/render/**/*.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: [
+                'three',
+                'three/*',
+                './three',
+                './three/*',
+                '**/render/three/**',
+                'node:*',
+                '@starvalley/protocol',
+                '@starvalley/router',
+                '@starvalley/manager',
+                '@starvalley/server',
                 '**/ui/**',
                 '../ui/*',
               ],
               message:
-                'organizer must not import backend implementation or UI code (AGENTS.md: Organizer).',
+                'the render bridge maps Organizer state to render commands: it must not import Three.js (not even transitively via ./three/*), the game protocol, the backend, or UI components (only @starvalley/render-protocol and the Organizer barrel).',
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
+    // The ONLY place Three.js may be imported: it is the render ISA executor.
+    files: ['apps/web/src/render/three/**/*.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: [
+                'node:*',
+                '@starvalley/protocol',
+                '@starvalley/router',
+                '@starvalley/manager',
+                '@starvalley/server',
+                '**/organizer/**',
+                '../organizer',
+                '../../organizer',
+                '../bridge',
+                '../bridge/*',
+                '../*',
+                '../../*',
+              ],
+              message:
+                'the Three.js runtime only executes render primitives: it must not know game semantics (no game protocol, no Organizer state) and must not reach outside its own module (not even transitively via ../bridge).',
             },
           ],
         },
