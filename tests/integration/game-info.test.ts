@@ -18,6 +18,7 @@ import { createServer } from 'node:http';
 import type { Server } from 'node:http';
 
 import { createGameInfoManager } from '@starvalley/manager';
+import { GAME_INFO_PATH } from '@starvalley/protocol';
 import { createRequestListener } from '@starvalley/router';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 
@@ -113,6 +114,7 @@ describe('vertical slice: organizer -> protocol -> router -> manager', () => {
   });
 
   it('surfaces a real 404 as a user-presentable error without leaking transport detail', async () => {
+    // Deliberately a path that must not exist: literal is intentional here.
     useRealServer('/api/does-not-exist');
 
     await loadGameInfo();
@@ -127,7 +129,7 @@ describe('vertical slice: organizer -> protocol -> router -> manager', () => {
   it('keeps the client view model small while the server sends the full DTO', async () => {
     // Directly assert the wire shape the Organizer validated, using the same
     // transport boundary the browser uses (the Vite dev proxy path).
-    const response = await fetch(new URL('/api/game-info', baseUrl));
+    const response = await fetch(new URL(GAME_INFO_PATH, baseUrl));
     expect(response.status).toBe(200);
     expect(response.headers.get('content-type')).toBe('application/json; charset=utf-8');
 
