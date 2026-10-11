@@ -6,7 +6,7 @@
  * codes, headers, sockets) lives in Router.
  */
 
-export { GAME_INFO_PATH, HEALTH_PATH, PLAYER_MOVE_PATH, PROTOCOL_VERSION, WORLD_PATH } from './constants.ts';
+export { GAME_INFO_PATH, HEALTH_PATH, MOVE_ACTOR_PATH, PROTOCOL_VERSION, WORLD_PATH } from './constants.ts';
 
 export { ProtocolParseError, toProtocolError } from './errors.ts';
 export type { ProtocolError, ProtocolErrorCode } from './errors.ts';
@@ -23,38 +23,47 @@ export { isHealthStatus, parseHealthStatus } from './health.ts';
 export type { HealthStatus } from './health.ts';
 
 export {
+  isActorId,
+  isEntityId,
+  isPlayerId,
+  parseActorId,
+  parseEntityId,
+  parsePlayerId,
+} from './identity.ts';
+export type { ActorId, EntityId, PlayerId } from './identity.ts';
+
+export {
+  isMoveActorCommand,
+  isMoveActorResponse,
+  isMoveActorResult,
   isMoveDirection,
-  isMovePlayerCommand,
-  isMovePlayerResponse,
-  isMovePlayerResult,
+  parseMoveActorCommand,
+  parseMoveActorResponse,
+  parseMoveActorResult,
   parseMoveDirection,
-  parseMovePlayerCommand,
-  parseMovePlayerResponse,
-  parseMovePlayerResult,
 } from './movement.ts';
 export type {
+  MoveActorCommand,
+  MoveActorResponse,
+  MoveActorResult,
   MoveDirection,
-  MovePlayerCommand,
-  MovePlayerResponse,
-  MovePlayerResult,
 } from './movement.ts';
 
 export {
+  isActor,
   isGetWorldResponse,
-  isPlayer,
   isPosition,
   isWorldSize,
   isWorldSnapshot,
+  parseActor,
   parseGetWorldResponse,
-  parsePlayer,
   parsePosition,
   parseWorldSize,
   parseWorldSnapshot,
 } from './world.ts';
 export type {
+  Actor,
   GetWorldResponse,
-  Player,
-  PlayerId,
   Position,
   WorldSize,
   WorldSnapshot,

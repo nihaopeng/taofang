@@ -1,15 +1,18 @@
 import { describe, expect, it } from 'vitest';
 
-import { isMovePlayerResult, isWorldSnapshot } from '@starvalley/protocol';
-import type { MoveDirection } from '@starvalley/protocol';
+import { isMoveActorResult, isWorldSnapshot, parseActorId } from '@starvalley/protocol';
+import type { ActorId, MoveDirection } from '@starvalley/protocol';
 
 import {
   DEFAULT_WORLD_SIZE,
-  UnknownPlayerError,
+  UnknownActorError,
   createWorldManager,
 } from '../src/index.ts';
 
 const START = new Date('2025-01-02T03:04:05.000Z');
+
+/** The default known actor id, produced through the protocol parser (branded). */
+const ACTOR_ID = parseActorId('actor-1');
 
 /** Deterministic, mutable clock for exercising time-dependent semantics. */
 function fakeClock(start: Date) {
@@ -29,13 +32,13 @@ describe('DEFAULT_WORLD_SIZE', () => {
 });
 
 describe('createWorldManager defaults', () => {
-  it('starts the player at the world centre', () => {
+  it('starts the actor at the world centre', () => {
     const manager = createWorldManager();
 
-    expect(manager.getSnapshot()).toEqual({
+    expect(manager.getSnapshot({ actorId: ACTOR_ID })).toEqual({
       size: { width: 12, height: 8 },
-      player: {
-        id: 'player-1',
+      actor: {
+        actorId: 'actor-1',
         name: 'Player',
         position: { x: 6, y: 4 },
       },
@@ -45,21 +48,40 @@ describe('createWorldManager defaults', () => {
 
   it('snapshot is Protocol-valid', () => {
     const manager = createWorldManager();
-    expect(isWorldSnapshot(manager.getSnapshot())).toBe(true);
+    expect(isWorldSnapshot(manager.getSnapshot({ actorId: ACTOR_ID }))).toBe(true);
   });
 
-  it('honours custom worldSize, playerId and playerName', () => {
+  it('uses the branded ActorId from parseActorId as the default identity', () => {
+    const manager = createWorldManager();
+    const { actor } = manager.getSnapshot({ actorId: ACTOR_ID });
+
+    // The branded value parsed from the same string is accepted and echoed back.
+    expect(actor.actorId).toBe(ACTOR_ID);
+    expect(actor.actorId).toBe(parseActorId('actor-1'));
+  });
+
+  it('honours custom worldSize, actorId and actorName', () => {
+    const customActorId = parseActorId('farmer-42');
     const manager = createWorldManager({
       worldSize: { width: 5, height: 3 },
-      playerId: 'farmer-42',
-      playerName: 'Abigail',
+      actorId: customActorId,
+      actorName: 'Abigail',
     });
 
-    expect(manager.getSnapshot()).toEqual({
+    expect(manager.getSnapshot({ actorId: customActorId })).toEqual({
       size: { width: 5, height: 3 },
-      player: { id: 'farmer-42', name: 'Abigail', position: { x: 2, y: 1 } },
+      actor: { actorId: 'farmer-42', name: 'Abigail', position: { x: 2, y: 1 } },
       serverTime: expect.any(String),
     });
+  });
+
+  it('returns a snapshot shaped as { size, actor, serverTime } with no player key', () => {
+    const manager = createWorldManager();
+    const snapshot = manager.getSnapshot({ actorId: ACTOR_ID });
+
+    expect(Object.keys(snapshot).sort()).toEqual(['actor', 'serverTime', 'size'].sort());
+    expect('player' in snapshot).toBe(false);
+    expect(snapshot).not.toHaveProperty('player');
   });
 });
 
@@ -89,17 +111,17 @@ describe('movement in each direction', () => {
     const clock = fakeClock(START);
     const manager = createWorldManager({ clock: clock.now });
 
-    const result = manager.movePlayer({ playerId: 'player-1', direction });
+    const result = manager.moveActor({ actorId: ACTOR_ID, command: { direction } });
 
     expect(result).toEqual({
-      player: { id: 'player-1', name: 'Player', position: to },
+      actor: { actorId: 'actor-1', name: 'Player', position: to },
       moved: true,
       serverTime: START.toISOString(),
     });
-    expect(isMovePlayerResult(result)).toBe(true);
+    expect(isMoveActorResult(result)).toBe(true);
 
     // Authoritative state advanced too.
-    expect(manager.getSnapshot().player.position).toEqual(to);
+    expect(manager.getSnapshot({ actorId: ACTOR_ID }).actor.position).toEqual(to);
     // The starting centre is what we expected.
     expect(from).toEqual({ x: 6, y: 4 });
   });
@@ -110,95 +132,133 @@ describe('edge refusal', () => {
     const clock = fakeClock(START);
     const manager = createWorldManager({ worldSize: { width: 3, height: 3 }, clock: clock.now });
     // Centre is (1,1). Walk west once to x=0.
-    expect(manager.movePlayer({ playerId: 'player-1', direction: 'west' }).moved).toBe(true);
+    expect(manager.moveActor({ actorId: ACTOR_ID, command: { direction: 'west' } }).moved).toBe(true);
 
-    const refused = manager.movePlayer({ playerId: 'player-1', direction: 'west' });
+    const refused = manager.moveActor({ actorId: ACTOR_ID, command: { direction: 'west' } });
 
     expect(refused).toEqual({
-      player: { id: 'player-1', name: 'Player', position: { x: 0, y: 1 } },
+      actor: { actorId: 'actor-1', name: 'Player', position: { x: 0, y: 1 } },
       moved: false,
       serverTime: START.toISOString(),
     });
-    expect(manager.getSnapshot().player.position).toEqual({ x: 0, y: 1 });
+    expect(manager.getSnapshot({ actorId: ACTOR_ID }).actor.position).toEqual({ x: 0, y: 1 });
 
     // Recoverable: a valid move still works.
-    expect(manager.movePlayer({ playerId: 'player-1', direction: 'east' }).moved).toBe(true);
-    expect(manager.getSnapshot().player.position).toEqual({ x: 1, y: 1 });
+    expect(manager.moveActor({ actorId: ACTOR_ID, command: { direction: 'east' } }).moved).toBe(true);
+    expect(manager.getSnapshot({ actorId: ACTOR_ID }).actor.position).toEqual({ x: 1, y: 1 });
   });
 
   it('refuses an east step at x=width-1, leaves position unchanged, and stays recoverable', () => {
     const manager = createWorldManager({ worldSize: { width: 3, height: 3 } });
-    expect(manager.movePlayer({ playerId: 'player-1', direction: 'east' }).moved).toBe(true); // x=2
+    expect(manager.moveActor({ actorId: ACTOR_ID, command: { direction: 'east' } }).moved).toBe(true); // x=2
 
-    const refused = manager.movePlayer({ playerId: 'player-1', direction: 'east' });
+    const refused = manager.moveActor({ actorId: ACTOR_ID, command: { direction: 'east' } });
 
     expect(refused.moved).toBe(false);
-    expect(refused.player.position).toEqual({ x: 2, y: 1 });
-    expect(manager.getSnapshot().player.position).toEqual({ x: 2, y: 1 });
+    expect(refused.actor.position).toEqual({ x: 2, y: 1 });
+    expect(manager.getSnapshot({ actorId: ACTOR_ID }).actor.position).toEqual({ x: 2, y: 1 });
 
-    expect(manager.movePlayer({ playerId: 'player-1', direction: 'west' }).moved).toBe(true);
-    expect(manager.getSnapshot().player.position).toEqual({ x: 1, y: 1 });
+    expect(manager.moveActor({ actorId: ACTOR_ID, command: { direction: 'west' } }).moved).toBe(true);
+    expect(manager.getSnapshot({ actorId: ACTOR_ID }).actor.position).toEqual({ x: 1, y: 1 });
   });
 
   it('refuses a north step at y=0, leaves position unchanged, and stays recoverable', () => {
     const manager = createWorldManager({ worldSize: { width: 3, height: 3 } });
-    expect(manager.movePlayer({ playerId: 'player-1', direction: 'north' }).moved).toBe(true); // y=0
+    expect(manager.moveActor({ actorId: ACTOR_ID, command: { direction: 'north' } }).moved).toBe(true); // y=0
 
-    const refused = manager.movePlayer({ playerId: 'player-1', direction: 'north' });
+    const refused = manager.moveActor({ actorId: ACTOR_ID, command: { direction: 'north' } });
 
     expect(refused.moved).toBe(false);
-    expect(refused.player.position).toEqual({ x: 1, y: 0 });
-    expect(manager.getSnapshot().player.position).toEqual({ x: 1, y: 0 });
+    expect(refused.actor.position).toEqual({ x: 1, y: 0 });
+    expect(manager.getSnapshot({ actorId: ACTOR_ID }).actor.position).toEqual({ x: 1, y: 0 });
 
-    expect(manager.movePlayer({ playerId: 'player-1', direction: 'south' }).moved).toBe(true);
-    expect(manager.getSnapshot().player.position).toEqual({ x: 1, y: 1 });
+    expect(manager.moveActor({ actorId: ACTOR_ID, command: { direction: 'south' } }).moved).toBe(true);
+    expect(manager.getSnapshot({ actorId: ACTOR_ID }).actor.position).toEqual({ x: 1, y: 1 });
   });
 
   it('refuses a south step at y=height-1, leaves position unchanged, and stays recoverable', () => {
     const manager = createWorldManager({ worldSize: { width: 3, height: 3 } });
-    expect(manager.movePlayer({ playerId: 'player-1', direction: 'south' }).moved).toBe(true); // y=2
+    expect(manager.moveActor({ actorId: ACTOR_ID, command: { direction: 'south' } }).moved).toBe(true); // y=2
 
-    const refused = manager.movePlayer({ playerId: 'player-1', direction: 'south' });
+    const refused = manager.moveActor({ actorId: ACTOR_ID, command: { direction: 'south' } });
 
     expect(refused.moved).toBe(false);
-    expect(refused.player.position).toEqual({ x: 1, y: 2 });
-    expect(manager.getSnapshot().player.position).toEqual({ x: 1, y: 2 });
+    expect(refused.actor.position).toEqual({ x: 1, y: 2 });
+    expect(manager.getSnapshot({ actorId: ACTOR_ID }).actor.position).toEqual({ x: 1, y: 2 });
 
-    expect(manager.movePlayer({ playerId: 'player-1', direction: 'north' }).moved).toBe(true);
-    expect(manager.getSnapshot().player.position).toEqual({ x: 1, y: 1 });
+    expect(manager.moveActor({ actorId: ACTOR_ID, command: { direction: 'north' } }).moved).toBe(true);
+    expect(manager.getSnapshot({ actorId: ACTOR_ID }).actor.position).toEqual({ x: 1, y: 1 });
   });
 
   it('does not throw for an out-of-bounds step', () => {
     const manager = createWorldManager({ worldSize: { width: 1, height: 1 } });
-    expect(() => manager.movePlayer({ playerId: 'player-1', direction: 'north' })).not.toThrow();
-    expect(manager.movePlayer({ playerId: 'player-1', direction: 'north' }).moved).toBe(false);
+    expect(() => manager.moveActor({ actorId: ACTOR_ID, command: { direction: 'north' } })).not.toThrow();
+    expect(manager.moveActor({ actorId: ACTOR_ID, command: { direction: 'north' } }).moved).toBe(false);
   });
 });
 
-describe('UnknownPlayerError', () => {
-  it('throws for a non-matching playerId and populates playerId', () => {
+describe('UnknownActorError', () => {
+  it('moveActor throws for a non-matching actorId and populates actorId', () => {
     const manager = createWorldManager();
+    const ghost = parseActorId('ghost');
 
     let caught: unknown;
     try {
-      manager.movePlayer({ playerId: 'ghost', direction: 'north' });
+      manager.moveActor({ actorId: ghost, command: { direction: 'north' } });
     } catch (error) {
       caught = error;
     }
 
-    expect(caught).toBeInstanceOf(UnknownPlayerError);
-    const error = caught as UnknownPlayerError;
-    expect(error.name).toBe('UnknownPlayerError');
-    expect(error.playerId).toBe('ghost');
+    expect(caught).toBeInstanceOf(UnknownActorError);
+    const error = caught as UnknownActorError;
+    expect(error.name).toBe('UnknownActorError');
+    expect(error.actorId).toBe('ghost');
   });
 
-  it('accepts the configured playerId even when overridden', () => {
-    const manager = createWorldManager({ playerId: 'farmer-7' });
+  it('getSnapshot throws for a non-matching actorId and populates actorId', () => {
+    const manager = createWorldManager();
+    const ghost = parseActorId('ghost');
 
-    expect(() => manager.movePlayer({ playerId: 'player-1', direction: 'north' })).toThrow(
-      UnknownPlayerError,
-    );
-    expect(manager.movePlayer({ playerId: 'farmer-7', direction: 'north' }).moved).toBe(true);
+    let caught: unknown;
+    try {
+      manager.getSnapshot({ actorId: ghost });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(UnknownActorError);
+    const error = caught as UnknownActorError;
+    expect(error.name).toBe('UnknownActorError');
+    expect(error.actorId).toBe(ghost);
+  });
+
+  it('accepts the configured actorId even when overridden', () => {
+    const customActorId = parseActorId('farmer-7');
+    const manager = createWorldManager({ actorId: customActorId });
+
+    expect(() =>
+      manager.moveActor({ actorId: ACTOR_ID, command: { direction: 'north' } }),
+    ).toThrow(UnknownActorError);
+    expect(() => manager.getSnapshot({ actorId: ACTOR_ID })).toThrow(UnknownActorError);
+    expect(
+      manager.moveActor({ actorId: customActorId, command: { direction: 'north' } }).moved,
+    ).toBe(true);
+  });
+});
+
+describe('typed-input actor scoping', () => {
+  it('uses the ActorId from the typed input, not the command', () => {
+    const customActorId = parseActorId('farmer-7');
+    const manager = createWorldManager({ actorId: customActorId });
+
+    const result = manager.moveActor({ actorId: customActorId, command: { direction: 'east' } });
+    expect(result.actor.actorId).toBe(customActorId);
+
+    const snapshot = manager.getSnapshot({ actorId: customActorId });
+    expect(snapshot.actor.actorId).toBe(customActorId);
+    // The branded value survives the round-trip.
+    const actorIdAsActorId: ActorId = snapshot.actor.actorId;
+    expect(actorIdAsActorId).toBe(customActorId);
   });
 });
 
@@ -207,21 +267,21 @@ describe('serverTime', () => {
     const clock = fakeClock(START);
     const manager = createWorldManager({ clock: clock.now });
 
-    expect(manager.getSnapshot().serverTime).toBe('2025-01-02T03:04:05.000Z');
+    expect(manager.getSnapshot({ actorId: ACTOR_ID }).serverTime).toBe('2025-01-02T03:04:05.000Z');
 
     clock.advance(1_000);
-    expect(manager.movePlayer({ playerId: 'player-1', direction: 'north' }).serverTime).toBe(
-      '2025-01-02T03:04:06.000Z',
-    );
+    expect(
+      manager.moveActor({ actorId: ACTOR_ID, command: { direction: 'north' } }).serverTime,
+    ).toBe('2025-01-02T03:04:06.000Z');
 
     // A refused step still stamps the call time.
     const edgeManager = createWorldManager({ worldSize: { width: 1, height: 1 }, clock: clock.now });
-    const refused = edgeManager.movePlayer({ playerId: 'player-1', direction: 'north' });
+    const refused = edgeManager.moveActor({ actorId: ACTOR_ID, command: { direction: 'north' } });
     expect(refused.moved).toBe(false);
     expect(refused.serverTime).toBe('2025-01-02T03:04:06.000Z');
 
     clock.advance(1_000);
-    expect(manager.getSnapshot().serverTime).toBe('2025-01-02T03:04:07.000Z');
+    expect(manager.getSnapshot({ actorId: ACTOR_ID }).serverTime).toBe('2025-01-02T03:04:07.000Z');
   });
 });
 
@@ -229,14 +289,14 @@ describe('defensive copies', () => {
   it('mutating a snapshot does not corrupt authoritative state', () => {
     const manager = createWorldManager();
 
-    const snapshot = manager.getSnapshot();
-    snapshot.player.position.x = 999;
-    snapshot.player.name = 'Hacked';
+    const snapshot = manager.getSnapshot({ actorId: ACTOR_ID });
+    snapshot.actor.position.x = 999;
+    snapshot.actor.name = 'Hacked';
     snapshot.size.width = 999;
 
-    expect(manager.getSnapshot()).toEqual({
+    expect(manager.getSnapshot({ actorId: ACTOR_ID })).toEqual({
       size: { width: 12, height: 8 },
-      player: { id: 'player-1', name: 'Player', position: { x: 6, y: 4 } },
+      actor: { actorId: 'actor-1', name: 'Player', position: { x: 6, y: 4 } },
       serverTime: expect.any(String),
     });
   });
@@ -244,27 +304,26 @@ describe('defensive copies', () => {
   it('mutating a move result does not corrupt authoritative state', () => {
     const manager = createWorldManager();
 
-    const result = manager.movePlayer({ playerId: 'player-1', direction: 'east' });
-    result.player.position.x = -50;
-    result.player.position.y = -50;
+    const result = manager.moveActor({ actorId: ACTOR_ID, command: { direction: 'east' } });
+    result.actor.position.x = -50;
+    result.actor.position.y = -50;
     result.moved = false;
 
-    const snapshot = manager.getSnapshot();
-    expect(snapshot.player.position).toEqual({ x: 7, y: 4 });
+    const snapshot = manager.getSnapshot({ actorId: ACTOR_ID });
+    expect(snapshot.actor.position).toEqual({ x: 7, y: 4 });
 
     // The manager still advances correctly afterwards.
-    expect(manager.movePlayer({ playerId: 'player-1', direction: 'east' }).player.position).toEqual({
-      x: 8,
-      y: 4,
-    });
+    expect(
+      manager.moveActor({ actorId: ACTOR_ID, command: { direction: 'east' } }).actor.position,
+    ).toEqual({ x: 8, y: 4 });
   });
 
   it('returns fresh nested position objects each read', () => {
     const manager = createWorldManager();
-    const first = manager.getSnapshot();
-    const second = manager.getSnapshot();
-    expect(first.player.position).not.toBe(second.player.position);
-    expect(first.player).not.toBe(second.player);
+    const first = manager.getSnapshot({ actorId: ACTOR_ID });
+    const second = manager.getSnapshot({ actorId: ACTOR_ID });
+    expect(first.actor.position).not.toBe(second.actor.position);
+    expect(first.actor).not.toBe(second.actor);
     expect(first.size).not.toBe(second.size);
   });
 });
@@ -274,12 +333,12 @@ describe('manager instances', () => {
     const a = createWorldManager();
     const b = createWorldManager({ worldSize: { width: 4, height: 4 } });
 
-    a.movePlayer({ playerId: 'player-1', direction: 'east' });
-    a.movePlayer({ playerId: 'player-1', direction: 'east' });
+    a.moveActor({ actorId: ACTOR_ID, command: { direction: 'east' } });
+    a.moveActor({ actorId: ACTOR_ID, command: { direction: 'east' } });
 
-    expect(a.getSnapshot().player.position).toEqual({ x: 8, y: 4 });
-    expect(b.getSnapshot().player.position).toEqual({ x: 2, y: 2 });
-    expect(a.getSnapshot().size).toEqual({ width: 12, height: 8 });
-    expect(b.getSnapshot().size).toEqual({ width: 4, height: 4 });
+    expect(a.getSnapshot({ actorId: ACTOR_ID }).actor.position).toEqual({ x: 8, y: 4 });
+    expect(b.getSnapshot({ actorId: ACTOR_ID }).actor.position).toEqual({ x: 2, y: 2 });
+    expect(a.getSnapshot({ actorId: ACTOR_ID }).size).toEqual({ width: 12, height: 8 });
+    expect(b.getSnapshot({ actorId: ACTOR_ID }).size).toEqual({ width: 4, height: 4 });
   });
 });

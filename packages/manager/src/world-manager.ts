@@ -1,13 +1,14 @@
 import type {
+  Actor,
+  ActorId,
+  MoveActorCommand,
+  MoveActorResult,
   MoveDirection,
-  MovePlayerCommand,
-  MovePlayerResult,
-  Player,
-  PlayerId,
   Position,
   WorldSize,
   WorldSnapshot,
 } from '@starvalley/protocol';
+import { parseActorId } from '@starvalley/protocol';
 
 /**
  * Default authoritative world dimensions for this slice.
@@ -17,8 +18,8 @@ import type {
  */
 export const DEFAULT_WORLD_SIZE: WorldSize = { width: 12, height: 8 };
 
-const DEFAULT_PLAYER_ID: PlayerId = 'player-1';
-const DEFAULT_PLAYER_NAME = 'Player';
+const DEFAULT_ACTOR_ID: ActorId = parseActorId('actor-1');
+const DEFAULT_ACTOR_NAME = 'Player';
 
 /**
  * Cardinal direction deltas. Origin is top-left: `north` decreases `y`, `east`
@@ -32,41 +33,55 @@ const DIRECTION_DELTAS: Record<MoveDirection, Position> = {
 };
 
 /**
- * Thrown when a move targets a player the manager does not know about.
+ * Thrown when an operation names an actor the manager does not know about.
  *
  * Transport maps this to `NOT_FOUND`; the manager itself stays transport-free.
  */
-export class UnknownPlayerError extends Error {
-  readonly playerId: PlayerId;
+export class UnknownActorError extends Error {
+  readonly actorId: ActorId;
 
-  constructor(playerId: PlayerId) {
-    super(`Unknown player: ${playerId}`);
-    this.name = 'UnknownPlayerError';
-    this.playerId = playerId;
+  constructor(actorId: ActorId) {
+    super(`Unknown actor: ${actorId}`);
+    this.name = 'UnknownActorError';
+    this.actorId = actorId;
   }
 }
 
-/** Read-only, transport-neutral access to the authoritative world state. */
+/**
+ * Typed input for {@link WorldManager.moveActor}: the actor identity comes only
+ * from this out-of-band input, never from `command` (which has no actor field).
+ */
+export interface MoveActorInput {
+  actorId: ActorId;
+  command: MoveActorCommand;
+}
+
+/**
+ * Read-only, transport-neutral access to the authoritative world state.
+ *
+ * Every operation is scoped to an actor supplied as typed input; there is no
+ * implicit "current actor".
+ */
 export interface WorldManager {
-  /** Point-in-time authoritative world + player view. Always a fresh object. */
-  getSnapshot(): WorldSnapshot;
+  /** Point-in-time authoritative world + actor view for `input.actorId`. Always a fresh object. */
+  getSnapshot(input: { actorId: ActorId }): WorldSnapshot;
   /**
-   * Attempt to step the player one tile in `command.direction`.
+   * Attempt to step `input.actorId` one tile in `input.command.direction`.
    *
    * A step that would leave the world is refused (`moved: false`) with the
-   * unchanged position; it is not an error. Unknown players throw.
+   * unchanged position; it is not an error. Unknown actors throw.
    */
-  movePlayer(command: MovePlayerCommand): MovePlayerResult;
+  moveActor(input: MoveActorInput): MoveActorResult;
 }
 
 /** Construction-time dependencies for {@link createWorldManager}. */
 export interface CreateWorldManagerDeps {
   /** World dimensions. Defaults to {@link DEFAULT_WORLD_SIZE}. */
   worldSize?: WorldSize;
-  /** Identifier of the single local player. Defaults to `'player-1'`. */
-  playerId?: PlayerId;
-  /** Display name of the single local player. Defaults to `'Player'`. */
-  playerName?: string;
+  /** Identifier of the single known actor. Defaults to `parseActorId('actor-1')`. */
+  actorId?: ActorId;
+  /** Display name of the single known actor. Defaults to `'Player'`. */
+  actorName?: string;
   /** Time source. Defaults to `() => new Date()`. */
   clock?: () => Date;
 }
@@ -81,8 +96,8 @@ function assertPositiveInteger(value: number, field: string): void {
  * Create an authoritative `WorldManager`.
  *
  * Pure, synchronous, in-memory: no I/O, no transport, no persistence. The world
- * size, identity strings, and clock are captured at creation; the player starts
- * at the world centre. All returned DTOs are defensive copies so callers cannot
+ * size, actor identity, and clock are captured at creation; the actor starts at
+ * the world centre. All returned DTOs are defensive copies so callers cannot
  * mutate authoritative state.
  */
 export function createWorldManager(deps: CreateWorldManagerDeps = {}): WorldManager {
@@ -91,8 +106,8 @@ export function createWorldManager(deps: CreateWorldManagerDeps = {}): WorldMana
   assertPositiveInteger(requested.height, 'height');
   const size: WorldSize = { width: requested.width, height: requested.height };
 
-  const playerId = deps.playerId ?? DEFAULT_PLAYER_ID;
-  const playerName = deps.playerName ?? DEFAULT_PLAYER_NAME;
+  const actorId = deps.actorId ?? DEFAULT_ACTOR_ID;
+  const actorName = deps.actorName ?? DEFAULT_ACTOR_NAME;
   const clock = deps.clock ?? ((): Date => new Date());
 
   // Single authoritative position. Never handed out directly.
@@ -101,27 +116,31 @@ export function createWorldManager(deps: CreateWorldManagerDeps = {}): WorldMana
     y: Math.floor(size.height / 2),
   };
 
-  const playerSnapshot = (): Player => ({
-    id: playerId,
-    name: playerName,
+  const actorSnapshot = (): Actor => ({
+    actorId,
+    name: actorName,
     position: { x: position.x, y: position.y },
   });
 
   return {
-    getSnapshot(): WorldSnapshot {
+    getSnapshot(input: { actorId: ActorId }): WorldSnapshot {
+      if (input.actorId !== actorId) {
+        throw new UnknownActorError(input.actorId);
+      }
+
       return {
         size: { width: size.width, height: size.height },
-        player: playerSnapshot(),
+        actor: actorSnapshot(),
         serverTime: clock().toISOString(),
       };
     },
 
-    movePlayer(command: MovePlayerCommand): MovePlayerResult {
-      if (command.playerId !== playerId) {
-        throw new UnknownPlayerError(command.playerId);
+    moveActor(input: MoveActorInput): MoveActorResult {
+      if (input.actorId !== actorId) {
+        throw new UnknownActorError(input.actorId);
       }
 
-      const delta = DIRECTION_DELTAS[command.direction];
+      const delta = DIRECTION_DELTAS[input.command.direction];
       const targetX = position.x + delta.x;
       const targetY = position.y + delta.y;
       const serverTime = clock().toISOString();
@@ -130,12 +149,12 @@ export function createWorldManager(deps: CreateWorldManagerDeps = {}): WorldMana
         targetX < 0 || targetX >= size.width || targetY < 0 || targetY >= size.height;
 
       if (outOfBounds) {
-        return { player: playerSnapshot(), moved: false, serverTime };
+        return { actor: actorSnapshot(), moved: false, serverTime };
       }
 
       position.x = targetX;
       position.y = targetY;
-      return { player: playerSnapshot(), moved: true, serverTime };
+      return { actor: actorSnapshot(), moved: true, serverTime };
     },
   };
 }

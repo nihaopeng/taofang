@@ -1,4 +1,5 @@
 import { createServer } from 'node:http';
+import { parseActorId } from '@starvalley/protocol';
 import { createGameInfoManager, createWorldManager } from '@starvalley/manager';
 import { createRequestListener } from '@starvalley/router';
 
@@ -10,9 +11,16 @@ import { createRequestListener } from '@starvalley/router';
  */
 const port = Number(process.env.PORT ?? 8787);
 
+// Temporary single-actor resolver: today the server owns exactly one local
+// actor, so every request resolves to it. A later session slice replaces only
+// this seam (session/cookie/header -> PlayerId -> controlled ActorId).
+const ACTOR_ID = parseActorId('actor-1');
+
 const gameInfo = createGameInfoManager();
-const world = createWorldManager();
-const server = createServer(createRequestListener({ gameInfo, world }));
+const world = createWorldManager({ actorId: ACTOR_ID });
+const server = createServer(
+  createRequestListener({ gameInfo, world, resolveActorId: () => ACTOR_ID }),
+);
 
 server.listen(port, () => {
   console.log(`[server] listening on http://localhost:${port}`);

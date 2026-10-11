@@ -5,30 +5,34 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   GAME_INFO_PATH,
   HEALTH_PATH,
-  PLAYER_MOVE_PATH,
+  MOVE_ACTOR_PATH,
   WORLD_PATH,
   isGetGameInfoResponse,
   isHealthStatus,
-  isMovePlayerResponse,
+  isMoveActorResponse,
+  parseActorId,
   parseGetGameInfoResponse,
   parseGetWorldResponse,
-  parseMovePlayerResponse,
+  parseMoveActorResponse,
 } from '@starvalley/protocol';
 import type {
   GameInfo,
   HealthStatus,
-  MovePlayerResponse,
+  MoveActorResponse,
   ProtocolError,
   ProtocolErrorCode,
 } from '@starvalley/protocol';
 import { createWorldManager } from '@starvalley/manager';
 import type { GameInfoManager, WorldManager } from '@starvalley/manager';
 import { createRequestListener } from '../src/index.ts';
+import type { ResolveActorId } from '../src/index.ts';
+
+const ACTOR_ID = parseActorId('actor-1');
 
 const GAME_INFO: GameInfo = {
   gameName: 'Test Valley',
   serverVersion: '1.2.3',
-  protocolVersion: 1,
+  protocolVersion: 2,
   serverTime: '2024-01-01T00:00:00.000Z',
 };
 
@@ -55,8 +59,8 @@ function createFakeManager(overrides: Partial<GameInfoManager> = {}): GameInfoMa
 function createTestWorld(overrides: Partial<WorldManager> = {}): WorldManager {
   const world = createWorldManager({
     worldSize: { width: 3, height: 3 },
-    playerId: 'player-1',
-    playerName: 'Player One',
+    actorId: ACTOR_ID,
+    actorName: 'Actor One',
     clock: () => new Date(FIXED_TIME),
   });
   return Object.assign(world, overrides);
@@ -67,8 +71,9 @@ const openServers: Server[] = [];
 async function startServer(
   gameInfo: GameInfoManager = createFakeManager(),
   world: WorldManager = createTestWorld(),
+  resolveActorId: ResolveActorId = () => ACTOR_ID,
 ): Promise<string> {
-  const server = createServer(createRequestListener({ gameInfo, world }));
+  const server = createServer(createRequestListener({ gameInfo, world, resolveActorId }));
   openServers.push(server);
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
@@ -79,7 +84,7 @@ async function startServer(
 }
 
 function postMove(baseUrl: string, body: string): Promise<Response> {
-  return fetch(`${baseUrl}${PLAYER_MOVE_PATH}`, {
+  return fetch(`${baseUrl}${MOVE_ACTOR_PATH}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body,
@@ -219,17 +224,14 @@ describe('createRequestListener', () => {
     const baseUrl = await startServer(
       createFakeManager(),
       createTestWorld({
-        movePlayer: () => {
+        moveActor: () => {
           throw new Error(secret);
         },
       }),
     );
 
     try {
-      const response = await postMove(
-        baseUrl,
-        JSON.stringify({ playerId: 'player-1', direction: 'east' }),
-      );
+      const response = await postMove(baseUrl, JSON.stringify({ direction: 'east' }));
 
       expect(response.status).toBe(500);
       expect(response.headers.get('content-type')).toBe('application/json; charset=utf-8');
@@ -248,7 +250,7 @@ describe('createRequestListener', () => {
     }
   });
 
-  it('serves GET /api/world as a protocol GetWorldResponse', async () => {
+  it('serves GET /api/world as a protocol GetWorldResponse keyed by actor', async () => {
     const baseUrl = await startServer();
 
     const response = await fetch(`${baseUrl}${WORLD_PATH}`);
@@ -261,33 +263,30 @@ describe('createRequestListener', () => {
 
     // Guard against the historical `{ world: { world: { size } } }` nesting
     // that `toEqual` on an unknown silently accepted (tsc could not catch it).
-    expect(Object.keys(parsed.world).sort()).toEqual(['player', 'serverTime', 'size']);
+    expect(Object.keys(parsed.world).sort()).toEqual(['actor', 'serverTime', 'size']);
 
     expect(parsed).toEqual({
       world: {
         size: { width: 3, height: 3 },
-        player: { id: 'player-1', name: 'Player One', position: { x: 1, y: 1 } },
+        actor: { actorId: 'actor-1', name: 'Actor One', position: { x: 1, y: 1 } },
         serverTime: FIXED_TIME,
       },
     });
   });
 
-  it('moves the player exactly one tile in the requested direction', async () => {
+  it('moves the actor exactly one tile in the requested direction', async () => {
     const baseUrl = await startServer();
 
-    const response = await postMove(
-      baseUrl,
-      JSON.stringify({ playerId: 'player-1', direction: 'east' }),
-    );
+    const response = await postMove(baseUrl, JSON.stringify({ direction: 'east' }));
 
     expect(response.status).toBe(200);
     expect(response.headers.get('content-type')).toBe('application/json; charset=utf-8');
 
     const body: unknown = await response.json();
-    expect(isMovePlayerResponse(body)).toBe(true);
-    const parsed: MovePlayerResponse = parseMovePlayerResponse(body);
+    expect(isMoveActorResponse(body)).toBe(true);
+    const parsed: MoveActorResponse = parseMoveActorResponse(body);
     expect(parsed.result.moved).toBe(true);
-    expect(parsed.result.player.position).toEqual({ x: 2, y: 1 });
+    expect(parsed.result.actor.position).toEqual({ x: 2, y: 1 });
     expect(parsed.result.serverTime).toBe(FIXED_TIME);
   });
 
@@ -295,47 +294,134 @@ describe('createRequestListener', () => {
     const baseUrl = await startServer();
 
     // Centre { 1, 1 } in a 3x3 world: one east step is legal, the second is not.
-    const first = await postMove(
-      baseUrl,
-      JSON.stringify({ playerId: 'player-1', direction: 'east' }),
-    );
-    const firstBody = (await first.json()) as MovePlayerResponse;
+    const first = await postMove(baseUrl, JSON.stringify({ direction: 'east' }));
+    const firstBody = (await first.json()) as MoveActorResponse;
     expect(first.status).toBe(200);
     expect(firstBody.result.moved).toBe(true);
-    expect(firstBody.result.player.position).toEqual({ x: 2, y: 1 });
+    expect(firstBody.result.actor.position).toEqual({ x: 2, y: 1 });
 
-    const second = await postMove(
-      baseUrl,
-      JSON.stringify({ playerId: 'player-1', direction: 'east' }),
-    );
+    const second = await postMove(baseUrl, JSON.stringify({ direction: 'east' }));
 
     // A blocked step is not an error: still 200, moved:false, position unchanged.
     expect(second.status).toBe(200);
     expect(second.headers.get('content-type')).toBe('application/json; charset=utf-8');
-    const secondBody = parseMovePlayerResponse(await second.json());
+    const secondBody = parseMoveActorResponse(await second.json());
     expect(secondBody.result.moved).toBe(false);
-    expect(secondBody.result.player.position).toEqual({ x: 2, y: 1 });
+    expect(secondBody.result.actor.position).toEqual({ x: 2, y: 1 });
   });
 
-  it('returns 404 NOT_FOUND for an unknown player', async () => {
-    const baseUrl = await startServer();
-
-    const response = await postMove(
-      baseUrl,
-      JSON.stringify({ playerId: 'nobody', direction: 'north' }),
+  it('returns 404 NOT_FOUND when the resolved actor is unknown to the manager', async () => {
+    const baseUrl = await startServer(createFakeManager(), createTestWorld(), () =>
+      parseActorId('nobody'),
     );
+
+    const response = await postMove(baseUrl, JSON.stringify({ direction: 'north' }));
 
     const body = await expectProtocolError(response, 'NOT_FOUND', 404);
     expect(body.error.message).toContain('nobody');
   });
 
-  it('returns 400 BAD_REQUEST for an invalid direction', async () => {
+  it('rejects a body that tries to name the actor it acts as', async () => {
     const baseUrl = await startServer();
 
     const response = await postMove(
       baseUrl,
-      JSON.stringify({ playerId: 'player-1', direction: 'north-west' }),
+      JSON.stringify({ actorId: 'actor-1', direction: 'east' }),
     );
+
+    await expectProtocolError(response, 'BAD_REQUEST', 400);
+  });
+
+  it('rejects a body carrying the retired playerId field', async () => {
+    const baseUrl = await startServer();
+
+    const response = await postMove(
+      baseUrl,
+      JSON.stringify({ playerId: 'player-1', direction: 'east' }),
+    );
+
+    await expectProtocolError(response, 'BAD_REQUEST', 400);
+  });
+
+  it('treats the resolver as authoritative over any request-shaped identity', async () => {
+    // The manager only knows `actor-1`; the resolver yields a different actor,
+    // so the move is rejected even though the body cannot name one at all.
+    const resolver = vi.fn((): ReturnType<ResolveActorId> => parseActorId('ghost'));
+    const baseUrl = await startServer(createFakeManager(), createTestWorld(), resolver);
+
+    const response = await postMove(baseUrl, JSON.stringify({ direction: 'east' }));
+
+    const body = await expectProtocolError(response, 'NOT_FOUND', 404);
+    expect(body.error.message).toContain('ghost');
+    expect(resolver).toHaveBeenCalledTimes(1);
+  });
+
+  it('consults the resolver exactly once per move request', async () => {
+    const resolver = vi.fn((): ReturnType<ResolveActorId> => ACTOR_ID);
+    const baseUrl = await startServer(createFakeManager(), createTestWorld(), resolver);
+
+    const response = await postMove(baseUrl, JSON.stringify({ direction: 'east' }));
+
+    expect(response.status).toBe(200);
+    expect(resolver).toHaveBeenCalledTimes(1);
+  });
+
+  it('consults the resolver exactly once per world request', async () => {
+    const resolver = vi.fn((): ReturnType<ResolveActorId> => ACTOR_ID);
+    const baseUrl = await startServer(createFakeManager(), createTestWorld(), resolver);
+
+    const response = await fetch(`${baseUrl}${WORLD_PATH}`);
+
+    expect(response.status).toBe(200);
+    expect(resolver).toHaveBeenCalledTimes(1);
+  });
+
+  it('maps a throwing resolver to an opaque 500 and leaks no reason', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const secret = 'resolver-secret do not leak';
+    const baseUrl = await startServer(createFakeManager(), createTestWorld(), () => {
+      throw new Error(secret);
+    });
+
+    try {
+      const response = await fetch(`${baseUrl}${WORLD_PATH}`);
+
+      expect(response.status).toBe(500);
+      const raw = await response.text();
+      expect(raw).not.toContain(secret);
+      const body = JSON.parse(raw) as ProtocolError;
+      expect(body.error.code).toBe('INTERNAL_ERROR');
+      expect(consoleError).toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it('maps a rejecting resolver to an opaque 500 and leaks no reason', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const secret = 'async-resolver-secret do not leak';
+    const baseUrl = await startServer(createFakeManager(), createTestWorld(), async () => {
+      throw new Error(secret);
+    });
+
+    try {
+      const response = await fetch(`${baseUrl}${WORLD_PATH}`);
+
+      expect(response.status).toBe(500);
+      const raw = await response.text();
+      expect(raw).not.toContain(secret);
+      const body = JSON.parse(raw) as ProtocolError;
+      expect(body.error.code).toBe('INTERNAL_ERROR');
+      expect(consoleError).toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it('returns 400 BAD_REQUEST for an invalid direction', async () => {
+    const baseUrl = await startServer();
+
+    const response = await postMove(baseUrl, JSON.stringify({ direction: 'north-west' }));
 
     await expectProtocolError(response, 'BAD_REQUEST', 400);
   });
@@ -343,7 +429,7 @@ describe('createRequestListener', () => {
   it('returns 400 BAD_REQUEST for a missing field', async () => {
     const baseUrl = await startServer();
 
-    const response = await postMove(baseUrl, JSON.stringify({ playerId: 'player-1' }));
+    const response = await postMove(baseUrl, JSON.stringify({}));
 
     await expectProtocolError(response, 'BAD_REQUEST', 400);
   });
@@ -351,10 +437,7 @@ describe('createRequestListener', () => {
   it('returns 400 BAD_REQUEST for an extra field', async () => {
     const baseUrl = await startServer();
 
-    const response = await postMove(
-      baseUrl,
-      JSON.stringify({ playerId: 'player-1', direction: 'north', extra: true }),
-    );
+    const response = await postMove(baseUrl, JSON.stringify({ direction: 'north', extra: true }));
 
     await expectProtocolError(response, 'BAD_REQUEST', 400);
   });
@@ -362,7 +445,7 @@ describe('createRequestListener', () => {
   it('returns 400 BAD_REQUEST for malformed JSON', async () => {
     const baseUrl = await startServer();
 
-    const response = await postMove(baseUrl, '{ "playerId": "player-1", "direction":');
+    const response = await postMove(baseUrl, '{ "direction":');
 
     const body = await expectProtocolError(response, 'BAD_REQUEST', 400);
     expect(body.error.message).toBe('Request body is not valid JSON');
@@ -389,7 +472,7 @@ describe('createRequestListener', () => {
   it('returns 405 with Allow: POST for GET on the move path', async () => {
     const baseUrl = await startServer();
 
-    const response = await fetch(`${baseUrl}${PLAYER_MOVE_PATH}`);
+    const response = await fetch(`${baseUrl}${MOVE_ACTOR_PATH}`);
 
     expect(response.headers.get('allow')).toBe('POST');
     await expectProtocolError(response, 'METHOD_NOT_ALLOWED', 405);
@@ -398,9 +481,22 @@ describe('createRequestListener', () => {
   it('does not advertise HEAD for the POST-only move path', async () => {
     const baseUrl = await startServer();
 
-    const response = await fetch(`${baseUrl}${PLAYER_MOVE_PATH}`, { method: 'HEAD' });
+    const response = await fetch(`${baseUrl}${MOVE_ACTOR_PATH}`, { method: 'HEAD' });
 
     expect(response.status).toBe(405);
     expect(response.headers.get('allow')).toBe('POST');
+  });
+
+  it('exposes the move route at MOVE_ACTOR_PATH and treats the old player path as unknown', async () => {
+    expect(MOVE_ACTOR_PATH).toBe('/api/actor/move');
+
+    const baseUrl = await startServer();
+    const response = await fetch(`${baseUrl}/api/player/move`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ direction: 'east' }),
+    });
+
+    await expectProtocolError(response, 'NOT_FOUND', 404);
   });
 });

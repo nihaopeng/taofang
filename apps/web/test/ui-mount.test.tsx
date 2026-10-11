@@ -25,10 +25,15 @@ import {
 } from '../src/organizer/index.ts';
 import { App } from '../src/ui/App.tsx';
 
+// Arbitrary: the protocol guard accepts any finite integer, the UI never reads
+// this field, and a real client-side version gate belongs in the Organizer
+// using the contract constant. It is only here to shape a valid fixture.
+const ARBITRARY_PROTOCOL_VERSION = 1;
+
 const VALID_GAME_INFO = {
   gameName: 'Starvalley',
   serverVersion: '0.1.0',
-  protocolVersion: 1,
+  protocolVersion: ARBITRARY_PROTOCOL_VERSION,
   serverTime: '2025-01-02T03:04:05.000Z',
 };
 

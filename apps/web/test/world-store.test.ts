@@ -1,21 +1,24 @@
 /**
- * Organizer unit tests for the Phase-2 world / player / movement feature.
+ * Organizer unit tests for the Phase-3 world / actor / movement feature.
  *
  * Focuses on the client-application contract: request lifecycle, protocol
  * validation, no-optimism reconciliation, and deterministic move serialization.
  * Transport mechanics are injected through `setWorldFetch`.
+ *
+ * The controlled subject is an **Actor** (`controlledActor`), not a player, and
+ * the move command carries `{ direction }` only.
  */
 
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { PLAYER_MOVE_PATH } from '@starvalley/protocol';
+import { MOVE_ACTOR_PATH } from '@starvalley/protocol';
 
 import {
   getWorldState,
   loadWorld,
-  movePlayer,
+  moveActor,
   resetWorldFetch,
   resetWorldState,
   setGameInfoFetch,
@@ -27,15 +30,15 @@ import type { WorldState } from '../src/organizer/index.ts';
 
 const SERVER_TIME = '2025-01-02T03:04:05.000Z';
 
-const VALID_PLAYER = {
-  id: 'player-1',
+const VALID_ACTOR = {
+  actorId: 'actor-1',
   name: 'Alex',
   position: { x: 3, y: 4 },
 };
 
 const VALID_SNAPSHOT = {
   size: { width: 10, height: 8 },
-  player: VALID_PLAYER,
+  actor: VALID_ACTOR,
   serverTime: SERVER_TIME,
 };
 
@@ -71,11 +74,11 @@ function createDeferred<T>(): {
   return { promise, resolve, reject };
 }
 
-/** Build a valid `MovePlayerResponse` body. */
+/** Build a valid `MoveActorResponse` body. */
 function moveResponse(position: { x: number; y: number }, moved = true): unknown {
   return {
     result: {
-      player: { ...VALID_PLAYER, position },
+      actor: { ...VALID_ACTOR, position },
       moved,
       serverTime: SERVER_TIME,
     },
@@ -114,7 +117,12 @@ describe('loadWorld', () => {
     expect(state.status).toBe('ready');
     expect(state.error).toBeNull();
     expect(state.world).toEqual({ width: 10, height: 8 });
-    expect(state.player).toEqual({ id: 'player-1', name: 'Alex', x: 3, y: 4 });
+    expect(state.controlledActor).toEqual({
+      actorId: 'actor-1',
+      name: 'Alex',
+      x: 3,
+      y: 4,
+    });
   });
 
   it('maps a network rejection to an error state with no partial data', async () => {
@@ -127,7 +135,7 @@ describe('loadWorld', () => {
     const state = getWorldState();
     expect(state.status).toBe('error');
     expect(state.world).toBeNull();
-    expect(state.player).toBeNull();
+    expect(state.controlledActor).toBeNull();
     expect(state.error).toBeTruthy();
     expect(state.error).not.toContain('TypeError');
     expect(state.error).not.toContain('fetch');
@@ -146,7 +154,7 @@ describe('loadWorld', () => {
     const state = getWorldState();
     expect(state.status).toBe('error');
     expect(state.world).toBeNull();
-    expect(state.player).toBeNull();
+    expect(state.controlledActor).toBeNull();
     expect(state.error).toContain('503');
   });
 
@@ -156,7 +164,11 @@ describe('loadWorld', () => {
     // reject it rather than silently reading a missing field.
     setWorldFetch(async () =>
       fakeResponse({
-        world: { world: { size: { width: 10, height: 8 } }, player: VALID_PLAYER, serverTime: SERVER_TIME },
+        world: {
+          world: { size: { width: 10, height: 8 } },
+          actor: VALID_ACTOR,
+          serverTime: SERVER_TIME,
+        },
       }),
     );
 
@@ -165,7 +177,30 @@ describe('loadWorld', () => {
     const state = getWorldState();
     expect(state.status).toBe('error');
     expect(state.world).toBeNull();
-    expect(state.player).toBeNull();
+    expect(state.controlledActor).toBeNull();
+    expect(state.error).toBeTruthy();
+  });
+
+  it('rejects a renamed payload carrying `player` instead of `actor` and keeps no partial data', async () => {
+    // The Phase-3 migration renamed `player` -> `actor` on the wire. A response
+    // that still carries the old key must fail the exact-key guard rather than
+    // silently yield an empty actor.
+    setWorldFetch(async () =>
+      fakeResponse({
+        world: {
+          size: { width: 10, height: 8 },
+          player: { id: 'player-1', name: 'Alex', position: { x: 3, y: 4 } },
+          serverTime: SERVER_TIME,
+        },
+      }),
+    );
+
+    await loadWorld();
+
+    const state = getWorldState();
+    expect(state.status).toBe('error');
+    expect(state.world).toBeNull();
+    expect(state.controlledActor).toBeNull();
     expect(state.error).toBeTruthy();
   });
 
@@ -228,22 +263,26 @@ describe('loadWorld', () => {
   });
 });
 
-describe('movePlayer', () => {
+describe('moveActor', () => {
   it('updates the position to the server-returned position on success', async () => {
     await loadValidWorld();
     setWorldFetch(async () => fakeResponse(moveResponse({ x: 4, y: 4 })));
 
-    await movePlayer('east');
+    await moveActor('east');
 
     const state = getWorldState();
     expect(state.status).toBe('ready');
     expect(state.error).toBeNull();
-    expect(state.player).toMatchObject({ x: 4, y: 4 });
+    expect(state.controlledActor).toMatchObject({ actorId: 'actor-1', x: 4, y: 4 });
   });
 
-  it('sends the command built from the loaded playerId and direction', async () => {
+  it('sends a body containing only `direction` to the actor move path', async () => {
     await loadValidWorld();
-    const requests: Array<{ url: string; method: string | undefined; body: Record<string, unknown> }> = [];
+    const requests: Array<{
+      url: string;
+      method: string | undefined;
+      body: Record<string, unknown>;
+    }> = [];
     setWorldFetch(async (url, init) => {
       requests.push({
         url,
@@ -253,14 +292,19 @@ describe('movePlayer', () => {
       return fakeResponse(moveResponse({ x: 4, y: 4 }));
     });
 
-    await movePlayer('east');
+    await moveActor('east');
 
     // Transport contract lives here, not in the UI tests: the Organizer builds
-    // the request from the canonical Protocol path and uses POST.
+    // the request from the canonical Protocol path and uses POST. The actor is
+    // resolved server-side from transport context, so the body must NOT carry an
+    // actor/player id.
     expect(requests).toHaveLength(1);
-    expect(requests[0].url).toBe(PLAYER_MOVE_PATH);
+    expect(requests[0].url).toBe(MOVE_ACTOR_PATH);
     expect(requests[0].method).toBe('POST');
-    expect(requests[0].body).toEqual({ playerId: 'player-1', direction: 'east' });
+    expect(requests[0].body).toEqual({ direction: 'east' });
+    expect(Object.keys(requests[0].body)).toEqual(['direction']);
+    expect('actorId' in requests[0].body).toBe(false);
+    expect('playerId' in requests[0].body).toBe(false);
   });
 
   it('does not move optimistically while the request is in flight', async () => {
@@ -268,28 +312,28 @@ describe('movePlayer', () => {
     const deferred = createDeferred<Response>();
     setWorldFetch(() => deferred.promise);
 
-    const pending = movePlayer('east');
+    const pending = moveActor('east');
 
     // Position must still be the old authoritative one before the response.
-    expect(getWorldState().player).toMatchObject({ x: 3, y: 4 });
+    expect(getWorldState().controlledActor).toMatchObject({ x: 3, y: 4 });
     expect(getWorldState().status).toBe('ready');
 
     deferred.resolve(fakeResponse(moveResponse({ x: 4, y: 4 })));
     await pending;
 
-    expect(getWorldState().player).toMatchObject({ x: 4, y: 4 });
+    expect(getWorldState().controlledActor).toMatchObject({ x: 4, y: 4 });
   });
 
   it('leaves the position unchanged and reports no error on a refused step', async () => {
     await loadValidWorld();
     setWorldFetch(async () => fakeResponse(moveResponse({ x: 3, y: 4 }, false)));
 
-    await movePlayer('west');
+    await moveActor('west');
 
     const state = getWorldState();
     expect(state.status).toBe('ready');
     expect(state.error).toBeNull();
-    expect(state.player).toMatchObject({ x: 3, y: 4 });
+    expect(state.controlledActor).toMatchObject({ x: 3, y: 4 });
   });
 
   it('serializes moves with a single in-flight slot and latest wins', async () => {
@@ -305,13 +349,13 @@ describe('movePlayer', () => {
       return deferred.promise;
     });
 
-    const first = movePlayer('east');
-    const second = movePlayer('south');
-    const third = movePlayer('west');
+    const first = moveActor('east');
+    const second = moveActor('south');
+    const third = moveActor('west');
 
     // Only the first request is in flight; `south` was superseded by `west`.
     expect(calls).toBe(1);
-    expect(bodies).toEqual([{ playerId: 'player-1', direction: 'east' }]);
+    expect(bodies).toEqual([{ direction: 'east' }]);
 
     deferreds[0].resolve(fakeResponse(moveResponse({ x: 4, y: 4 })));
     await first;
@@ -319,17 +363,14 @@ describe('movePlayer', () => {
     // Once the first settles, exactly one more request is sent, with the latest
     // queued direction.
     expect(calls).toBe(2);
-    expect(bodies).toEqual([
-      { playerId: 'player-1', direction: 'east' },
-      { playerId: 'player-1', direction: 'west' },
-    ]);
-    expect(getWorldState().player).toMatchObject({ x: 4, y: 4 });
+    expect(bodies).toEqual([{ direction: 'east' }, { direction: 'west' }]);
+    expect(getWorldState().controlledActor).toMatchObject({ x: 4, y: 4 });
 
     deferreds[1].resolve(fakeResponse(moveResponse({ x: 3, y: 4 })));
     await Promise.all([second, third]);
 
     expect(calls).toBe(2);
-    expect(getWorldState().player).toMatchObject({ x: 3, y: 4 });
+    expect(getWorldState().controlledActor).toMatchObject({ x: 3, y: 4 });
   });
 
   it('settles every move promise when a reset supersedes an in-flight loop', async () => {
@@ -355,7 +396,7 @@ describe('movePlayer', () => {
 
     // Loop 1: `east` in flight.
     setWorldFetch(captureMove);
-    const a = movePlayer('east');
+    const a = moveActor('east');
     expect(calls).toBe(1);
 
     // Reset supersedes loop 1 while its request is still in flight, then load a
@@ -366,8 +407,8 @@ describe('movePlayer', () => {
 
     // Loop 2: `north` in flight; `west` queued behind it.
     setWorldFetch(captureMove);
-    const c = movePlayer('north');
-    const d = movePlayer('west');
+    const c = moveActor('north');
+    const d = moveActor('west');
     expect(calls).toBe(2);
     expect(bodies.map((body) => body.direction)).toEqual(['east', 'north']);
 
@@ -392,30 +433,30 @@ describe('movePlayer', () => {
       return fakeResponse(moveResponse({ x: 4, y: 4 }));
     });
 
-    await expect(movePlayer('east')).resolves.toBeUndefined();
+    await expect(moveActor('east')).resolves.toBeUndefined();
 
     expect(calls).toBe(0);
     const state = getWorldState();
     expect(state.status).toBe('idle');
-    expect(state.player).toBeNull();
+    expect(state.controlledActor).toBeNull();
   });
 
-  it('maps a 404 move response to a user-presentable error', async () => {
+  it('maps a 404 move response to a user-presentable actor-not-found error', async () => {
     await loadValidWorld();
     setWorldFetch(async () =>
       fakeResponse(
-        { error: { code: 'NOT_FOUND', message: 'unknown player' } },
+        { error: { code: 'NOT_FOUND', message: 'unknown actor' } },
         { ok: false, status: 404 },
       ),
     );
 
-    await expect(movePlayer('east')).resolves.toBeUndefined();
+    await expect(moveActor('east')).resolves.toBeUndefined();
 
     const state = getWorldState();
     expect(state.status).toBe('error');
     expect(state.error).toBeTruthy();
     expect(state.error).not.toContain('404');
-    expect(state.error?.toLowerCase()).toContain('player');
+    expect(state.error?.toLowerCase()).toContain('actor');
   });
 
   it('maps a network failure during a move to an error state', async () => {
@@ -424,7 +465,7 @@ describe('movePlayer', () => {
       throw new TypeError('Failed to fetch');
     });
 
-    await movePlayer('east');
+    await moveActor('east');
 
     const state = getWorldState();
     expect(state.status).toBe('error');
@@ -436,11 +477,32 @@ describe('movePlayer', () => {
     await loadValidWorld();
     setWorldFetch(async () => fakeResponse({ result: { moved: true } }));
 
-    await movePlayer('east');
+    await moveActor('east');
 
     const state = getWorldState();
     expect(state.status).toBe('error');
     expect(state.error).toBeTruthy();
+  });
+
+  it('maps a renamed move payload carrying `player` instead of `actor` to a contract error', async () => {
+    await loadValidWorld();
+    setWorldFetch(async () =>
+      fakeResponse({
+        result: {
+          player: { id: 'player-1', name: 'Alex', position: { x: 4, y: 4 } },
+          moved: true,
+          serverTime: SERVER_TIME,
+        },
+      }),
+    );
+
+    await moveActor('east');
+
+    const state = getWorldState();
+    expect(state.status).toBe('error');
+    expect(state.error).toBeTruthy();
+    // The stale response must not be reconciled into the controlled actor.
+    expect(state.controlledActor).toMatchObject({ x: 3, y: 4 });
   });
 });
 
@@ -454,14 +516,26 @@ describe('world store identity and subscription', () => {
     unsubscribe();
   });
 
+  it('exposes `controlledActor` and has no legacy `player` field', () => {
+    const state: WorldState = getWorldState();
+
+    // Compile-level guarantee of the frozen Organizer contract: `player` was
+    // removed from `WorldState` by the ActorId migration, so this access must
+    // not typecheck. `controlledActor` is the field in use.
+    // @ts-expect-error WorldState has no `player` field after the ActorId migration.
+    expect(state.player).toBeUndefined();
+    expect(state.controlledActor).toBeNull();
+    expect(Object.prototype.hasOwnProperty.call(state, 'player')).toBe(false);
+  });
+
   it('resetWorldState returns to idle and drains queued moves', async () => {
     await loadValidWorld();
 
     const deferred = createDeferred<Response>();
     setWorldFetch(() => deferred.promise);
 
-    const inFlight = movePlayer('east');
-    const queued = movePlayer('south');
+    const inFlight = moveActor('east');
+    const queued = moveActor('south');
 
     const seen: WorldState[] = [];
     const unsubscribe = subscribeWorld((next) => {
@@ -473,7 +547,7 @@ describe('world store identity and subscription', () => {
     const state = getWorldState();
     expect(state.status).toBe('idle');
     expect(state.world).toBeNull();
-    expect(state.player).toBeNull();
+    expect(state.controlledActor).toBeNull();
     expect(seen).toHaveLength(1);
 
     unsubscribe();

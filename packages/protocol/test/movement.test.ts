@@ -1,16 +1,16 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  isMoveActorCommand,
+  isMoveActorResponse,
+  isMoveActorResult,
   isMoveDirection,
-  isMovePlayerCommand,
-  isMovePlayerResponse,
-  isMovePlayerResult,
+  parseMoveActorCommand,
+  parseMoveActorResponse,
+  parseMoveActorResult,
   parseMoveDirection,
-  parseMovePlayerCommand,
-  parseMovePlayerResponse,
-  parseMovePlayerResult,
 } from '../src/index.ts';
-import { captureParseError, validMovePlayerResult, validPlayer } from './support.ts';
+import { captureParseError, validActor, validMoveActorResult } from './support.ts';
 
 const nonObjects: Array<[string, unknown]> = [
   ['null', null],
@@ -21,7 +21,7 @@ const nonObjects: Array<[string, unknown]> = [
   ['an array', []],
 ];
 
-const validCommand = { playerId: 'player-1', direction: 'north' };
+const validCommand = { direction: 'north' };
 
 describe('isMoveDirection', () => {
   it.each(['north', 'south', 'east', 'west'])('accepts %s', (direction) => {
@@ -51,118 +51,127 @@ describe('parseMoveDirection', () => {
   });
 });
 
-describe('isMovePlayerCommand', () => {
+describe('isMoveActorCommand', () => {
   it('accepts a well-formed command', () => {
-    expect(isMovePlayerCommand(validCommand)).toBe(true);
-    expect(isMovePlayerCommand({ ...validCommand, direction: 'west' })).toBe(true);
+    expect(isMoveActorCommand(validCommand)).toBe(true);
+    expect(isMoveActorCommand({ direction: 'west' })).toBe(true);
   });
 
   it.each(nonObjects)('rejects %s', (_label, value) => {
-    expect(isMovePlayerCommand(value)).toBe(false);
+    expect(isMoveActorCommand(value)).toBe(false);
   });
 
-  it.each(['playerId', 'direction'])('rejects a missing %s', (key) => {
-    const value: Record<string, unknown> = { ...validCommand };
-    delete value[key];
-    expect(isMovePlayerCommand(value)).toBe(false);
+  it('rejects a missing direction', () => {
+    expect(isMoveActorCommand({})).toBe(false);
   });
 
   it('rejects unknown extra fields', () => {
-    expect(isMovePlayerCommand({ ...validCommand, extra: 1 })).toBe(false);
+    expect(isMoveActorCommand({ ...validCommand, extra: 1 })).toBe(false);
   });
 
-  it('rejects an empty playerId and a bad direction', () => {
-    expect(isMovePlayerCommand({ ...validCommand, playerId: '' })).toBe(false);
-    expect(isMovePlayerCommand({ ...validCommand, playerId: null })).toBe(false);
-    expect(isMovePlayerCommand({ ...validCommand, direction: 'up' })).toBe(false);
-    expect(isMovePlayerCommand({ ...validCommand, direction: 2 })).toBe(false);
+  it('rejects an attempted actor field (client may not name the actor)', () => {
+    expect(isMoveActorCommand({ actorId: 'actor-1', direction: 'east' })).toBe(false);
+    expect(isMoveActorCommand({ playerId: 'p', direction: 'east' })).toBe(false);
+  });
+
+  it('rejects a bad direction', () => {
+    expect(isMoveActorCommand({ direction: 'up' })).toBe(false);
+    expect(isMoveActorCommand({ direction: 2 })).toBe(false);
   });
 });
 
-describe('parseMovePlayerCommand', () => {
+describe('parseMoveActorCommand', () => {
   it('returns the value unchanged when valid', () => {
-    expect(parseMovePlayerCommand(validCommand)).toBe(validCommand);
-  });
-
-  it('throws ProtocolParseError with a message when invalid', () => {
-    const error = captureParseError(() => parseMovePlayerCommand({ ...validCommand, playerId: '' }));
-    expect(error.message).toBe('Invalid MovePlayerCommand payload');
-    expect(error.code).toBe('BAD_REQUEST');
-  });
-});
-
-describe('isMovePlayerResult', () => {
-  it('accepts a well-formed result', () => {
-    expect(isMovePlayerResult(validMovePlayerResult)).toBe(true);
-    expect(isMovePlayerResult({ ...validMovePlayerResult, moved: false })).toBe(true);
-  });
-
-  it.each(nonObjects)('rejects %s', (_label, value) => {
-    expect(isMovePlayerResult(value)).toBe(false);
-  });
-
-  it.each(['player', 'moved', 'serverTime'])('rejects a missing %s', (key) => {
-    const value: Record<string, unknown> = { ...validMovePlayerResult };
-    delete value[key];
-    expect(isMovePlayerResult(value)).toBe(false);
-  });
-
-  it('rejects unknown extra fields and wrong field types', () => {
-    expect(isMovePlayerResult({ ...validMovePlayerResult, extra: 1 })).toBe(false);
-    expect(isMovePlayerResult({ ...validMovePlayerResult, moved: 'true' })).toBe(false);
-    expect(isMovePlayerResult({ ...validMovePlayerResult, moved: 1 })).toBe(false);
-    expect(isMovePlayerResult({ ...validMovePlayerResult, serverTime: 'yesterday' })).toBe(false);
-  });
-
-  it('rejects a malformed player', () => {
-    expect(isMovePlayerResult({ ...validMovePlayerResult, player: { id: '' } })).toBe(false);
-    expect(isMovePlayerResult({ ...validMovePlayerResult, player: validPlayer.name })).toBe(false);
-  });
-});
-
-describe('parseMovePlayerResult', () => {
-  it('returns the value unchanged when valid', () => {
-    expect(parseMovePlayerResult(validMovePlayerResult)).toBe(validMovePlayerResult);
+    expect(parseMoveActorCommand(validCommand)).toBe(validCommand);
   });
 
   it('throws ProtocolParseError with a message when invalid', () => {
     const error = captureParseError(() =>
-      parseMovePlayerResult({ ...validMovePlayerResult, moved: 'true' }),
+      parseMoveActorCommand({ actorId: 'actor-1', direction: 'east' }),
     );
-    expect(error.message).toBe('Invalid MovePlayerResult payload');
+    expect(error.message).toBe('Invalid MoveActorCommand payload');
     expect(error.code).toBe('BAD_REQUEST');
   });
 });
 
-describe('isMovePlayerResponse', () => {
-  it('accepts a well-formed response', () => {
-    expect(isMovePlayerResponse({ result: validMovePlayerResult })).toBe(true);
+describe('isMoveActorResult', () => {
+  it('accepts a well-formed result', () => {
+    expect(isMoveActorResult(validMoveActorResult)).toBe(true);
+    expect(isMoveActorResult({ ...validMoveActorResult, moved: false })).toBe(true);
   });
 
   it.each(nonObjects)('rejects %s', (_label, value) => {
-    expect(isMovePlayerResponse(value)).toBe(false);
+    expect(isMoveActorResult(value)).toBe(false);
   });
 
-  it('rejects a missing result and unknown extra fields', () => {
-    expect(isMovePlayerResponse({})).toBe(false);
-    expect(isMovePlayerResponse({ result: validMovePlayerResult, extra: true })).toBe(false);
+  it.each(['actor', 'moved', 'serverTime'])('rejects a missing %s', (key) => {
+    const value: Record<string, unknown> = { ...validMoveActorResult };
+    delete value[key];
+    expect(isMoveActorResult(value)).toBe(false);
   });
 
-  it('rejects a malformed result', () => {
-    expect(isMovePlayerResponse({ result: { ...validMovePlayerResult, extra: 1 } })).toBe(false);
-    expect(isMovePlayerResponse({ result: [] })).toBe(false);
+  it('rejects unknown extra fields and wrong field types', () => {
+    expect(isMoveActorResult({ ...validMoveActorResult, extra: 1 })).toBe(false);
+    expect(isMoveActorResult({ ...validMoveActorResult, moved: 'true' })).toBe(false);
+    expect(isMoveActorResult({ ...validMoveActorResult, moved: 1 })).toBe(false);
+    expect(isMoveActorResult({ ...validMoveActorResult, serverTime: 'yesterday' })).toBe(false);
+  });
+
+  it('rejects a malformed actor', () => {
+    expect(isMoveActorResult({ ...validMoveActorResult, actor: { actorId: '' } })).toBe(false);
+    expect(isMoveActorResult({ ...validMoveActorResult, actor: validActor.name })).toBe(false);
+  });
+
+  it('rejects the removed player field (requires `actor`)', () => {
+    expect(isMoveActorResult({ player: validActor, moved: true, serverTime: validMoveActorResult.serverTime })).toBe(
+      false,
+    );
   });
 });
 
-describe('parseMovePlayerResponse', () => {
+describe('parseMoveActorResult', () => {
   it('returns the value unchanged when valid', () => {
-    const value = { result: validMovePlayerResult };
-    expect(parseMovePlayerResponse(value)).toBe(value);
+    expect(parseMoveActorResult(validMoveActorResult)).toBe(validMoveActorResult);
   });
 
   it('throws ProtocolParseError with a message when invalid', () => {
-    const error = captureParseError(() => parseMovePlayerResponse({}));
-    expect(error.message).toBe('Invalid MovePlayerResponse payload');
+    const error = captureParseError(() =>
+      parseMoveActorResult({ ...validMoveActorResult, moved: 'true' }),
+    );
+    expect(error.message).toBe('Invalid MoveActorResult payload');
+    expect(error.code).toBe('BAD_REQUEST');
+  });
+});
+
+describe('isMoveActorResponse', () => {
+  it('accepts a well-formed response', () => {
+    expect(isMoveActorResponse({ result: validMoveActorResult })).toBe(true);
+  });
+
+  it.each(nonObjects)('rejects %s', (_label, value) => {
+    expect(isMoveActorResponse(value)).toBe(false);
+  });
+
+  it('rejects a missing result and unknown extra fields', () => {
+    expect(isMoveActorResponse({})).toBe(false);
+    expect(isMoveActorResponse({ result: validMoveActorResult, extra: true })).toBe(false);
+  });
+
+  it('rejects a malformed result', () => {
+    expect(isMoveActorResponse({ result: { ...validMoveActorResult, extra: 1 } })).toBe(false);
+    expect(isMoveActorResponse({ result: [] })).toBe(false);
+  });
+});
+
+describe('parseMoveActorResponse', () => {
+  it('returns the value unchanged when valid', () => {
+    const value = { result: validMoveActorResult };
+    expect(parseMoveActorResponse(value)).toBe(value);
+  });
+
+  it('throws ProtocolParseError with a message when invalid', () => {
+    const error = captureParseError(() => parseMoveActorResponse({}));
+    expect(error.message).toBe('Invalid MoveActorResponse payload');
     expect(error.code).toBe('BAD_REQUEST');
   });
 });

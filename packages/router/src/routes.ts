@@ -1,15 +1,16 @@
 import {
   GAME_INFO_PATH,
   HEALTH_PATH,
-  PLAYER_MOVE_PATH,
+  MOVE_ACTOR_PATH,
   WORLD_PATH,
-  parseMovePlayerCommand,
+  parseMoveActorCommand,
 } from '@starvalley/protocol';
 import type {
+  ActorId,
   GetGameInfoResponse,
   GetWorldResponse,
   HealthStatus,
-  MovePlayerResponse,
+  MoveActorResponse,
 } from '@starvalley/protocol';
 import type { GameInfoManager, WorldManager } from '@starvalley/manager';
 
@@ -17,14 +18,17 @@ import type { GameInfoManager, WorldManager } from '@starvalley/manager';
  * Everything a route handler may read from the inbound request.
  *
  * Handlers receive typed inputs only: the Managers they may call, the parsed
- * URL, and the parsed JSON body. Raw `IncomingMessage`/`ServerResponse` objects
- * stay in the listener so framework details never leak past the Router boundary.
+ * URL, the parsed JSON body, and the caller identity already resolved by the
+ * listener's single authorization seam. Raw `IncomingMessage`/`ServerResponse`
+ * objects stay in the listener so framework details never leak past the Router
+ * boundary.
  *
  * `body` is `undefined` when the request carries no body (for example GET).
  */
 export interface RouteContext {
   readonly gameInfo: GameInfoManager;
   readonly world: WorldManager;
+  readonly actorId: ActorId;
   readonly url: URL;
   readonly body: unknown;
 }
@@ -36,7 +40,7 @@ export interface RouteResponse {
     | GetGameInfoResponse
     | GetWorldResponse
     | HealthStatus
-    | MovePlayerResponse;
+    | MoveActorResponse;
 }
 
 /** A declarative route entry: method + path + thin handler. */
@@ -66,20 +70,21 @@ export const ROUTES: readonly RouteDefinition[] = [
   {
     method: 'GET',
     path: WORLD_PATH,
-    handle: ({ world }) => {
-      const body: GetWorldResponse = { world: world.getSnapshot() };
+    handle: ({ world, actorId }) => {
+      const body: GetWorldResponse = { world: world.getSnapshot({ actorId }) };
       return { status: 200, body };
     },
   },
   {
     method: 'POST',
-    path: PLAYER_MOVE_PATH,
-    handle: ({ world, body }) => {
+    path: MOVE_ACTOR_PATH,
+    handle: ({ world, actorId, body }) => {
       // Router validates shape and delegates the decision (including world-edge
-      // refusal) to the Manager; it never reimplements movement rules.
-      const command = parseMovePlayerCommand(body);
-      const result = world.movePlayer(command);
-      const responseBody: MovePlayerResponse = { result };
+      // refusal) to the Manager; it never reimplements movement rules. The
+      // command carries no actor: `actorId` comes from the transport seam.
+      const command = parseMoveActorCommand(body);
+      const result = world.moveActor({ actorId, command });
+      const responseBody: MoveActorResponse = { result };
       return { status: 200, body: responseBody };
     },
   },

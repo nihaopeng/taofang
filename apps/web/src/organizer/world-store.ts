@@ -1,5 +1,5 @@
 /**
- * Client-side store for the world/player feature.
+ * Client-side store for the world/actor feature.
  *
  * Owns the world request lifecycle (`idle -> loading -> ready | error`), the
  * movement command pipeline, subscriptions, and the mapping from internal
@@ -10,23 +10,28 @@
  * Authoritative server state only. There is no prediction or interpolation: the
  * visible position changes *only* when a validated server response is reconciled
  * into the view model.
+ *
+ * After the Phase-3 identity migration the client controls an **Actor**, not a
+ * player. `controlledActor` is the actor the client believes it controls; the
+ * actor resolved by the server (from transport context) is authoritative and the
+ * move command carries only a direction.
  */
 
-import type { MovePlayerCommand, MovePlayerResult } from '@starvalley/protocol';
+import type { MoveActorCommand, MoveActorResult } from '@starvalley/protocol';
 
 import { ApiError, describeApiError } from './transport';
-import { fetchWorld, requestMovePlayer } from './world-api-client';
-import { toPlayerViewModel, toWorldViewModel } from './world-view-model';
-import type { MoveDirection, PlayerViewModel, WorldViewModel } from './world-view-model';
+import { fetchWorld, requestMoveActor } from './world-api-client';
+import { toControlledActorViewModel, toWorldViewModel } from './world-view-model';
+import type { ControlledActorViewModel, MoveDirection, WorldViewModel } from './world-view-model';
 
 /** World request lifecycle as observed by the UI. */
 export type WorldStatus = 'idle' | 'loading' | 'ready' | 'error';
 
-/** Observable state. `world`/`player` are populated once a snapshot is `ready`. */
+/** Observable state. `world`/`controlledActor` are populated once a snapshot is `ready`. */
 export interface WorldState {
   status: WorldStatus;
   world: WorldViewModel | null;
-  player: PlayerViewModel | null;
+  controlledActor: ControlledActorViewModel | null;
   /** User-presentable message; never a raw error/response object. */
   error: string | null;
 }
@@ -34,7 +39,12 @@ export interface WorldState {
 type Listener = (state: WorldState) => void;
 
 /** Canonical initial state. Reused so `getWorldState` is reference-stable. */
-const IDLE_STATE: WorldState = { status: 'idle', world: null, player: null, error: null };
+const IDLE_STATE: WorldState = {
+  status: 'idle',
+  world: null,
+  controlledActor: null,
+  error: null,
+};
 
 let state: WorldState = IDLE_STATE;
 /**
@@ -49,7 +59,7 @@ const listeners = new Set<Listener>();
  * Movement serialization.
  *
  * Exactly one move request may be in flight at a time (`activeMoveToken`). While
- * one is in flight, `movePlayer` records only the *latest* requested direction
+ * one is in flight, `moveActor` records only the *latest* requested direction
  * (`queuedDirection`) and returns a promise that settles once the in-flight
  * request that superseded it (or its own request) has settled. This bounds
  * held-key input to one request per settle and keeps ordering deterministic.
@@ -122,7 +132,7 @@ export function loadWorld(): Promise<void> {
 }
 
 async function runLoad(requestGeneration: number): Promise<void> {
-  setState({ status: 'loading', world: null, player: null, error: null });
+  setState({ status: 'loading', world: null, controlledActor: null, error: null });
 
   try {
     const snapshot = await fetchWorld();
@@ -132,7 +142,7 @@ async function runLoad(requestGeneration: number): Promise<void> {
     setState({
       status: 'ready',
       world: toWorldViewModel(snapshot),
-      player: toPlayerViewModel(snapshot.player),
+      controlledActor: toControlledActorViewModel(snapshot.actor),
       error: null,
     });
   } catch (error) {
@@ -142,27 +152,30 @@ async function runLoad(requestGeneration: number): Promise<void> {
     setState({
       status: 'error',
       world: null,
-      player: null,
+      controlledActor: null,
       error: describeApiError(error, 'Something went wrong while loading the world.'),
     });
   }
 }
 
 /**
- * UI intent: move the local player one tile.
+ * UI intent: move the controlled actor one tile in `direction`.
  *
- * `direction` is the intent; the store owns the wire command and fills in the
- * `playerId` from the loaded snapshot. Semantics:
+ * The store owns the wire command: the command is built from the direction
+ * alone. The server resolves *which* actor the caller controls from transport
+ * context, so no actor/player id is ever sent (and none may be invented here).
+ * Semantics:
  *
  * - **No world loaded yet:** safe no-op that resolves without sending anything
- *   (there is no authoritative `playerId` to put in the command).
+ *   (there is no authoritative controlled actor to move).
  * - **A move already in flight:** no second concurrent request; the latest
  *   direction is queued and dispatched when the current request settles.
  * - **Never rejects:** failures settle the store into `error` and resolve.
  */
-export function movePlayer(direction: MoveDirection): Promise<void> {
-  if (state.player === null) {
-    // No authoritative snapshot yet; moving would require inventing a playerId.
+export function moveActor(direction: MoveDirection): Promise<void> {
+  if (state.controlledActor === null) {
+    // No authoritative snapshot yet; refuse the step rather than send a command
+    // the server would have to reject.
     return Promise.resolve();
   }
 
@@ -240,20 +253,19 @@ async function runMoveLoop(
 }
 
 async function performMove(direction: MoveDirection, loopGeneration: number): Promise<void> {
-  const player = state.player;
-  if (player === null) {
+  if (state.controlledActor === null) {
     return;
   }
 
-  const command: MovePlayerCommand = { playerId: player.id, direction };
+  const command: MoveActorCommand = { direction };
 
   try {
-    const result = await requestMovePlayer(command);
+    const result = await requestMoveActor(command);
     if (loopGeneration !== generation) {
       return;
     }
     // A concurrent `loadWorld`/`resetWorldState` invalidates this result.
-    if (state.player === null) {
+    if (state.controlledActor === null) {
       return;
     }
     applyMoveResult(result);
@@ -261,38 +273,38 @@ async function performMove(direction: MoveDirection, loopGeneration: number): Pr
     if (loopGeneration !== generation) {
       return;
     }
-    // Preserve the last authoritative world/player so the map stays visible;
+    // Preserve the last authoritative world/actor so the map stays visible;
     // only the status/error signal the failure.
     setState({
       status: 'error',
       world: state.world,
-      player: state.player,
+      controlledActor: state.controlledActor,
       error: toMoveErrorMessage(error),
     });
   }
 }
 
 /**
- * Map a movement failure to a user-presentable message. An unknown player
- * (404) is the one transport status with a specific, actionable meaning here.
+ * Map a movement failure to a user-presentable message. An unknown actor (404)
+ * is the one transport status with a specific, actionable meaning here.
  */
 function toMoveErrorMessage(error: unknown): string {
   if (error instanceof ApiError && error.kind === 'status' && error.status === 404) {
-    return 'That player could not be found.';
+    return 'That actor could not be found.';
   }
   return describeApiError(error, 'Something went wrong while moving.');
 }
 
 /**
- * Reconcile a server move result into state. `result.player.position` is
+ * Reconcile a server move result into state. `result.actor.position` is
  * authoritative; for a refused step (`moved: false`) it is unchanged, so the
  * visible position does not move and no error is raised.
  */
-function applyMoveResult(result: MovePlayerResult): void {
+function applyMoveResult(result: MoveActorResult): void {
   setState({
     status: 'ready',
     world: state.world,
-    player: toPlayerViewModel(result.player),
+    controlledActor: toControlledActorViewModel(result.actor),
     error: null,
   });
 }

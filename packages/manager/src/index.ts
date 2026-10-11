@@ -11,7 +11,7 @@ export type { CreateGameInfoManagerDeps, GameInfoManager } from './game-info-man
 
 export {
   DEFAULT_WORLD_SIZE,
-  UnknownPlayerError,
+  UnknownActorError,
   createWorldManager,
 } from './world-manager.ts';
-export type { CreateWorldManagerDeps, WorldManager } from './world-manager.ts';
+export type { CreateWorldManagerDeps, MoveActorInput, WorldManager } from './world-manager.ts';

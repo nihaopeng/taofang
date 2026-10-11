@@ -2,9 +2,10 @@
 
 Web Stardew — a browser farming game built as a multi-agent reference project.
 
-Phase 1 built the skeleton and one read path (`GET /api/game-info`). Phase 2 adds the
-first gameplay slice: a **server-authoritative World + Player + Movement** loop
-(`GET /api/world`, `POST /api/player/move`). There is still no prediction,
+Phase 1 built the skeleton and one read path (`GET /api/game-info`). Phase 2 added the
+first gameplay slice: a server-authoritative World + Movement loop. Phase 3 introduced the
+identity vocabulary (`EntityId` / `ActorId` / `PlayerId`) and migrated that loop to
+`ActorId` (`GET /api/world`, `POST /api/actor/move`). There is still no prediction,
 interpolation, collision, art, inventory, map, or NPCs.
 
 - Engineering policy: [`AGENTS.md`](./AGENTS.md)
@@ -78,15 +79,17 @@ npm run dev:server
 curl -s http://localhost:8787/api/game-info
 curl -s http://localhost:8787/api/health
 curl -s http://localhost:8787/api/world
-curl -s -X POST http://localhost:8787/api/player/move \
+curl -s -X POST http://localhost:8787/api/actor/move \
   -H 'content-type: application/json' \
-  -d '{"playerId":"player-1","direction":"east"}'
+  -d '{"direction":"east"}'
 ```
 
 Movement is authoritative: one tile per command, and a step that would leave the
 12x8 world returns `200` with `moved: false` and an unchanged position (a refused
-step is a normal outcome, not an error). An unknown `playerId` is `404`; invalid
-fields, malformed JSON, or a body over 64 KiB are `400`.
+step is a normal outcome, not an error). The move command carries **only** `direction`:
+the actor is resolved by the server from the request context, so a client cannot name
+the actor it acts as (an extra `actorId` or `playerId` field is a `400`). Invalid fields,
+malformed JSON, or a body over 64 KiB are `400`.
 
 ## Notes
 

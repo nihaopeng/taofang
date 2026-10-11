@@ -18,7 +18,7 @@ import { createServer } from 'node:http';
 import type { Server } from 'node:http';
 
 import { createGameInfoManager, createWorldManager } from '@starvalley/manager';
-import { GAME_INFO_PATH } from '@starvalley/protocol';
+import { GAME_INFO_PATH, PROTOCOL_VERSION, parseActorId } from '@starvalley/protocol';
 import { createRequestListener } from '@starvalley/router';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 
@@ -36,7 +36,13 @@ let baseUrl: string;
 
 beforeAll(async () => {
   const gameInfo = createGameInfoManager();
-  server = createServer(createRequestListener({ gameInfo, world: createWorldManager() }));
+  server = createServer(
+    createRequestListener({
+      gameInfo,
+      world: createWorldManager(),
+      resolveActorId: () => parseActorId('actor-1'),
+    }),
+  );
   await new Promise<void>((resolve) => {
     server.listen(0, '127.0.0.1', resolve);
   });
@@ -138,7 +144,7 @@ describe('vertical slice: organizer -> protocol -> router -> manager', () => {
       gameInfo: {
         gameName: 'Starvalley',
         serverVersion: '0.1.0',
-        protocolVersion: 1,
+        protocolVersion: PROTOCOL_VERSION,
         serverTime: expect.any(String) as unknown as string,
       },
     });

@@ -10,7 +10,7 @@ import { useSyncExternalStore } from 'react';
 import { getWorldState, subscribeWorld } from './world-store';
 import type { WorldState } from './world-store';
 
-/** Subscribe a component to the current world/player state. */
+/** Subscribe a component to the current world/controlled-actor state. */
 export function useWorld(): WorldState {
   return useSyncExternalStore(subscribeWorld, getWorldState, getWorldState);
 }

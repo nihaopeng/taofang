@@ -131,15 +131,15 @@ body {
   color: var(--leaf);
 }
 
-.world__player-info {
+.world__actor-info {
   margin: 0 0 0.75rem;
 }
 
-.world__player-name {
+.world__actor-name {
   font-weight: 600;
 }
 
-.world__player-coords {
+.world__actor-coords {
   color: #b9a583;
   font-variant-numeric: tabular-nums;
 }
@@ -165,7 +165,7 @@ body {
   background: #261d14;
 }
 
-.world__player {
+.world__actor {
   position: absolute;
   margin: -0.15rem;
   border-radius: 0.2rem;

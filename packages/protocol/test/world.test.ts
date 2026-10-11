@@ -1,18 +1,18 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  isActor,
   isGetWorldResponse,
-  isPlayer,
   isPosition,
   isWorldSize,
   isWorldSnapshot,
+  parseActor,
   parseGetWorldResponse,
-  parsePlayer,
   parsePosition,
   parseWorldSize,
   parseWorldSnapshot,
 } from '../src/index.ts';
-import { captureParseError, validPlayer, validPosition, validWorldSnapshot } from './support.ts';
+import { captureParseError, validActor, validPosition, validWorldSnapshot } from './support.ts';
 
 const nonObjects: Array<[string, unknown]> = [
   ['null', null],
@@ -113,46 +113,50 @@ describe('parseWorldSize', () => {
   });
 });
 
-describe('isPlayer', () => {
-  it('accepts a well-formed Player', () => {
-    expect(isPlayer(validPlayer)).toBe(true);
+describe('isActor', () => {
+  it('accepts a well-formed Actor', () => {
+    expect(isActor(validActor)).toBe(true);
   });
 
-  it('accepts an empty name but rejects an empty id', () => {
-    expect(isPlayer({ ...validPlayer, name: '' })).toBe(true);
-    expect(isPlayer({ ...validPlayer, id: '' })).toBe(false);
+  it('accepts an empty name but rejects an empty actorId', () => {
+    expect(isActor({ ...validActor, name: '' })).toBe(true);
+    expect(isActor({ ...validActor, actorId: '' })).toBe(false);
   });
 
   it.each(nonObjects)('rejects %s', (_label, value) => {
-    expect(isPlayer(value)).toBe(false);
+    expect(isActor(value)).toBe(false);
   });
 
-  it.each(['id', 'name', 'position'])('rejects a missing %s', (key) => {
-    const value: Record<string, unknown> = { ...validPlayer };
+  it.each(['actorId', 'name', 'position'])('rejects a missing %s', (key) => {
+    const value: Record<string, unknown> = { ...validActor };
     delete value[key];
-    expect(isPlayer(value)).toBe(false);
+    expect(isActor(value)).toBe(false);
   });
 
   it('rejects unknown extra fields and wrong field types', () => {
-    expect(isPlayer({ ...validPlayer, extra: true })).toBe(false);
-    expect(isPlayer({ ...validPlayer, id: 1 })).toBe(false);
-    expect(isPlayer({ ...validPlayer, name: null })).toBe(false);
-    expect(isPlayer({ ...validPlayer, position: [] })).toBe(false);
+    expect(isActor({ ...validActor, extra: true })).toBe(false);
+    expect(isActor({ ...validActor, actorId: 1 })).toBe(false);
+    expect(isActor({ ...validActor, name: null })).toBe(false);
+    expect(isActor({ ...validActor, position: [] })).toBe(false);
+  });
+
+  it('rejects the removed player shape (bare `id`, no `actorId`)', () => {
+    expect(isActor({ id: 'actor-1', name: 'Alex', position: validPosition })).toBe(false);
   });
 
   it('rejects a malformed position', () => {
-    expect(isPlayer({ ...validPlayer, position: { ...validPosition, x: 0.5 } })).toBe(false);
+    expect(isActor({ ...validActor, position: { ...validPosition, x: 0.5 } })).toBe(false);
   });
 });
 
-describe('parsePlayer', () => {
+describe('parseActor', () => {
   it('returns the value unchanged when valid', () => {
-    expect(parsePlayer(validPlayer)).toBe(validPlayer);
+    expect(parseActor(validActor)).toBe(validActor);
   });
 
   it('throws ProtocolParseError with a message when invalid', () => {
-    const error = captureParseError(() => parsePlayer({ ...validPlayer, id: '' }));
-    expect(error.message).toBe('Invalid Player payload');
+    const error = captureParseError(() => parseActor({ ...validActor, actorId: '' }));
+    expect(error.message).toBe('Invalid Actor payload');
     expect(error.code).toBe('BAD_REQUEST');
   });
 });
@@ -166,7 +170,7 @@ describe('isWorldSnapshot', () => {
     expect(isWorldSnapshot(value)).toBe(false);
   });
 
-  it.each(['size', 'player', 'serverTime'])('rejects a missing %s', (key) => {
+  it.each(['size', 'actor', 'serverTime'])('rejects a missing %s', (key) => {
     const value: Record<string, unknown> = { ...validWorldSnapshot };
     delete value[key];
     expect(isWorldSnapshot(value)).toBe(false);
@@ -187,15 +191,25 @@ describe('isWorldSnapshot', () => {
     expect(
       isWorldSnapshot({
         world: { size: { width: 20, height: 15 } },
-        player: validPlayer,
+        actor: validActor,
         serverTime: validWorldSnapshot.serverTime,
       }),
     ).toBe(false);
   });
 
-  it('rejects a malformed player', () => {
-    expect(isWorldSnapshot({ ...validWorldSnapshot, player: { id: '' } })).toBe(false);
-    expect(isWorldSnapshot({ ...validWorldSnapshot, player: [] })).toBe(false);
+  it('rejects the removed player-shaped snapshot (requires `actor`)', () => {
+    expect(
+      isWorldSnapshot({
+        size: { width: 20, height: 15 },
+        player: validActor,
+        serverTime: validWorldSnapshot.serverTime,
+      }),
+    ).toBe(false);
+  });
+
+  it('rejects a malformed actor', () => {
+    expect(isWorldSnapshot({ ...validWorldSnapshot, actor: { actorId: '' } })).toBe(false);
+    expect(isWorldSnapshot({ ...validWorldSnapshot, actor: [] })).toBe(false);
   });
 
   it('rejects a non-ISO serverTime', () => {
@@ -219,7 +233,18 @@ describe('parseWorldSnapshot', () => {
     const error = captureParseError(() =>
       parseWorldSnapshot({
         world: { size: { width: 20, height: 15 } },
-        player: validPlayer,
+        actor: validActor,
+        serverTime: validWorldSnapshot.serverTime,
+      }),
+    );
+    expect(error.message).toBe('Invalid WorldSnapshot payload');
+  });
+
+  it('rejects the removed player-shaped snapshot (requires `actor`)', () => {
+    const error = captureParseError(() =>
+      parseWorldSnapshot({
+        size: { width: 20, height: 15 },
+        player: validActor,
         serverTime: validWorldSnapshot.serverTime,
       }),
     );
@@ -245,6 +270,18 @@ describe('isGetWorldResponse', () => {
     expect(isGetWorldResponse({ world: { ...validWorldSnapshot, extra: 1 } })).toBe(false);
     expect(isGetWorldResponse({ world: null })).toBe(false);
   });
+
+  it('rejects the removed player-shaped snapshot inside `world`', () => {
+    expect(
+      isGetWorldResponse({
+        world: {
+          size: { width: 20, height: 15 },
+          player: validActor,
+          serverTime: validWorldSnapshot.serverTime,
+        },
+      }),
+    ).toBe(false);
+  });
 });
 
 describe('parseGetWorldResponse', () => {
@@ -264,7 +301,20 @@ describe('parseGetWorldResponse', () => {
       parseGetWorldResponse({
         world: {
           world: { size: { width: 20, height: 15 } },
-          player: validPlayer,
+          actor: validActor,
+          serverTime: validWorldSnapshot.serverTime,
+        },
+      }),
+    );
+    expect(error.message).toBe('Invalid GetWorldResponse payload');
+  });
+
+  it('rejects the removed player-shaped snapshot inside `world`', () => {
+    const error = captureParseError(() =>
+      parseGetWorldResponse({
+        world: {
+          size: { width: 20, height: 15 },
+          player: validActor,
           serverTime: validWorldSnapshot.serverTime,
         },
       }),

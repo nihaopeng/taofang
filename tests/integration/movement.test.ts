@@ -1,6 +1,7 @@
 /**
- * Main-owned integration test for the phase-2 vertical slice:
- * World / Player / Movement.
+ * Main-owned integration test for the phase-3 vertical slice:
+ * World + Player actor + Movement, with the caller identity resolved at the
+ * transport boundary.
  *
  * Like `game-info.test.ts` this deliberately imports a client module
  * (`apps/web/src/organizer`) together with backend modules
@@ -19,20 +20,28 @@ import type { Server } from 'node:http';
 
 import { createGameInfoManager, createWorldManager } from '@starvalley/manager';
 import type { WorldManager } from '@starvalley/manager';
-import { WORLD_PATH, parseGetWorldResponse } from '@starvalley/protocol';
+import {
+  MOVE_ACTOR_PATH,
+  WORLD_PATH,
+  parseActorId,
+  parseGetWorldResponse,
+} from '@starvalley/protocol';
+import type { ActorId } from '@starvalley/protocol';
 import { createRequestListener } from '@starvalley/router';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import {
   getWorldState,
   loadWorld,
-  movePlayer,
+  moveActor,
   resetWorldFetch,
   resetWorldState,
   setWorldFetch,
   subscribeWorld,
 } from '../../apps/web/src/organizer';
 import type { MoveDirection } from '../../apps/web/src/organizer';
+
+const ACTOR_ID = parseActorId('actor-1');
 
 let server: Server;
 let baseUrl: string;
@@ -45,17 +54,31 @@ let baseUrl: string;
  */
 let currentWorld: WorldManager;
 const world: WorldManager = {
-  getSnapshot: () => currentWorld.getSnapshot(),
-  movePlayer: (command) => currentWorld.movePlayer(command),
+  getSnapshot: (input) => currentWorld.getSnapshot(input),
+  moveActor: (input) => currentWorld.moveActor(input),
 };
+
+/**
+ * Stands in for the future session -> PlayerId -> controlled ActorId lookup.
+ * Mutable so a test can prove that the *resolver* decides the actor, never the
+ * request body.
+ */
+let currentActorId: ActorId;
 
 beforeEach(() => {
   currentWorld = createWorldManager();
+  currentActorId = ACTOR_ID;
 });
 
 beforeAll(async () => {
   const gameInfo = createGameInfoManager();
-  server = createServer(createRequestListener({ gameInfo, world }));
+  server = createServer(
+    createRequestListener({
+      gameInfo,
+      world,
+      resolveActorId: () => currentActorId,
+    }),
+  );
   await new Promise<void>((resolve) => {
     server.listen(0, '127.0.0.1', resolve);
   });
@@ -90,20 +113,20 @@ function useRealServer(): void {
   setWorldFetch((input, init) => fetch(new URL(input, baseUrl), init));
 }
 
-function position(): { x: number; y: number } {
-  const { player } = getWorldState();
-  if (player === null) {
-    throw new Error('expected a loaded player');
+function actorPosition(): { x: number; y: number } {
+  const { controlledActor } = getWorldState();
+  if (controlledActor === null) {
+    throw new Error('expected a loaded controlled actor');
   }
-  return { x: player.x, y: player.y };
+  return { x: controlledActor.x, y: controlledActor.y };
 }
 
 async function step(direction: MoveDirection): Promise<void> {
-  await movePlayer(direction);
+  await moveActor(direction);
 }
 
 describe('vertical slice: organizer -> protocol -> router -> manager (movement)', () => {
-  it('loads the authoritative world and places the player at the world centre', async () => {
+  it('loads the authoritative world with the controlled actor at the world centre', async () => {
     useRealServer();
 
     await loadWorld();
@@ -112,11 +135,12 @@ describe('vertical slice: organizer -> protocol -> router -> manager (movement)'
     expect(state.status).toBe('ready');
     expect(state.error).toBeNull();
     expect(state.world).toEqual({ width: 12, height: 8 });
-    expect(state.player).not.toBeNull();
-    expect(position()).toEqual({ x: 6, y: 4 });
+    expect(state.controlledActor).not.toBeNull();
+    expect(state.controlledActor?.actorId).toBe('actor-1');
+    expect(actorPosition()).toEqual({ x: 6, y: 4 });
   });
 
-  it('moves the player one tile east through the real request/response loop', async () => {
+  it('moves the actor one tile east through the real request/response loop', async () => {
     useRealServer();
     await loadWorld();
 
@@ -124,7 +148,7 @@ describe('vertical slice: organizer -> protocol -> router -> manager (movement)'
 
     expect(getWorldState().status).toBe('ready');
     expect(getWorldState().error).toBeNull();
-    expect(position()).toEqual({ x: 7, y: 4 });
+    expect(actorPosition()).toEqual({ x: 7, y: 4 });
   });
 
   it('applies each direction with the frozen deltas', async () => {
@@ -132,13 +156,13 @@ describe('vertical slice: organizer -> protocol -> router -> manager (movement)'
     await loadWorld();
 
     await step('south');
-    expect(position()).toEqual({ x: 6, y: 5 });
+    expect(actorPosition()).toEqual({ x: 6, y: 5 });
     await step('west');
-    expect(position()).toEqual({ x: 5, y: 5 });
+    expect(actorPosition()).toEqual({ x: 5, y: 5 });
     await step('north');
-    expect(position()).toEqual({ x: 5, y: 4 });
+    expect(actorPosition()).toEqual({ x: 5, y: 4 });
     await step('east');
-    expect(position()).toEqual({ x: 6, y: 4 });
+    expect(actorPosition()).toEqual({ x: 6, y: 4 });
   });
 
   it('observes the idle -> loading -> ready lifecycle against a real server', async () => {
@@ -158,41 +182,50 @@ describe('vertical slice: organizer -> protocol -> router -> manager (movement)'
     useRealServer();
     await loadWorld();
 
-    // Walk east from x=6 to the last tile: x=11.
     for (let i = 0; i < 5; i += 1) {
       await step('east');
     }
-    expect(position()).toEqual({ x: 11, y: 4 });
+    expect(actorPosition()).toEqual({ x: 11, y: 4 });
 
-    // The next step must be refused by the authoritative server...
     await step('east');
 
-    // ...as a normal outcome, not a failure.
     const state = getWorldState();
     expect(state.status).toBe('ready');
     expect(state.error).toBeNull();
-    expect(position()).toEqual({ x: 11, y: 4 });
+    expect(actorPosition()).toEqual({ x: 11, y: 4 });
 
-    // And the world must remain usable afterwards.
     await step('west');
-    expect(position()).toEqual({ x: 10, y: 4 });
+    expect(actorPosition()).toEqual({ x: 10, y: 4 });
   });
 
-  it('maps an unknown player (404) to a user-presentable error, keeping the world loaded', async () => {
+  it('rejects a command that tries to name the actor, because the body has no actor field', async () => {
+    // End-to-end proof of the authorization boundary at the wire level: the
+    // Organizer never sends an actor id, and the server rejects one if a client
+    // tries to supply it.
+    for (const body of [
+      { actorId: 'ghost', direction: 'north' },
+      { playerId: 'player-1', direction: 'north' },
+    ]) {
+      const response = await fetch(new URL(MOVE_ACTOR_PATH, baseUrl), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      expect(response.status).toBe(400);
+      const payload: unknown = await response.json();
+      expect(payload).toEqual({
+        error: { code: 'BAD_REQUEST', message: expect.any(String) as unknown as string },
+      });
+    }
+  });
+
+  it('resolves the actor from transport context, not from the client, and 404s an unknown one', async () => {
     useRealServer();
     await loadWorld();
-    // Re-point the same origin-relative call at the real server, but rewrite the
-    // command body so the server sees a player it does not know.
-    setWorldFetch((input, init) => {
-      if (init?.method === 'POST') {
-        const rewritten: RequestInit = {
-          ...init,
-          body: JSON.stringify({ playerId: 'ghost', direction: 'north' }),
-        };
-        return fetch(new URL(input, baseUrl), rewritten);
-      }
-      return fetch(new URL(input, baseUrl), init);
-    });
+    expect(actorPosition()).toEqual({ x: 6, y: 4 });
+
+    // Simulate a session that maps to an actor the world does not know.
+    currentActorId = parseActorId('ghost-actor');
 
     await step('north');
 
@@ -201,17 +234,26 @@ describe('vertical slice: organizer -> protocol -> router -> manager (movement)'
     expect(state.error).not.toBeNull();
     // The Organizer keeps the last authoritative world so the UI can still render.
     expect(state.world).toEqual({ width: 12, height: 8 });
-    expect(position()).toEqual({ x: 6, y: 4 });
+    expect(actorPosition()).toEqual({ x: 6, y: 4 });
   });
 
-  it('keeps the wire shape flat: the corrected WorldSnapshot has no nested world field', async () => {
-    // Guards against regressing to the original `response.world.world.size` wart.
+  it('exposes the actor on the wire and no longer exposes a player', async () => {
     const response = await fetch(new URL(WORLD_PATH, baseUrl));
     expect(response.status).toBe(200);
 
     const parsed = parseGetWorldResponse(await response.json());
     expect(parsed.world.size).toEqual({ width: 12, height: 8 });
-    expect(parsed.world.player.position).toEqual({ x: 6, y: 4 });
-    expect(Object.keys(parsed.world).sort()).toEqual(['player', 'serverTime', 'size']);
+    expect(parsed.world.actor.actorId).toBe('actor-1');
+    expect(parsed.world.actor.position).toEqual({ x: 6, y: 4 });
+    expect(Object.keys(parsed.world).sort()).toEqual(['actor', 'serverTime', 'size']);
+  });
+
+  it('no longer serves the phase-2 player-named move path', async () => {
+    const response = await fetch(new URL('/api/player/move', baseUrl), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ direction: 'east' }),
+    });
+    expect(response.status).toBe(404);
   });
 });

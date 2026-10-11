@@ -22,7 +22,7 @@ export function App() {
     <main className="app">
       <header className="app__header">
         <h1 className="app__title">Starvalley</h1>
-        <p className="app__subtitle">Server-authoritative world, player, and movement</p>
+        <p className="app__subtitle">Server-authoritative world, actor, and movement</p>
       </header>
       <GameInfoPanel />
       <WorldView />

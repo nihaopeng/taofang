@@ -17,26 +17,26 @@ export function captureParseError(fn: () => unknown): ProtocolParseError {
 export const validGameInfo = {
   gameName: 'Starvalley',
   serverVersion: '0.1.0',
-  protocolVersion: 1,
+  protocolVersion: 2,
   serverTime: '2025-01-02T03:04:05.000Z',
 };
 
 export const validPosition = { x: 3, y: 4 };
 
-export const validPlayer = {
-  id: 'player-1',
+export const validActor = {
+  actorId: 'actor-1',
   name: 'Alex',
   position: validPosition,
 };
 
 export const validWorldSnapshot = {
   size: { width: 20, height: 15 },
-  player: validPlayer,
+  actor: validActor,
   serverTime: '2025-01-02T03:04:05.000Z',
 };
 
-export const validMovePlayerResult = {
-  player: validPlayer,
+export const validMoveActorResult = {
+  actor: validActor,
   moved: true,
   serverTime: '2025-01-02T03:04:05.000Z',
 };

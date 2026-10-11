@@ -1,7 +1,7 @@
 import { ProtocolParseError } from './errors.ts';
-import { hasExactKeys, isIsoUtcString, isNonEmptyString, isRecord } from './internal.ts';
-import { isPlayer } from './world.ts';
-import type { Player, PlayerId } from './world.ts';
+import { hasExactKeys, isIsoUtcString, isRecord } from './internal.ts';
+import { isActor } from './world.ts';
+import type { Actor } from './world.ts';
 
 /**
  * Cardinal movement direction.
@@ -10,32 +10,37 @@ import type { Player, PlayerId } from './world.ts';
  */
 export type MoveDirection = 'north' | 'south' | 'east' | 'west';
 
-/** Request body for `PLAYER_MOVE_PATH`. */
-export interface MovePlayerCommand {
-  playerId: PlayerId;
+/**
+ * Request body for `MOVE_ACTOR_PATH`.
+ *
+ * Deliberately carries **no actor field**: a client may not name the actor it
+ * acts as. The actor is resolved by Router from transport context and passed to
+ * Manager out of band. An extra `actorId` field is rejected by the guard.
+ */
+export interface MoveActorCommand {
   direction: MoveDirection;
 }
 
 /** Outcome of a move attempt. */
-export interface MovePlayerResult {
-  player: Player;
+export interface MoveActorResult {
+  actor: Actor;
   /**
    * `false` when the step was blocked (for example a world edge). The returned
-   * `player.position` is then the unchanged authoritative position.
+   * `actor.position` is then the unchanged authoritative position.
    */
   moved: boolean;
   /** ISO-8601 UTC timestamp. */
   serverTime: string;
 }
 
-/** Response body for `PLAYER_MOVE_PATH`. */
-export interface MovePlayerResponse {
-  result: MovePlayerResult;
+/** Response body for `MOVE_ACTOR_PATH`. */
+export interface MoveActorResponse {
+  result: MoveActorResult;
 }
 
-const MOVE_PLAYER_COMMAND_KEYS = ['playerId', 'direction'] as const;
-const MOVE_PLAYER_RESULT_KEYS = ['player', 'moved', 'serverTime'] as const;
-const MOVE_PLAYER_RESPONSE_KEYS = ['result'] as const;
+const MOVE_ACTOR_COMMAND_KEYS = ['direction'] as const;
+const MOVE_ACTOR_RESULT_KEYS = ['actor', 'moved', 'serverTime'] as const;
+const MOVE_ACTOR_RESPONSE_KEYS = ['result'] as const;
 
 /** Structural guard for `MoveDirection`. */
 export function isMoveDirection(value: unknown): value is MoveDirection {
@@ -50,55 +55,55 @@ export function parseMoveDirection(value: unknown): MoveDirection {
   return value;
 }
 
-/** Structural guard for `MovePlayerCommand`. */
-export function isMovePlayerCommand(value: unknown): value is MovePlayerCommand {
-  if (!isRecord(value) || !hasExactKeys(value, MOVE_PLAYER_COMMAND_KEYS)) {
+/** Structural guard for `MoveActorCommand` (exactly `{ direction }`). */
+export function isMoveActorCommand(value: unknown): value is MoveActorCommand {
+  if (!isRecord(value) || !hasExactKeys(value, MOVE_ACTOR_COMMAND_KEYS)) {
     return false;
   }
-  return isNonEmptyString(value.playerId) && isMoveDirection(value.direction);
+  return isMoveDirection(value.direction);
 }
 
-/** Parse and validate `MovePlayerCommand`, throwing `ProtocolParseError` on mismatch. */
-export function parseMovePlayerCommand(value: unknown): MovePlayerCommand {
-  if (!isMovePlayerCommand(value)) {
-    throw new ProtocolParseError('Invalid MovePlayerCommand payload');
+/** Parse and validate `MoveActorCommand`, throwing `ProtocolParseError` on mismatch. */
+export function parseMoveActorCommand(value: unknown): MoveActorCommand {
+  if (!isMoveActorCommand(value)) {
+    throw new ProtocolParseError('Invalid MoveActorCommand payload');
   }
   return value;
 }
 
-/** Structural guard for `MovePlayerResult`. */
-export function isMovePlayerResult(value: unknown): value is MovePlayerResult {
-  if (!isRecord(value) || !hasExactKeys(value, MOVE_PLAYER_RESULT_KEYS)) {
+/** Structural guard for `MoveActorResult`. */
+export function isMoveActorResult(value: unknown): value is MoveActorResult {
+  if (!isRecord(value) || !hasExactKeys(value, MOVE_ACTOR_RESULT_KEYS)) {
     return false;
   }
   return (
-    isPlayer(value.player) &&
+    isActor(value.actor) &&
     typeof value.moved === 'boolean' &&
     isIsoUtcString(value.serverTime)
   );
 }
 
-/** Parse and validate `MovePlayerResult`, throwing `ProtocolParseError` on mismatch. */
-export function parseMovePlayerResult(value: unknown): MovePlayerResult {
-  if (!isMovePlayerResult(value)) {
-    throw new ProtocolParseError('Invalid MovePlayerResult payload');
+/** Parse and validate `MoveActorResult`, throwing `ProtocolParseError` on mismatch. */
+export function parseMoveActorResult(value: unknown): MoveActorResult {
+  if (!isMoveActorResult(value)) {
+    throw new ProtocolParseError('Invalid MoveActorResult payload');
   }
   return value;
 }
 
-/** Structural guard for `MovePlayerResponse` (exactly `{ result }`). */
-export function isMovePlayerResponse(value: unknown): value is MovePlayerResponse {
+/** Structural guard for `MoveActorResponse` (exactly `{ result }`). */
+export function isMoveActorResponse(value: unknown): value is MoveActorResponse {
   return (
     isRecord(value) &&
-    hasExactKeys(value, MOVE_PLAYER_RESPONSE_KEYS) &&
-    isMovePlayerResult(value.result)
+    hasExactKeys(value, MOVE_ACTOR_RESPONSE_KEYS) &&
+    isMoveActorResult(value.result)
   );
 }
 
-/** Parse and validate `MovePlayerResponse`, throwing `ProtocolParseError` on mismatch. */
-export function parseMovePlayerResponse(value: unknown): MovePlayerResponse {
-  if (!isMovePlayerResponse(value)) {
-    throw new ProtocolParseError('Invalid MovePlayerResponse payload');
+/** Parse and validate `MoveActorResponse`, throwing `ProtocolParseError` on mismatch. */
+export function parseMoveActorResponse(value: unknown): MoveActorResponse {
+  if (!isMoveActorResponse(value)) {
+    throw new ProtocolParseError('Invalid MoveActorResponse payload');
   }
   return value;
 }

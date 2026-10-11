@@ -1,8 +1,12 @@
 import { ProtocolParseError } from './errors.ts';
-import { hasExactKeys, isFiniteInteger, isIsoUtcString, isNonEmptyString, isRecord } from './internal.ts';
-
-/** Stable identifier for a player. Non-empty string. */
-export type PlayerId = string;
+import type { ActorId } from './identity.ts';
+import {
+  hasExactKeys,
+  isFiniteInteger,
+  isIsoUtcString,
+  isNonEmptyString,
+  isRecord,
+} from './internal.ts';
 
 /**
  * Integer tile coordinates. Origin is TOP-LEFT: `x` grows east, `y` grows south.
@@ -21,15 +25,19 @@ export interface WorldSize {
   height: number;
 }
 
-/** A player as exposed on the wire, carrying the authoritative server position. */
-export interface Player {
-  id: PlayerId;
+/**
+ * A thing that can act, as exposed on the wire, carrying the authoritative
+ * server position. The subject of a command is an `ActorId` (see `identity.ts`),
+ * and `actorId` is the explicit, self-describing wire field for it.
+ */
+export interface Actor {
+  actorId: ActorId;
   name: string;
   position: Position;
 }
 
 /**
- * Point-in-time authoritative world and local-player view.
+ * Point-in-time authoritative world and local-actor view.
  *
  * `size` carries the world's dimensions directly. Future world data (tiles,
  * objects, NPCs) is added as further fields of this snapshot rather than as
@@ -37,7 +45,7 @@ export interface Player {
  */
 export interface WorldSnapshot {
   size: WorldSize;
-  player: Player;
+  actor: Actor;
   /** ISO-8601 UTC timestamp. */
   serverTime: string;
 }
@@ -49,8 +57,8 @@ export interface GetWorldResponse {
 
 const POSITION_KEYS = ['x', 'y'] as const;
 const WORLD_SIZE_KEYS = ['width', 'height'] as const;
-const PLAYER_KEYS = ['id', 'name', 'position'] as const;
-const WORLD_SNAPSHOT_KEYS = ['size', 'player', 'serverTime'] as const;
+const ACTOR_KEYS = ['actorId', 'name', 'position'] as const;
+const WORLD_SNAPSHOT_KEYS = ['size', 'actor', 'serverTime'] as const;
 const GET_WORLD_RESPONSE_KEYS = ['world'] as const;
 
 /**
@@ -101,21 +109,25 @@ export function parseWorldSize(value: unknown): WorldSize {
 }
 
 /**
- * Structural guard for `Player`.
+ * Structural guard for `Actor`.
  *
- * `id` must be a non-empty string; `name` may be any string, including empty.
+ * `actorId` must be a non-empty string; `name` may be any string, including empty.
  */
-export function isPlayer(value: unknown): value is Player {
-  if (!isRecord(value) || !hasExactKeys(value, PLAYER_KEYS)) {
+export function isActor(value: unknown): value is Actor {
+  if (!isRecord(value) || !hasExactKeys(value, ACTOR_KEYS)) {
     return false;
   }
-  return isNonEmptyString(value.id) && typeof value.name === 'string' && isPosition(value.position);
+  return (
+    isNonEmptyString(value.actorId) &&
+    typeof value.name === 'string' &&
+    isPosition(value.position)
+  );
 }
 
-/** Parse and validate `Player`, throwing `ProtocolParseError` on mismatch. */
-export function parsePlayer(value: unknown): Player {
-  if (!isPlayer(value)) {
-    throw new ProtocolParseError('Invalid Player payload');
+/** Parse and validate `Actor`, throwing `ProtocolParseError` on mismatch. */
+export function parseActor(value: unknown): Actor {
+  if (!isActor(value)) {
+    throw new ProtocolParseError('Invalid Actor payload');
   }
   return value;
 }
@@ -125,7 +137,7 @@ export function isWorldSnapshot(value: unknown): value is WorldSnapshot {
   if (!isRecord(value) || !hasExactKeys(value, WORLD_SNAPSHOT_KEYS)) {
     return false;
   }
-  return isWorldSize(value.size) && isPlayer(value.player) && isIsoUtcString(value.serverTime);
+  return isWorldSize(value.size) && isActor(value.actor) && isIsoUtcString(value.serverTime);
 }
 
 /** Parse and validate `WorldSnapshot`, throwing `ProtocolParseError` on mismatch. */

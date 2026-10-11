@@ -19,14 +19,14 @@ export {
 
 export { useGameInfo } from './use-game-info';
 
-// World / player / movement feature.
-export type { MoveDirection, PlayerViewModel, WorldViewModel } from './world-view-model';
+// World / actor / movement feature.
+export type { ControlledActorViewModel, MoveDirection, WorldViewModel } from './world-view-model';
 export type { WorldState, WorldStatus } from './world-store';
 
 export {
   getWorldState,
   loadWorld,
-  movePlayer,
+  moveActor,
   resetWorldState,
   subscribeWorld,
 } from './world-store';

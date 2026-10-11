@@ -2,6 +2,8 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { PROTOCOL_VERSION } from '@starvalley/protocol';
+
 import {
   getGameInfoState,
   loadGameInfo,
@@ -16,7 +18,7 @@ import type { GameInfoState } from '../src/organizer/index.ts';
 const VALID_GAME_INFO = {
   gameName: 'Starvalley',
   serverVersion: '0.1.0',
-  protocolVersion: 1,
+  protocolVersion: PROTOCOL_VERSION,
   serverTime: '2025-01-02T03:04:05.000Z',
 };
 

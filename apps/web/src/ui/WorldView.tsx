@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef } from 'react';
 import type { CSSProperties } from 'react';
 
-import { loadWorld, movePlayer, useWorld } from '../organizer';
+import { loadWorld, moveActor, useWorld } from '../organizer';
 import type { MoveDirection } from '../organizer';
 
 /** Direction controls, in a stable order, with accessible names. */
@@ -32,21 +32,23 @@ const KEY_TO_DIRECTION: Readonly<Record<string, MoveDirection | undefined>> = {
 };
 
 /**
- * Pure presentation of the Organizer's world/player state.
+ * Pure presentation of the Organizer's world/actor state.
  *
- * Renders a `width x height` tile grid plus a marker at the authoritative player
- * tile, collects directional intent (buttons + keyboard), and shows loading /
- * error affordances. It never calls the backend: every intent goes through
- * `movePlayer` / `loadWorld` from the Organizer.
+ * Renders a `width x height` tile grid plus a marker at the authoritative tile
+ * of the actor the client controls, collects directional intent (buttons +
+ * keyboard), and shows loading / error affordances. It never calls the backend:
+ * every intent goes through `moveActor` / `loadWorld` from the Organizer. The UI
+ * deliberately does not know (or send) which actor it controls — that identity is
+ * resolved by the server from transport context.
  */
 export function WorldView() {
   const state = useWorld();
-  const { status, world, player, error } = state;
+  const { status, world, controlledActor, error } = state;
 
-  // Movement is only meaningful once an authoritative player exists. Keeping
-  // this in a ref lets the `keydown` listener attach exactly once (and detach on
-  // unmount) instead of being re-registered on every state transition.
-  const canMove = status === 'ready' && player !== null;
+  // Movement is only meaningful once an authoritative controlled actor exists.
+  // Keeping this in a ref lets the `keydown` listener attach exactly once (and
+  // detach on unmount) instead of being re-registered on every state transition.
+  const canMove = status === 'ready' && controlledActor !== null;
   const canMoveRef = useRef(canMove);
   canMoveRef.current = canMove;
 
@@ -76,7 +78,7 @@ export function WorldView() {
       if (!canMoveRef.current) {
         return;
       }
-      void movePlayer(direction);
+      void moveActor(direction);
     };
 
     window.addEventListener('keydown', handleKeyDown);
@@ -108,12 +110,12 @@ export function WorldView() {
           aspectRatio: `${world.width} / ${world.height}`,
         };
 
-  const playerStyle: CSSProperties | undefined =
-    world === null || player === null
+  const actorStyle: CSSProperties | undefined =
+    world === null || controlledActor === null
       ? undefined
       : {
-          left: `${(player.x / world.width) * 100}%`,
-          top: `${(player.y / world.height) * 100}%`,
+          left: `${(controlledActor.x / world.width) * 100}%`,
+          top: `${(controlledActor.y / world.height) * 100}%`,
           width: `${100 / world.width}%`,
           height: `${100 / world.height}%`,
         };
@@ -122,16 +124,16 @@ export function WorldView() {
     <section className="world" data-testid="world-panel" data-status={status}>
       <h2 className="world__heading">World</h2>
 
-      {player !== null ? (
-        <p className="world__player-info" data-testid="player-info">
-          <span className="world__player-name">{player.name}</span>{' '}
-          <span className="world__player-coords">
-            ({player.x}, {player.y})
+      {controlledActor !== null ? (
+        <p className="world__actor-info" data-testid="controlled-actor-info">
+          <span className="world__actor-name">{controlledActor.name}</span>{' '}
+          <span className="world__actor-coords">
+            ({controlledActor.x}, {controlledActor.y})
           </span>
         </p>
       ) : null}
 
-      {world !== null && player !== null ? (
+      {world !== null && controlledActor !== null ? (
         <div
           className="world__board"
           data-testid="world-grid"
@@ -141,11 +143,11 @@ export function WorldView() {
         >
           {tiles}
           <div
-            className="world__player"
-            data-testid="player"
-            data-x={player.x}
-            data-y={player.y}
-            style={playerStyle}
+            className="world__actor"
+            data-testid="controlled-actor"
+            data-x={controlledActor.x}
+            data-y={controlledActor.y}
+            style={actorStyle}
           />
         </div>
       ) : null}
@@ -181,7 +183,7 @@ export function WorldView() {
             data-testid={`move-${direction}`}
             disabled={!canMove}
             onClick={() => {
-              void movePlayer(direction);
+              void moveActor(direction);
             }}
           >
             <span aria-hidden="true">{glyph}</span>

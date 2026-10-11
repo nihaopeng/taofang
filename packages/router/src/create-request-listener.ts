@@ -1,15 +1,27 @@
 import type { IncomingMessage, RequestListener, ServerResponse } from 'node:http';
 import { ProtocolParseError } from '@starvalley/protocol';
-import type { ProtocolErrorCode } from '@starvalley/protocol';
-import { UnknownPlayerError } from '@starvalley/manager';
+import type { ActorId, ProtocolErrorCode } from '@starvalley/protocol';
+import { UnknownActorError } from '@starvalley/manager';
 import type { GameInfoManager, WorldManager } from '@starvalley/manager';
 import { mapErrorCodeToStatus, protocolErrorBody } from './http-errors.ts';
 import { allowedMethods, findRoute, isKnownPath } from './routes.ts';
+
+/**
+ * The single caller-identity seam: transport context in, `ActorId` out.
+ *
+ * This is the ONLY place the actor a request acts as is decided, and it reads
+ * TRANSPORT CONTEXT (the raw request), never the request body. Today the
+ * composition root returns the server's single local actor. A future session
+ * slice resolves session/cookie/header -> `PlayerId` -> the `ActorId` that
+ * player controls here, without changing any route handler.
+ */
+export type ResolveActorId = (request: IncomingMessage) => ActorId | Promise<ActorId>;
 
 /** Typed collaborators the Router layer needs from the application. */
 export interface RouterDependencies {
   readonly gameInfo: GameInfoManager;
   readonly world: WorldManager;
+  readonly resolveActorId: ResolveActorId;
 }
 
 const JSON_CONTENT_TYPE = 'application/json; charset=utf-8';
@@ -191,9 +203,13 @@ async function handleRequest(
     }
 
     const body = await readRequestBody(request, method);
+    // Resolve the caller identity exactly once per request, from transport
+    // context (never the body), then pass it as typed context to the handler.
+    const actorId = await deps.resolveActorId(request);
     const result = await route.handle({
       gameInfo: deps.gameInfo,
       world: deps.world,
+      actorId,
       url,
       body,
     });
@@ -213,11 +229,14 @@ async function handleRequest(
       sendProtocolError(response, error.code, error.message);
       return;
     }
-    if (error instanceof UnknownPlayerError) {
-      sendProtocolError(response, 'NOT_FOUND', `Unknown player: ${error.playerId}`);
+    if (error instanceof UnknownActorError) {
+      // The resolved actor does not exist in the world. The actor id is safe to
+      // name: it came from Transport, not from the client body.
+      sendProtocolError(response, 'NOT_FOUND', `Unknown actor: ${error.actorId}`);
       return;
     }
-    // Log server-side; never leak the message/stack to the client.
+    // Log server-side; never leak the message/stack to the client. This also
+    // covers a rejecting `resolveActorId`: its reason stays server-side.
     console.error('[router] unhandled error while serving request:', error);
     if (response.headersSent) {
       if (!response.writableEnded) {

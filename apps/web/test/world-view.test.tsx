@@ -7,6 +7,10 @@
  * (`organizer/index.ts`) plus its test-only fetch hook, `setWorldFetch`; they
  * never import Protocol, backend, or Node modules, and they never call `fetch`
  * themselves.
+ *
+ * After the Phase-3 identity migration the client controls an **actor**. The
+ * move command carries only a direction: the client cannot name the actor it
+ * acts as, so the request body must not contain an actor/player id.
  */
 
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -27,15 +31,20 @@ import { WorldView } from '../src/ui/WorldView.tsx';
 
 const SERVER_TIME = '2025-01-02T03:04:05.000Z';
 
-const VALID_PLAYER = {
-  id: 'player-1',
+// Arbitrary: the protocol guard accepts any finite integer, the UI never reads
+// this field, and a real client-side version gate belongs in the Organizer
+// using the contract constant. It is only here to shape a valid fixture.
+const ARBITRARY_PROTOCOL_VERSION = 1;
+
+const VALID_ACTOR = {
+  actorId: 'actor-1',
   name: 'Alex',
   position: { x: 3, y: 4 },
 };
 
 const VALID_SNAPSHOT = {
   size: { width: 10, height: 8 },
-  player: VALID_PLAYER,
+  actor: VALID_ACTOR,
   serverTime: SERVER_TIME,
 };
 
@@ -45,7 +54,7 @@ const VALID_GAME_INFO_RESPONSE = {
   gameInfo: {
     gameName: 'Starvalley',
     serverVersion: '0.1.0',
-    protocolVersion: 1,
+    protocolVersion: ARBITRARY_PROTOCOL_VERSION,
     serverTime: SERVER_TIME,
   },
 };
@@ -60,11 +69,11 @@ function fakeResponse(body: unknown, init: { ok?: boolean; status?: number } = {
   return response as unknown as Response;
 }
 
-/** Build a valid `MovePlayerResponse` body. */
+/** Build a valid `MoveActorResponse` body. */
 function moveResponse(position: { x: number; y: number }, moved = true): unknown {
   return {
     result: {
-      player: { ...VALID_PLAYER, position },
+      actor: { ...VALID_ACTOR, position },
       moved,
       serverTime: SERVER_TIME,
     },
@@ -127,7 +136,7 @@ afterEach(() => {
 });
 
 describe('WorldView rendering', () => {
-  it('renders the grid with the Organizer dimensions and the marker on the player tile', async () => {
+  it('renders the grid with the Organizer dimensions and the marker on the controlled actor tile', async () => {
     await loadValidWorld();
 
     render(<WorldView />);
@@ -136,12 +145,12 @@ describe('WorldView rendering', () => {
     expect(grid.getAttribute('data-width')).toBe('10');
     expect(grid.getAttribute('data-height')).toBe('8');
 
-    const marker = screen.getByTestId('player');
+    const marker = screen.getByTestId('controlled-actor');
     expect(marker.getAttribute('data-x')).toBe('3');
     expect(marker.getAttribute('data-y')).toBe('4');
 
-    // The player's name and tile coordinates are exposed to the user.
-    const info = screen.getByTestId('player-info');
+    // The actor's name and tile coordinates are exposed to the user.
+    const info = screen.getByTestId('controlled-actor-info');
     expect(within(info).getByText('Alex')).toBeTruthy();
     expect(info.textContent).toContain('(3, 4)');
   });
@@ -166,7 +175,7 @@ describe('WorldView direction controls', () => {
     }
   });
 
-  it('issues exactly one move for the clicked direction, built from the loaded player', async () => {
+  it('issues exactly one direction-only move for the clicked direction', async () => {
     await loadValidWorld();
 
     const requests: CapturedRequest[] = [];
@@ -178,8 +187,12 @@ describe('WorldView direction controls', () => {
     await waitFor(() => {
       expect(requests).toHaveLength(1);
     });
+    // The UI's intent is the direction alone: the server resolves which actor
+    // the caller controls, so the client must not be able to name one.
     expect(requests[0].method).toBe('POST');
-    expect(requests[0].body).toEqual({ playerId: 'player-1', direction: 'east' });
+    expect(requests[0].body).toEqual({ direction: 'east' });
+    expect(requests[0].body).not.toHaveProperty('actorId');
+    expect(requests[0].body).not.toHaveProperty('playerId');
 
     // And exactly one: no duplicate dispatch on top of the click.
     await Promise.resolve();
@@ -202,7 +215,9 @@ describe('WorldView keyboard input', () => {
     await waitFor(() => {
       expect(requests).toHaveLength(1);
     });
-    expect(requests[0].body).toEqual({ playerId: 'player-1', direction: 'east' });
+    expect(requests[0].body).toEqual({ direction: 'east' });
+    expect(requests[0].body).not.toHaveProperty('actorId');
+    expect(requests[0].body).not.toHaveProperty('playerId');
 
     // A repeat event is the same physical press held down; it must not move again.
     pressKey('ArrowRight', { repeat: true });
@@ -230,7 +245,7 @@ describe('WorldView keyboard input', () => {
     await waitFor(() => {
       expect(requests).toHaveLength(1);
     });
-    expect(requests[0].body).toEqual({ playerId: 'player-1', direction: 'east' });
+    expect(requests[0].body).toEqual({ direction: 'east' });
   });
 });
 
