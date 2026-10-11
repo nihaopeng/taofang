@@ -1,23 +1,42 @@
-import { GAME_INFO_PATH, HEALTH_PATH } from '@starvalley/protocol';
-import type { GetGameInfoResponse, HealthStatus } from '@starvalley/protocol';
-import type { GameInfoManager } from '@starvalley/manager';
+import {
+  GAME_INFO_PATH,
+  HEALTH_PATH,
+  PLAYER_MOVE_PATH,
+  WORLD_PATH,
+  parseMovePlayerCommand,
+} from '@starvalley/protocol';
+import type {
+  GetGameInfoResponse,
+  GetWorldResponse,
+  HealthStatus,
+  MovePlayerResponse,
+} from '@starvalley/protocol';
+import type { GameInfoManager, WorldManager } from '@starvalley/manager';
 
 /**
  * Everything a route handler may read from the inbound request.
  *
- * Handlers receive typed inputs only: the Manager they may call and the parsed
- * URL. Raw `IncomingMessage`/`ServerResponse` objects stay in the listener so
- * framework details never leak past the Router boundary.
+ * Handlers receive typed inputs only: the Managers they may call, the parsed
+ * URL, and the parsed JSON body. Raw `IncomingMessage`/`ServerResponse` objects
+ * stay in the listener so framework details never leak past the Router boundary.
+ *
+ * `body` is `undefined` when the request carries no body (for example GET).
  */
 export interface RouteContext {
   readonly gameInfo: GameInfoManager;
+  readonly world: WorldManager;
   readonly url: URL;
+  readonly body: unknown;
 }
 
 /** A serialized, Protocol-compliant success payload. */
 export interface RouteResponse {
   readonly status: number;
-  readonly body: GetGameInfoResponse | HealthStatus;
+  readonly body:
+    | GetGameInfoResponse
+    | GetWorldResponse
+    | HealthStatus
+    | MovePlayerResponse;
 }
 
 /** A declarative route entry: method + path + thin handler. */
@@ -42,6 +61,26 @@ export const ROUTES: readonly RouteDefinition[] = [
     handle: ({ gameInfo }) => {
       const body: HealthStatus = gameInfo.getHealth();
       return { status: 200, body };
+    },
+  },
+  {
+    method: 'GET',
+    path: WORLD_PATH,
+    handle: ({ world }) => {
+      const body: GetWorldResponse = { world: world.getSnapshot() };
+      return { status: 200, body };
+    },
+  },
+  {
+    method: 'POST',
+    path: PLAYER_MOVE_PATH,
+    handle: ({ world, body }) => {
+      // Router validates shape and delegates the decision (including world-edge
+      // refusal) to the Manager; it never reimplements movement rules.
+      const command = parseMovePlayerCommand(body);
+      const result = world.movePlayer(command);
+      const responseBody: MovePlayerResponse = { result };
+      return { status: 200, body: responseBody };
     },
   },
 ];
@@ -70,7 +109,7 @@ export function findRoute(path: string, method: string): RouteDefinition | undef
  * Methods allowed for a known path, in declaration order, deduplicated.
  *
  * GET implies HEAD (RFC 9110), so HEAD is advertised wherever GET is allowed
- * even though only the GET handler is registered.
+ * even though only the GET handler is registered. POST does not imply HEAD.
  */
 export function allowedMethods(path: string): string[] {
   const methods = ROUTES.filter((route) => route.path === path).map((route) => route.method);

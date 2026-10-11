@@ -1,15 +1,21 @@
 import { useEffect } from 'react';
 
-import { loadGameInfo } from '../organizer';
+import { loadGameInfo, loadWorld } from '../organizer';
 import { GameInfoPanel } from './GameInfoPanel';
+import { WorldView } from './WorldView';
 
 /**
- * Page shell. On mount it emits the Organizer intent to load game info; the
- * panel below renders whatever state the Organizer exposes.
+ * Page shell. On mount it emits the Organizer intents to load game info and the
+ * world; the panels below render whatever state the Organizer exposes. The two
+ * loads are independent resources, so they get separate effects.
  */
 export function App() {
   useEffect(() => {
     void loadGameInfo();
+  }, []);
+
+  useEffect(() => {
+    void loadWorld();
   }, []);
 
   return (
@@ -19,6 +25,7 @@ export function App() {
         <p className="app__subtitle">Web Stardew — phase 1 skeleton</p>
       </header>
       <GameInfoPanel />
+      <WorldView />
     </main>
   );
 }

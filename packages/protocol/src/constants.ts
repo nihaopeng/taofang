@@ -11,3 +11,9 @@ export const GAME_INFO_PATH = '/api/game-info';
 
 /** Wire path for the health endpoint. Transport-neutral: Router maps it. */
 export const HEALTH_PATH = '/api/health';
+
+/** Wire path for the world snapshot endpoint (GET). Transport-neutral: Router maps it. */
+export const WORLD_PATH = '/api/world';
+
+/** Wire path for the player move command (POST). Transport-neutral: Router maps it. */
+export const PLAYER_MOVE_PATH = '/api/player/move';

@@ -55,6 +55,11 @@ export function isIsoUtcString(value: unknown): value is string {
   );
 }
 
+/** Validate a non-empty string (rejects the empty string). */
+export function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0;
+}
+
 /** Validate a finite integer (any sign; callers add sign constraints if needed). */
 export function isFiniteInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value) && Number.isInteger(value);

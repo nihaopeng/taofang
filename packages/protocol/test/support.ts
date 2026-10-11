@@ -20,3 +20,23 @@ export const validGameInfo = {
   protocolVersion: 1,
   serverTime: '2025-01-02T03:04:05.000Z',
 };
+
+export const validPosition = { x: 3, y: 4 };
+
+export const validPlayer = {
+  id: 'player-1',
+  name: 'Alex',
+  position: validPosition,
+};
+
+export const validWorldSnapshot = {
+  size: { width: 20, height: 15 },
+  player: validPlayer,
+  serverTime: '2025-01-02T03:04:05.000Z',
+};
+
+export const validMovePlayerResult = {
+  player: validPlayer,
+  moved: true,
+  serverTime: '2025-01-02T03:04:05.000Z',
+};

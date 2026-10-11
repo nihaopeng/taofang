@@ -113,3 +113,118 @@ body {
     opacity: 0.45;
   }
 }
+
+.world {
+  margin-top: 1.5rem;
+  padding: 1.25rem 1.5rem;
+  border: 1px solid #55432f;
+  border-radius: 0.75rem;
+  background: var(--soil-raised);
+  box-shadow: 0 0.75rem 2rem rgb(0 0 0 / 30%);
+}
+
+.world__heading {
+  margin: 0 0 1rem;
+  font-size: 1rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--leaf);
+}
+
+.world__player-info {
+  margin: 0 0 0.75rem;
+}
+
+.world__player-name {
+  font-weight: 600;
+}
+
+.world__player-coords {
+  color: #b9a583;
+  font-variant-numeric: tabular-nums;
+}
+
+.world__board {
+  position: relative;
+  display: grid;
+  grid-auto-rows: 1fr;
+  width: 100%;
+  max-width: 24rem;
+  border: 1px solid #1d1710;
+  border-radius: 0.4rem;
+  background: #1a140e;
+  overflow: hidden;
+}
+
+.world__tile {
+  border: 1px solid #241c14;
+  background: #221a12;
+}
+
+.world__tile:nth-child(even) {
+  background: #261d14;
+}
+
+.world__player {
+  position: absolute;
+  margin: -0.15rem;
+  border-radius: 0.2rem;
+  background: radial-gradient(circle at 35% 30%, #f6e6a8 0%, var(--leaf) 55%, #4f7a2c 100%);
+  box-shadow: 0 0 0.6rem rgb(143 191 90 / 70%);
+  pointer-events: none;
+}
+
+.world__loading {
+  margin: 0 0 0.75rem;
+  color: var(--sky);
+  animation: game-info-pulse 1.4s ease-in-out infinite;
+}
+
+.world__message {
+  margin: 0 0 0.75rem;
+  color: var(--danger);
+}
+
+.world__retry {
+  padding: 0.45rem 1.1rem;
+  border: 1px solid var(--leaf);
+  border-radius: 0.4rem;
+  background: transparent;
+  color: var(--leaf);
+  font: inherit;
+  cursor: pointer;
+}
+
+.world__retry:hover {
+  background: var(--leaf);
+  color: var(--soil);
+}
+
+.world__controls {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.world__control {
+  width: 2.5rem;
+  height: 2.5rem;
+  border: 1px solid var(--leaf);
+  border-radius: 0.4rem;
+  background: transparent;
+  color: var(--leaf);
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.world__control:hover:not(:disabled) {
+  background: var(--leaf);
+  color: var(--soil);
+}
+
+.world__control:disabled {
+  border-color: #55432f;
+  color: #6b5a44;
+  cursor: not-allowed;
+}

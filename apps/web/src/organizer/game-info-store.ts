@@ -8,7 +8,8 @@
  * cached view model against each successful response.
  */
 
-import { GameInfoApiError, fetchGameInfo } from './api-client';
+import { fetchGameInfo } from './api-client';
+import { describeApiError } from './transport';
 import { toGameInfoViewModel } from './view-model';
 import type { ConnectionStatus, GameInfoViewModel } from './view-model';
 
@@ -112,15 +113,5 @@ function setState(next: GameInfoState): void {
 
 /** Map an internal transport failure to a short, user-presentable message. */
 function toUserMessage(error: unknown): string {
-  if (error instanceof GameInfoApiError) {
-    switch (error.kind) {
-      case 'network':
-        return 'Could not reach the game server. Check your connection and try again.';
-      case 'status':
-        return `The game server returned an error (HTTP ${error.status ?? 'unknown'}).`;
-      case 'contract':
-        return 'The game server sent an unexpected response.';
-    }
-  }
-  return 'Something went wrong while loading game info.';
+  return describeApiError(error, 'Something went wrong while loading game info.');
 }

@@ -8,3 +8,10 @@
 
 export { SERVER_VERSION, createGameInfoManager } from './game-info-manager.ts';
 export type { CreateGameInfoManagerDeps, GameInfoManager } from './game-info-manager.ts';
+
+export {
+  DEFAULT_WORLD_SIZE,
+  UnknownPlayerError,
+  createWorldManager,
+} from './world-manager.ts';
+export type { CreateWorldManagerDeps, WorldManager } from './world-manager.ts';

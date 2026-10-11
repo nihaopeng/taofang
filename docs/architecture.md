@@ -94,6 +94,59 @@ function resetGameInfoState(): void
 // useGameInfo must be SSR-safe: useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot)
 ```
 
+## Phase 2 frozen contract — World / Player / Movement
+
+Main froze this before parallel implementation. `protocol` owns the definitions; no other
+module may invent a wire field.
+
+```ts
+// transport
+WORLD_PATH       = '/api/world'          // GET  -> GetWorldResponse
+PLAYER_MOVE_PATH = '/api/player/move'    // POST MovePlayerCommand -> MovePlayerResponse
+
+// shared identifiers / enums
+type PlayerId      = string
+type MoveDirection = 'north' | 'south' | 'east' | 'west'
+
+// value objects (integer tile coordinates; origin TOP-LEFT, x -> east, y -> south)
+interface Position  { x: number; y: number }
+interface WorldSize { width: number; height: number }   // positive integers
+interface Player    { id: PlayerId; name: string; position: Position }
+
+// read
+type WorldSnapshot  = { size: WorldSize; player: Player; serverTime: string }
+interface GetWorldResponse  { world: WorldSnapshot }
+
+// command / result
+interface MovePlayerCommand { playerId: PlayerId; direction: MoveDirection }
+interface MovePlayerResult  { player: Player; moved: boolean; serverTime: string }
+interface MovePlayerResponse { result: MovePlayerResult }
+```
+
+> **Correction (Main, after Wave 2):** this section originally declared
+> `WorldSnapshot = { world: { size: WorldSize }; player; serverTime }`, which nested a
+> `world` field inside the `world` response envelope and forced every consumer to write
+> `response.world.world.size`. That was a defect in Main's frozen contract, not an
+> implementation error. `WorldSnapshot` now carries `size` directly, so consumers read
+> `response.world.size` / `response.world.player`. Future world data (tiles, objects,
+> NPCs) is added as further `WorldSnapshot` fields rather than as another nesting level.
+> `GetWorldResponse` and `PROTOCOL_VERSION = 1` are unchanged.
+
+Semantics frozen for this slice:
+- `north` = y-1, `south` = y+1, `east` = x+1, `west` = x-1.
+- The target tile must satisfy `0 <= x < width` and `0 <= y < height`. A step that would
+  leave the world is **not an error**: the server returns 200 with `moved: false` and the
+  unchanged authoritative position. (Manager decides this at runtime; Protocol only
+  declares the shape.)
+- Unknown `playerId` -> `NOT_FOUND` (404). Invalid/missing fields or malformed JSON ->
+  `BAD_REQUEST` (400).
+- `serverTime` is an ISO-8601 UTC string, same guard as `GameInfo`.
+- `PROTOCOL_VERSION` stays `1`: this slice only **adds** endpoints and DTOs; no existing
+  shape changes.
+- Explicitly out of scope: prediction, interpolation, collision, pathfinding, art,
+  authentication/authorization (the command carries `playerId`, but the server does not yet
+  verify that the caller owns it).
+
 ## Environment
 
 | Variable | Default | Used by |

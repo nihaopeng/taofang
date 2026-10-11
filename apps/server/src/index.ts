@@ -1,5 +1,5 @@
 import { createServer } from 'node:http';
-import { createGameInfoManager } from '@starvalley/manager';
+import { createGameInfoManager, createWorldManager } from '@starvalley/manager';
 import { createRequestListener } from '@starvalley/router';
 
 /**
@@ -11,7 +11,8 @@ import { createRequestListener } from '@starvalley/router';
 const port = Number(process.env.PORT ?? 8787);
 
 const gameInfo = createGameInfoManager();
-const server = createServer(createRequestListener({ gameInfo }));
+const world = createWorldManager();
+const server = createServer(createRequestListener({ gameInfo, world }));
 
 server.listen(port, () => {
   console.log(`[server] listening on http://localhost:${port}`);

@@ -17,7 +17,7 @@
 import { createServer } from 'node:http';
 import type { Server } from 'node:http';
 
-import { createGameInfoManager } from '@starvalley/manager';
+import { createGameInfoManager, createWorldManager } from '@starvalley/manager';
 import { GAME_INFO_PATH } from '@starvalley/protocol';
 import { createRequestListener } from '@starvalley/router';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
@@ -36,7 +36,7 @@ let baseUrl: string;
 
 beforeAll(async () => {
   const gameInfo = createGameInfoManager();
-  server = createServer(createRequestListener({ gameInfo }));
+  server = createServer(createRequestListener({ gameInfo, world: createWorldManager() }));
   await new Promise<void>((resolve) => {
     server.listen(0, '127.0.0.1', resolve);
   });
