@@ -50,9 +50,9 @@ const listeners = new Set<Listener>();
  *
  * Exactly one move request may be in flight at a time (`activeMoveToken`). While
  * one is in flight, `movePlayer` records only the *latest* requested direction
- * (`queuedDirection`) and returns a promise that settles once that direction has
- * been dispatched. This bounds held-key input to one request per settle and keeps
- * ordering deterministic.
+ * (`queuedDirection`) and returns a promise that settles once the in-flight
+ * request that superseded it (or its own request) has settled. This bounds
+ * held-key input to one request per settle and keeps ordering deterministic.
  */
 interface MoveLoopToken {
   readonly active: true;
@@ -190,35 +190,49 @@ async function runMoveLoop(
 
   try {
     // Dispatch `currentDirection`, then adopt the latest queued direction (if
-    // any) as the next request. Waiters attached to a direction resolve once
-    // that direction's request has settled.
+    // any) as the next request. Waiters attached to a direction resolve once the
+    // request that superseded it (or its own request) has settled.
     for (;;) {
       await performMove(currentDirection, loopGeneration);
+
+      // Settle the waiters attached to the request that just completed. These
+      // are owned by this loop regardless of whether it is still current.
+      for (const resolve of currentWaiters) {
+        resolve();
+      }
+      currentWaiters = [];
+
+      // A reset supersedes this loop. `resetWorldState` already drained the
+      // waiters that were queued when it ran, and any newer queue belongs to the
+      // loop that now owns the token. Do not consume it: touching the shared
+      // queue here would silently drop a newer caller's direction and leave its
+      // promise unsettled forever.
+      if (loopGeneration !== generation) {
+        break;
+      }
 
       const nextDirection = queuedDirection;
       const nextWaiters = queuedWaiters;
       queuedDirection = null;
       queuedWaiters = [];
 
-      for (const resolve of currentWaiters) {
-        resolve();
-      }
-      currentWaiters = [];
-
-      if (loopGeneration !== generation || nextDirection === null) {
+      if (nextDirection === null) {
         break;
       }
       currentDirection = nextDirection;
       currentWaiters = nextWaiters;
     }
   } finally {
-    // Drain anything queued after the last dispatch (e.g. after a reset) so no
-    // caller is left waiting.
-    for (const resolve of queuedWaiters) {
-      resolve();
+    // Only the current generation's loop owns the shared queue. Drain anything
+    // queued after the final dispatch so no caller is left waiting. A superseded
+    // loop must not touch the queue owned by its successor.
+    if (loopGeneration === generation) {
+      for (const resolve of queuedWaiters) {
+        resolve();
+      }
+      queuedWaiters = [];
+      queuedDirection = null;
     }
-    queuedWaiters = [];
-    queuedDirection = null;
     if (activeMoveToken === token) {
       activeMoveToken = null;
     }

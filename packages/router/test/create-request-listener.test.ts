@@ -213,6 +213,41 @@ describe('createRequestListener', () => {
     }
   });
 
+  it('maps a thrown manager error on the move path to an opaque 500 INTERNAL_ERROR', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const secret = 'move-secret-message with stack detail';
+    const baseUrl = await startServer(
+      createFakeManager(),
+      createTestWorld({
+        movePlayer: () => {
+          throw new Error(secret);
+        },
+      }),
+    );
+
+    try {
+      const response = await postMove(
+        baseUrl,
+        JSON.stringify({ playerId: 'player-1', direction: 'east' }),
+      );
+
+      expect(response.status).toBe(500);
+      expect(response.headers.get('content-type')).toBe('application/json; charset=utf-8');
+
+      const raw = await response.text();
+      expect(raw).not.toContain(secret);
+      expect(raw).not.toContain('Error');
+      expect(raw).not.toContain('at ');
+
+      const body = JSON.parse(raw) as ProtocolError;
+      expect(body.error.code).toBe('INTERNAL_ERROR');
+      expect(body.error.message).toBe('Internal server error');
+      expect(consoleError).toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
   it('serves GET /api/world as a protocol GetWorldResponse', async () => {
     const baseUrl = await startServer();
 

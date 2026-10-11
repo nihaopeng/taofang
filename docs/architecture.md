@@ -147,6 +147,27 @@ Semantics frozen for this slice:
   authentication/authorization (the command carries `playerId`, but the server does not yet
   verify that the caller owns it).
 
+### Phase-2 known limitations (deliberate, to be addressed in later slices)
+
+1. **No authentication.** `MovePlayerCommand.playerId` is unauthenticated: the server accepts
+   any id the caller names, and `createWorldManager` compares it against one configured id.
+   Identity/session must land before any second player or any privileged command.
+2. **In-memory state only.** The world lives in the Manager process, so a restart resets every
+   position. Persistence is not implemented anywhere yet (`Manager` owns that responsibility
+   but no repository exists).
+3. **No event channel.** Router registers request routes only, so one client cannot observe
+   another's movement. Realtime push is not implemented.
+4. **The world has no terrain.** `WorldSnapshot.size` is the only world data; there are no
+   tiles, objects, or collision surfaces.
+5. **A load overlapping an in-flight move can render a stale position.** `performMove` drops a
+   move result when the store is `loading` (`state.player === null`), and a snapshot fetched
+   before the move was applied can be older than the server's current state. Unreachable from
+   the current UI (direction controls are gated on `ready`), but it must be guarded when
+   reconnect/manual-refresh lands.
+6. **Single in-flight command, latest wins.** Organizer serialises moves into one slot rather
+   than a queue, so rapid input coalesces instead of replaying every press. This is intentional
+   for a no-prediction client; a predicted client will need real input sequencing.
+
 ## Environment
 
 | Variable | Default | Used by |

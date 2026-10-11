@@ -220,6 +220,50 @@ export default tseslint.config(
             'ui must not send network beacons directly; use an Organizer action instead (AGENTS.md: UI).',
         },
       ],
+      // Identifier-based rules above are not sufficient: a UI file could import
+      // the Organizer's *internal* transport client (`../organizer/world-api-client`)
+      // or reach outside the client tree entirely, and then issue HTTP itself with
+      // no forbidden identifier in sight. Enforce the module surface instead: UI may
+      // import its own local modules and the Organizer barrel, nothing else.
+      'no-restricted-syntax': [
+        'error',
+        {
+          selector:
+            "ImportDeclaration[source.value=/^\\.\\.\\//]:not([source.value='../organizer'])",
+          message:
+            "ui may only reach the Organizer barrel ('../organizer'); importing Organizer internals, protocol, or backend sources is forbidden (AGENTS.md: UI).",
+        },
+        {
+          selector:
+            "ImportExpression[source.value=/^\\.\\.\\//]:not([source.value='../organizer'])",
+          message:
+            "ui may only reach the Organizer barrel ('../organizer'); dynamic imports of Organizer internals, protocol, or backend sources are forbidden (AGENTS.md: UI).",
+        },
+        {
+          selector:
+            "ExportNamedDeclaration[source.value=/^\\.\\.\\//]:not([source.value='../organizer'])",
+          message:
+            "ui may only re-export from the Organizer barrel ('../organizer') (AGENTS.md: UI).",
+        },
+        {
+          selector:
+            "ImportExpression[source.value=/^(@starvalley\\/(protocol|router|manager|server)|node:|axios)$/]",
+          message:
+            'ui must consume the Organizer API only; dynamic import() of wire/protocol or backend code is forbidden (AGENTS.md: UI).',
+        },
+        {
+          selector:
+            "MemberExpression[computed=true][object.name='globalThis'][property.value='fetch']",
+          message:
+            'ui must not call the backend directly; use an Organizer action instead (AGENTS.md: UI).',
+        },
+        {
+          selector:
+            "MemberExpression[computed=true][object.name='window'][property.value='fetch']",
+          message:
+            'ui must not call the backend directly; use an Organizer action instead (AGENTS.md: UI).',
+        },
+      ],
     },
   },
   {

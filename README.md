@@ -2,9 +2,10 @@
 
 Web Stardew — a browser farming game built as a multi-agent reference project.
 
-Phase 1 is a **vertical slice skeleton**: one real client ⇄ server data path
-(`GET /api/game-info`) with no gameplay yet. Its purpose is to prove the module
-boundaries, not the game.
+Phase 1 built the skeleton and one read path (`GET /api/game-info`). Phase 2 adds the
+first gameplay slice: a **server-authoritative World + Player + Movement** loop
+(`GET /api/world`, `POST /api/player/move`). There is still no prediction,
+interpolation, collision, art, inventory, map, or NPCs.
 
 - Engineering policy: [`AGENTS.md`](./AGENTS.md)
 - Bootstrap/operator guide: [`AI-WORKFLOW.md`](./AI-WORKFLOW.md)
@@ -70,13 +71,22 @@ an ephemeral port and drives the real Organizer against it over HTTP, so it is t
 evidence that the whole `UI -> Organizer -> Protocol -> Router -> Manager` chain works.
 Module-scoped unit tests live beside their owners (`packages/*/test`, `apps/*/test`).
 
-### Verification of the data path
+### Verification of the data paths
 
 ```bash
 npm run dev:server
 curl -s http://localhost:8787/api/game-info
 curl -s http://localhost:8787/api/health
+curl -s http://localhost:8787/api/world
+curl -s -X POST http://localhost:8787/api/player/move \
+  -H 'content-type: application/json' \
+  -d '{"playerId":"player-1","direction":"east"}'
 ```
+
+Movement is authoritative: one tile per command, and a step that would leave the
+12x8 world returns `200` with `moved: false` and an unchanged position (a refused
+step is a normal outcome, not an error). An unknown `playerId` is `404`; invalid
+fields, malformed JSON, or a body over 64 KiB are `400`.
 
 ## Notes
 

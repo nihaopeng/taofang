@@ -10,6 +10,8 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { PLAYER_MOVE_PATH } from '@starvalley/protocol';
+
 import {
   getWorldState,
   loadWorld,
@@ -241,15 +243,24 @@ describe('movePlayer', () => {
 
   it('sends the command built from the loaded playerId and direction', async () => {
     await loadValidWorld();
-    const bodies: Array<Record<string, unknown>> = [];
-    setWorldFetch(async (_url, init) => {
-      bodies.push(JSON.parse(init?.body as string) as Record<string, unknown>);
+    const requests: Array<{ url: string; method: string | undefined; body: Record<string, unknown> }> = [];
+    setWorldFetch(async (url, init) => {
+      requests.push({
+        url,
+        method: init?.method,
+        body: JSON.parse(init?.body as string) as Record<string, unknown>,
+      });
       return fakeResponse(moveResponse({ x: 4, y: 4 }));
     });
 
     await movePlayer('east');
 
-    expect(bodies).toEqual([{ playerId: 'player-1', direction: 'east' }]);
+    // Transport contract lives here, not in the UI tests: the Organizer builds
+    // the request from the canonical Protocol path and uses POST.
+    expect(requests).toHaveLength(1);
+    expect(requests[0].url).toBe(PLAYER_MOVE_PATH);
+    expect(requests[0].method).toBe('POST');
+    expect(requests[0].body).toEqual({ playerId: 'player-1', direction: 'east' });
   });
 
   it('does not move optimistically while the request is in flight', async () => {
@@ -319,6 +330,59 @@ describe('movePlayer', () => {
 
     expect(calls).toBe(2);
     expect(getWorldState().player).toMatchObject({ x: 3, y: 4 });
+  });
+
+  it('settles every move promise when a reset supersedes an in-flight loop', async () => {
+    // Regression: a superseded loop used to read and clear the shared queue
+    // before checking its generation, then break and discard the waiters it had
+    // just taken. A caller queued to the newer loop never settled and its
+    // direction was silently lost. Losing the race must never hang a caller.
+    await loadValidWorld();
+
+    const deferreds = [
+      createDeferred<Response>(),
+      createDeferred<Response>(),
+      createDeferred<Response>(),
+    ];
+    const bodies: Array<Record<string, unknown>> = [];
+    let calls = 0;
+    const captureMove = (_url: string, init?: RequestInit): Promise<Response> => {
+      bodies.push(JSON.parse(init?.body as string) as Record<string, unknown>);
+      const deferred = deferreds[calls];
+      calls += 1;
+      return deferred.promise;
+    };
+
+    // Loop 1: `east` in flight.
+    setWorldFetch(captureMove);
+    const a = movePlayer('east');
+    expect(calls).toBe(1);
+
+    // Reset supersedes loop 1 while its request is still in flight, then load a
+    // fresh snapshot so a new loop can own the move slot.
+    resetWorldState();
+    setWorldFetch(async () => fakeResponse(VALID_WORLD_RESPONSE));
+    await loadWorld();
+
+    // Loop 2: `north` in flight; `west` queued behind it.
+    setWorldFetch(captureMove);
+    const c = movePlayer('north');
+    const d = movePlayer('west');
+    expect(calls).toBe(2);
+    expect(bodies.map((body) => body.direction)).toEqual(['east', 'north']);
+
+    // Settle loop 1's stale response. It must not consume loop 2's queue.
+    deferreds[0].resolve(fakeResponse(moveResponse({ x: 4, y: 4 })));
+    await a;
+
+    // Loop 2's current request settles and it must still dispatch the queued
+    // `west` rather than have it dropped by the stale loop.
+    deferreds[1].resolve(fakeResponse(moveResponse({ x: 4, y: 5 })));
+    await c;
+    expect(bodies.map((body) => body.direction)).toEqual(['east', 'north', 'west']);
+
+    deferreds[2].resolve(fakeResponse(moveResponse({ x: 3, y: 5 })));
+    await expect(d).resolves.toBeUndefined();
   });
 
   it('is a safe no-op before any world is loaded', async () => {

@@ -179,7 +179,6 @@ describe('WorldView direction controls', () => {
       expect(requests).toHaveLength(1);
     });
     expect(requests[0].method).toBe('POST');
-    expect(requests[0].url).toBe('/api/player/move');
     expect(requests[0].body).toEqual({ playerId: 'player-1', direction: 'east' });
 
     // And exactly one: no duplicate dispatch on top of the click.
@@ -209,6 +208,29 @@ describe('WorldView keyboard input', () => {
     pressKey('ArrowRight', { repeat: true });
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(requests).toHaveLength(1);
+  });
+
+  it('ignores modifier-key presses but still moves on the unmodified press', async () => {
+    await loadValidWorld();
+
+    const requests: CapturedRequest[] = [];
+    captureMoves(requests);
+
+    render(<WorldView />);
+
+    // Ctrl/Cmd/Alt chords are browser/OS shortcuts, not movement intent.
+    pressKey('ArrowRight', { ctrlKey: true });
+    pressKey('ArrowRight', { metaKey: true });
+    pressKey('ArrowRight', { altKey: true });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(requests).toHaveLength(0);
+
+    // The bare press still produces exactly the one move the guard let through.
+    pressKey('ArrowRight');
+    await waitFor(() => {
+      expect(requests).toHaveLength(1);
+    });
+    expect(requests[0].body).toEqual({ playerId: 'player-1', direction: 'east' });
   });
 });
 

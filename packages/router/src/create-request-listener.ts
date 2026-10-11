@@ -40,14 +40,51 @@ class BodyReadError extends Error {
 }
 
 function sendJson(response: ServerResponse, status: number, body: unknown): void {
-  const payload = JSON.stringify(body);
-  response.statusCode = status;
-  response.setHeader('content-type', JSON_CONTENT_TYPE);
-  // Advertise the exact length so GET and HEAD agree on the representation.
-  // `ServerResponse` suppresses the body for HEAD/204/304 while keeping this
-  // header (and the status/content-type) intact.
-  response.setHeader('content-length', Buffer.byteLength(payload));
-  response.end(payload);
+  // `destroyed`/`writableEnded` mean the peer already vanished or we already
+  // answered: touching the socket would throw synchronously and must never
+  // escape the listener.
+  if (response.destroyed || response.writableEnded) {
+    return;
+  }
+  try {
+    const payload = JSON.stringify(body);
+    response.statusCode = status;
+    response.setHeader('content-type', JSON_CONTENT_TYPE);
+    // Advertise the exact length so GET and HEAD agree on the representation.
+    // `ServerResponse` suppresses the body for HEAD/204/304 while keeping this
+    // header (and the status/content-type) intact.
+    response.setHeader('content-length', Buffer.byteLength(payload));
+    response.end(payload);
+  } catch (error) {
+    // A synchronous write failure on an aborted socket must be observed, not
+    // rethrown: the connection is gone, so there is nobody left to answer.
+    console.error('[router] failed to write protocol response:', error);
+  }
+}
+
+/**
+ * Destroy the request socket once the outgoing response has fully flushed.
+ *
+ * For an oversized body the peer must be stopped, but destroying the socket
+ * while the 400 is still buffered (and inbound data is unread) can RST the
+ * connection before a slow/uploading client reads the error. Waiting for
+ * `finish` (or `close`, when the peer vanished first) preserves delivery while
+ * still tearing the connection down. The handler is one-shot so the socket is
+ * destroyed at most once and no listener is leaked.
+ */
+function destroyAfterResponseFlush(request: IncomingMessage, response: ServerResponse): void {
+  let handled = false;
+  const destroyOnce = (): void => {
+    if (handled) {
+      return;
+    }
+    handled = true;
+    response.off('finish', destroyOnce);
+    response.off('close', destroyOnce);
+    request.destroy();
+  };
+  response.once('finish', destroyOnce);
+  response.once('close', destroyOnce);
 }
 
 function sendProtocolError(
@@ -78,6 +115,8 @@ function readRequestBody(request: IncomingMessage, method: string): Promise<unkn
       request.off('data', onData);
       request.off('end', onEnd);
       request.off('error', onError);
+      request.off('aborted', onAborted);
+      request.off('close', onClose);
     }
 
     function onData(chunk: Buffer): void {
@@ -108,9 +147,25 @@ function readRequestBody(request: IncomingMessage, method: string): Promise<unkn
       reject(new BodyReadError('malformed'));
     }
 
+    // A client that disconnects mid-upload must settle the read instead of
+    // leaving the handler pending forever. `aborted` is the legacy signal;
+    // `close` without a prior `end` covers newer Node. `cleanup` removes the
+    // `close` listener on a normal `end`, so the happy path is unaffected.
+    function onAborted(): void {
+      cleanup();
+      reject(new BodyReadError('malformed'));
+    }
+
+    function onClose(): void {
+      cleanup();
+      reject(new BodyReadError('malformed'));
+    }
+
     request.on('data', onData);
     request.on('end', onEnd);
     request.on('error', onError);
+    request.on('aborted', onAborted);
+    request.on('close', onClose);
   });
 }
 
@@ -145,11 +200,12 @@ async function handleRequest(
     sendJson(response, result.status, result.body);
   } catch (error) {
     if (error instanceof BodyReadError) {
-      sendProtocolError(response, 'BAD_REQUEST', error.message);
       if (error.reason === 'too-large') {
-        // Stop the peer from streaming the rest of an unbounded payload.
-        request.destroy();
+        // Register before writing so the flush event cannot be missed; the
+        // destroy then runs only after the 400 has been delivered.
+        destroyAfterResponseFlush(request, response);
       }
+      sendProtocolError(response, 'BAD_REQUEST', error.message);
       return;
     }
     if (error instanceof ProtocolParseError) {
@@ -164,7 +220,13 @@ async function handleRequest(
     // Log server-side; never leak the message/stack to the client.
     console.error('[router] unhandled error while serving request:', error);
     if (response.headersSent) {
-      response.end();
+      if (!response.writableEnded) {
+        try {
+          response.end();
+        } catch (endError) {
+          console.error('[router] failed to finalize response:', endError);
+        }
+      }
       return;
     }
     sendProtocolError(response, 'INTERNAL_ERROR', 'Internal server error');
@@ -180,6 +242,24 @@ async function handleRequest(
  */
 export function createRequestListener(deps: RouterDependencies): RequestListener {
   return (request, response) => {
-    void handleRequest(deps, request, response);
+    // A client may abort at any time. Observe stream errors so an `error` event
+    // with no listener can never surface as an uncaught exception.
+    request.on('aborted', () => {
+      // Once the response is finalized the abort is the expected consequence of
+      // our own oversized-body teardown, not a client failure.
+      if (!response.writableEnded) {
+        console.warn('[router] client aborted the request');
+      }
+    });
+    response.on('error', (error: Error) => {
+      console.error('[router] response stream error:', error);
+    });
+
+    // `handleRequest` absorbs its own failures, but a rejected promise here
+    // would be discarded (fire-and-forget) and terminate the process on modern
+    // Node. Catch explicitly so no rejection can escape.
+    void handleRequest(deps, request, response).catch((error: unknown) => {
+      console.error('[router] unhandled failure while serving request:', error);
+    });
   };
 }
