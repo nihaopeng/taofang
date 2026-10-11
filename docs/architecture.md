@@ -76,7 +76,7 @@ own HTTP semantics.
 
 ```ts
 // @starvalley/manager
-interface GameInfoManager { getGameInfo(): GameInfo; getHealth(now: Date): HealthStatus }
+interface GameInfoManager { getGameInfo(): GameInfo; getHealth(now?: Date): HealthStatus }
 function createGameInfoManager(deps?: { clock?: () => Date }): GameInfoManager
 const SERVER_VERSION: string
 
@@ -91,6 +91,7 @@ function loadGameInfo(): Promise<void>
 function subscribeGameInfo(listener: (state: GameInfoState) => void): () => void
 function getGameInfoState(): GameInfoState
 function resetGameInfoState(): void
+// useGameInfo must be SSR-safe: useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot)
 ```
 
 ## Environment
@@ -98,4 +99,5 @@ function resetGameInfoState(): void
 | Variable | Default | Used by |
 | --- | --- | --- |
 | `PORT` | `8787` | `apps/server` listen port |
+| `WEB_PORT` | `5273` | Vite dev/preview port (5173 is taken by another project on this machine) |
 | `SERVER_ORIGIN` | `http://localhost:8787` | Vite dev proxy target |

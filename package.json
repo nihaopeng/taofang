@@ -17,7 +17,7 @@
     "dev:web": "npm run dev --workspace @starvalley/web",
     "start": "npm run start --workspace @starvalley/server",
     "build": "npm run build --workspaces --if-present",
-    "typecheck": "npm run typecheck --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present && tsc --noEmit -p tests/tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "eslint .",

@@ -27,6 +27,7 @@ packages/manager    @starvalley/manager   authoritative backend execution
 packages/router     @starvalley/router    node:http transport adapter
 apps/server         @starvalley/server    composition root + process lifecycle
 apps/web            @starvalley/web       client (src/organizer + src/ui)
+tests/integration   Main-owned end-to-end verification (real HTTP loopback)
 ```
 
 Dependency direction, enforced by lint:
@@ -40,26 +41,34 @@ manager -> protocol
 ## Development
 
 ```bash
-npm run dev          # server (tsx watch, :8787) + web (vite, :5173) together
+npm run dev          # server (tsx watch, :8787) + web (vite, :5273) together
 npm run dev:server   # backend only
 npm run dev:web      # frontend only
 ```
 
-Open http://localhost:5173. The Vite dev server proxies `/api` to
+Open <http://localhost:5273>. The Vite dev server proxies `/api` to
 `http://localhost:8787`, so the browser uses origin-relative URLs and no CORS setup
-is required. Override with `SERVER_ORIGIN` and `PORT`.
+is required. The dev ports are configurable: `PORT` (server) and `WEB_PORT` (web).
+`WEB_PORT` defaults to **5273** rather than Vite's 5173 because 5173 is occupied by
+another project on the development machine; `strictPort` is on so a conflict fails
+loudly instead of silently drifting to a different port.
 
 ## Quality gates
 
 ```bash
 npm run lint         # ESLint + architecture boundary rules
-npm run typecheck    # tsc --noEmit for every workspace
-npm run test         # Vitest (node environment)
+npm run typecheck    # tsc --noEmit for every workspace + tests/
+npm run test         # Vitest: module tests + cross-module integration test
 npm run build        # esbuild server bundle + Vite web bundle
 npm run verify       # lint + typecheck + test + build
 ```
 
 `npm run start` runs the built server bundle (`apps/server/dist/index.js`).
+
+`tests/integration/` is Main-owned verification: it boots the real Router/Manager on
+an ephemeral port and drives the real Organizer against it over HTTP, so it is the
+evidence that the whole `UI -> Organizer -> Protocol -> Router -> Manager` chain works.
+Module-scoped unit tests live beside their owners (`packages/*/test`, `apps/*/test`).
 
 ### Verification of the data path
 

@@ -5,6 +5,10 @@ export default defineConfig({
   plugins: [react()],
   test: {
     environment: 'node',
-    include: ['packages/**/test/**/*.test.ts', 'apps/**/test/**/*.test.{ts,tsx}'],
+    include: [
+      'packages/**/test/**/*.test.ts',
+      'apps/**/test/**/*.test.{ts,tsx}',
+      'tests/**/*.test.ts',
+    ],
   },
 });

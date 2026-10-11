@@ -1,0 +1,115 @@
+:root {
+  color-scheme: dark;
+  --soil: #2a2119;
+  --soil-raised: #3a2e22;
+  --wheat: #e8d5a8;
+  --leaf: #8fbf5a;
+  --sky: #8ab7d8;
+  --danger: #e08a72;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: radial-gradient(circle at top, #3b3021 0%, var(--soil) 60%);
+  color: var(--wheat);
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  line-height: 1.5;
+}
+
+.app {
+  max-width: 40rem;
+  margin: 0 auto;
+  padding: 4rem 1.5rem 3rem;
+}
+
+.app__header {
+  margin-bottom: 2rem;
+}
+
+.app__title {
+  margin: 0;
+  font-size: 2.25rem;
+  letter-spacing: 0.02em;
+}
+
+.app__subtitle {
+  margin: 0.25rem 0 0;
+  color: #b9a583;
+}
+
+.game-info {
+  padding: 1.25rem 1.5rem;
+  border: 1px solid #55432f;
+  border-radius: 0.75rem;
+  background: var(--soil-raised);
+  box-shadow: 0 0.75rem 2rem rgb(0 0 0 / 30%);
+}
+
+.game-info__heading {
+  margin: 0 0 1rem;
+  font-size: 1rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--leaf);
+}
+
+.game-info__details {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.35rem 1rem;
+  margin: 0;
+}
+
+.game-info__term {
+  color: #b9a583;
+}
+
+.game-info__value {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.game-info__loading {
+  margin: 0;
+  color: var(--sky);
+}
+
+.game-info[data-status='idle'] .game-info__loading,
+.game-info[data-status='connecting'] .game-info__loading {
+  animation: game-info-pulse 1.4s ease-in-out infinite;
+}
+
+.game-info__message {
+  margin: 0 0 0.75rem;
+  color: var(--danger);
+}
+
+.game-info__retry {
+  padding: 0.45rem 1.1rem;
+  border: 1px solid var(--leaf);
+  border-radius: 0.4rem;
+  background: transparent;
+  color: var(--leaf);
+  font: inherit;
+  cursor: pointer;
+}
+
+.game-info__retry:hover {
+  background: var(--leaf);
+  color: var(--soil);
+}
+
+@keyframes game-info-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
