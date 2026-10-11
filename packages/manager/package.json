@@ -1,0 +1,16 @@
+{
+  "name": "@starvalley/manager",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Authoritative backend execution. No transport framework dependencies.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@starvalley/protocol": "*"
+  }
+}

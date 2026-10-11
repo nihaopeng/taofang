@@ -1,0 +1,11 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+*.log
+.DS_Store
+.env
+.env.local
+
+# Redundant local copy of the workflow docs (kept on disk, not tracked).
+web-stardew-ai-workflow.zip

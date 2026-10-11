@@ -1,0 +1,13 @@
+{
+  "name": "@starvalley/protocol",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Canonical client/server contract. Framework-neutral, dependency-free.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  }
+}

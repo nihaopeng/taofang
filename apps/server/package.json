@@ -1,0 +1,19 @@
+{
+  "name": "@starvalley/server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Composition root: wires Manager + Router and owns the process lifecycle.",
+  "main": "./dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/index.js",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@starvalley/manager": "*",
+    "@starvalley/protocol": "*",
+    "@starvalley/router": "*"
+  }
+}

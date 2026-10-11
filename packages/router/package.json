@@ -1,0 +1,17 @@
+{
+  "name": "@starvalley/router",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Server transport adapter: node:http request listener over Manager APIs.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@starvalley/manager": "*",
+    "@starvalley/protocol": "*"
+  }
+}
