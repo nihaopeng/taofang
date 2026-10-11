@@ -35,8 +35,15 @@ const ENTITY_A = {
   visible: true,
 };
 
+const TILES = [
+  { transform: { x: 0, y: 0 }, terrain: 'grass' },
+  { transform: { x: 1, y: 0 }, terrain: 'path' },
+];
+
 const VALID_SNAPSHOT = {
+  worldId: 'world-1',
   size: { width: 10, height: 8 },
+  tiles: TILES,
   entities: [ENTITY_A],
   controlledActorId: 'actor-1',
   serverTime: SERVER_TIME,
@@ -90,6 +97,7 @@ function createRecordingRuntime(): RecordingRuntime {
       ground: false,
       camera: { left: 0, right: 0, top: 0, bottom: 0 },
       nodes: [],
+      buckets: [],
     }),
     dispose: () => {
       recorder.disposeCalls += 1;
@@ -131,6 +139,26 @@ function frameHasType(frame: RenderFrame, type: RenderFrame[number]['type']): bo
   return frame.some((command) => command.type === type);
 }
 
+/** All `node.create` commands recorded across every frame. */
+function creates(
+  recorder: RecordingRuntime,
+): Extract<RenderFrame[number], { type: 'node.create' }>[] {
+  return recorder.frames
+    .flat()
+    .filter(
+      (command): command is Extract<RenderFrame[number], { type: 'node.create' }> =>
+        command.type === 'node.create',
+    );
+}
+
+/** A `node.create` for the given layer, or `undefined`. */
+function createForLayer(
+  recorder: RecordingRuntime,
+  layer: 'base' | 'object',
+): Extract<RenderFrame[number], { type: 'node.create' }> | undefined {
+  return creates(recorder).find((command) => command.layer === layer);
+}
+
 beforeEach(() => {
   resetWorldState();
   resetWorldFetch();
@@ -147,7 +175,7 @@ afterEach(() => {
 });
 
 describe('SceneView wiring', () => {
-  it('mounts the runtime and pushes a frame containing node.create once loaded', async () => {
+  it('mounts the runtime and pushes base-layer tile creates plus an object-layer actor node', async () => {
     const recorder = createRecordingRuntime();
     setWorldFetch(async () => fakeResponse(VALID_WORLD_RESPONSE));
     await act(async () => {
@@ -161,6 +189,23 @@ describe('SceneView wiring', () => {
       expect(sawCreate).toBe(true);
     });
     expect(recorder.mountCalls).toBe(1);
+
+    // Tiles arrive as base-layer nodes with namespaced ids and terrain-derived
+    // appearances; the actor arrives as an object-layer node.
+    const base = createForLayer(recorder, 'base');
+    expect(base).toMatchObject({
+      nodeId: 'tile:0,0',
+      layer: 'base',
+      appearance: 'appearance.terrain.grass',
+      transform: { x: 0, y: 0 },
+    });
+    expect(createForLayer(recorder, 'object')).toMatchObject({
+      nodeId: 'entity:entity-a',
+      layer: 'object',
+      appearance: 'appearance.character',
+      transform: { x: 3, y: 4 },
+    });
+    expect(creates(recorder)).toHaveLength(3);
   });
 
   it('creates the runtime with the authoritative world size once the world is ready', async () => {

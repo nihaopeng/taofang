@@ -1,8 +1,8 @@
 import { ProtocolParseError } from './errors.ts';
-import { isEntityState } from './entity.ts';
-import type { EntityState } from './entity.ts';
-import { isActorId } from './identity.ts';
-import type { ActorId } from './identity.ts';
+import { isEntityState, isTransform } from './entity.ts';
+import type { EntityState, Transform } from './entity.ts';
+import { isActorId, isWorldId } from './identity.ts';
+import type { ActorId, WorldId } from './identity.ts';
 import { hasExactKeys, isFiniteInteger, isIsoUtcString, isRecord } from './internal.ts';
 
 /** World dimensions in tiles. Positive integers. */
@@ -12,15 +12,35 @@ export interface WorldSize {
 }
 
 /**
+ * Closed union of terrain kinds. `'path'` is walkable but visually different
+ * from `'grass'`; whether a kind is walkable is deliberately **not** on the
+ * wire — it is a Manager runtime rule (`WALKABILITY_BY_TERRAIN`). Adding a kind
+ * is a breaking wire change because `TileState` guards keys exactly.
+ */
+export type TerrainKind = 'grass' | 'blocked' | 'path';
+
+/**
+ * Static terrain of one tile. Reuses the canonical `Transform` (do not
+ * reintroduce a separate position type).
+ */
+export interface TileState {
+  transform: Transform;
+  terrain: TerrainKind;
+}
+
+/**
  * Point-in-time authoritative world and caller view.
  *
- * The snapshot is the **full state**: `entities` is the complete list of known
- * world objects. `controlledActorId` states which actor the caller controls
- * (`null` when the caller controls nothing), replacing the phase-3 single-actor
- * assumption. Future world data is added as further fields of this snapshot.
+ * The snapshot is the **full state**: `tiles` is the static terrain of the
+ * world's shape and `entities` is the complete list of dynamic world objects.
+ * `controlledActorId` states which actor the caller controls (`null` when the
+ * caller controls nothing). `worldId` scopes the snapshot to one world, so
+ * "which world is the actor in" needs no per-entity field.
  */
 export interface WorldSnapshot {
+  worldId: WorldId;
   size: WorldSize;
+  tiles: TileState[];
   entities: EntityState[];
   controlledActorId: ActorId | null;
   /** ISO-8601 UTC timestamp. */
@@ -33,7 +53,15 @@ export interface GetWorldResponse {
 }
 
 const WORLD_SIZE_KEYS = ['width', 'height'] as const;
-const WORLD_SNAPSHOT_KEYS = ['size', 'entities', 'controlledActorId', 'serverTime'] as const;
+const TILE_STATE_KEYS = ['transform', 'terrain'] as const;
+const WORLD_SNAPSHOT_KEYS = [
+  'worldId',
+  'size',
+  'tiles',
+  'entities',
+  'controlledActorId',
+  'serverTime',
+] as const;
 const GET_WORLD_RESPONSE_KEYS = ['world'] as const;
 
 /**
@@ -62,16 +90,47 @@ export function parseWorldSize(value: unknown): WorldSize {
   return value;
 }
 
+/** Structural guard for `TerrainKind` (exactly `'grass' | 'blocked' | 'path'`). */
+export function isTerrainKind(value: unknown): value is TerrainKind {
+  return value === 'grass' || value === 'blocked' || value === 'path';
+}
+
+/** Parse and validate `TerrainKind`, throwing `ProtocolParseError` on mismatch. */
+export function parseTerrainKind(value: unknown): TerrainKind {
+  if (!isTerrainKind(value)) {
+    throw new ProtocolParseError('Invalid TerrainKind payload');
+  }
+  return value;
+}
+
+/** Structural guard for `TileState` (exactly `{ transform, terrain }`). */
+export function isTileState(value: unknown): value is TileState {
+  if (!isRecord(value) || !hasExactKeys(value, TILE_STATE_KEYS)) {
+    return false;
+  }
+  return isTransform(value.transform) && isTerrainKind(value.terrain);
+}
+
+/** Parse and validate `TileState`, throwing `ProtocolParseError` on mismatch. */
+export function parseTileState(value: unknown): TileState {
+  if (!isTileState(value)) {
+    throw new ProtocolParseError('Invalid TileState payload');
+  }
+  return value;
+}
+
 /** Structural guard for `WorldSnapshot`. */
 export function isWorldSnapshot(value: unknown): value is WorldSnapshot {
   if (!isRecord(value) || !hasExactKeys(value, WORLD_SNAPSHOT_KEYS)) {
     return false;
   }
-  if (!Array.isArray(value.entities)) {
+  if (!Array.isArray(value.tiles) || !Array.isArray(value.entities)) {
     return false;
   }
   return (
+    isWorldId(value.worldId) &&
     isWorldSize(value.size) &&
+    value.tiles.every((tile) => isTileState(tile)) &&
     value.entities.every((entity) => isEntityState(entity)) &&
     (value.controlledActorId === null || isActorId(value.controlledActorId)) &&
     isIsoUtcString(value.serverTime)

@@ -13,6 +13,7 @@ import {
   parseGetGameInfoResponse,
   parseGetWorldResponse,
   parseSubmitCommandResponse,
+  parseWorldId,
 } from '@starvalley/protocol';
 import type {
   EntityState,
@@ -28,6 +29,7 @@ import { createRequestListener } from '../src/index.ts';
 import type { ResolveActorId } from '../src/index.ts';
 
 const ACTOR_ID = parseActorId('actor-1');
+const TEST_WORLD_ID = parseWorldId('test-world');
 
 const GAME_INFO: GameInfo = {
   gameName: 'Test Valley',
@@ -58,7 +60,10 @@ function createFakeManager(overrides: Partial<GameInfoManager> = {}): GameInfoMa
  */
 function createTestWorld(overrides: Partial<WorldManager> = {}): WorldManager {
   const world = createWorldManager({
-    worldSize: { width: 3, height: 3 },
+    // A 3x3 all-walkable map: the centre { 1, 1 } is spawn, one east step to
+    // { 2, 1 } is legal, and the second leaves the map (a refusal).
+    map: ['ggg', 'ggg', 'ggg'],
+    worldId: TEST_WORLD_ID,
     actorId: ACTOR_ID,
     clock: () => new Date(FIXED_TIME),
   });
@@ -280,8 +285,12 @@ describe('createRequestListener', () => {
       'entities',
       'serverTime',
       'size',
+      'tiles',
+      'worldId',
     ]);
+    expect(world.worldId).toBe(TEST_WORLD_ID);
     expect(world.size).toEqual({ width: 3, height: 3 });
+    expect(world.tiles).toHaveLength(9);
     expect(world.serverTime).toBe(FIXED_TIME);
     expect(world.controlledActorId).toBe(ACTOR_ID);
 
@@ -340,6 +349,42 @@ describe('createRequestListener', () => {
     expect(second.headers.get('content-type')).toBe('application/json; charset=utf-8');
     const secondBody = parseSubmitCommandResponse(await second.json());
     expect(secondBody.events).toEqual([]);
+  });
+
+  it('is collision-agnostic: relays a Manager refusal as 200 with empty events and no error body', async () => {
+    // Collision is a Manager runtime rule; the Router must not decide it or
+    // reinterpret a refusal. A `WorldManager` that always refuses must surface
+    // as a successful command whose delta is simply empty, never a ProtocolError.
+    const refusalSnapshot: WorldSnapshot = {
+      worldId: parseWorldId('refusal-world'),
+      size: { width: 1, height: 1 },
+      tiles: [{ transform: { x: 0, y: 0 }, terrain: 'grass' }],
+      entities: [],
+      controlledActorId: null,
+      serverTime: FIXED_TIME,
+    };
+    const refusingWorld: WorldManager = {
+      // Required by the interface; the command route never reads the snapshot.
+      getSnapshot: () => refusalSnapshot,
+      submitCommand: () => ({ events: [], serverTime: FIXED_TIME }),
+    };
+    const baseUrl = await startServer(createFakeManager(), refusingWorld);
+
+    const response = await postCommand(
+      baseUrl,
+      JSON.stringify({ type: 'actor.move', direction: 'east' }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toBe('application/json; charset=utf-8');
+
+    const body: unknown = await response.json();
+    expect(body).not.toHaveProperty('error');
+    expect(body).toEqual({ events: [], serverTime: FIXED_TIME });
+
+    const parsed = parseSubmitCommandResponse(body);
+    expect(parsed.events).toEqual([]);
+    expect(parsed.serverTime).toBe(FIXED_TIME);
   });
 
   it('returns 400 BAD_REQUEST for an unknown command type', async () => {

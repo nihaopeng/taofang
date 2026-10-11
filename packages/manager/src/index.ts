@@ -10,8 +10,9 @@ export { SERVER_VERSION, createGameInfoManager } from './game-info-manager.ts';
 export type { CreateGameInfoManagerDeps, GameInfoManager } from './game-info-manager.ts';
 
 export {
-  DEFAULT_WORLD_SIZE,
+  DEFAULT_WORLD_MAP,
   UnknownActorError,
+  WALKABILITY_BY_TERRAIN,
   createWorldManager,
 } from './world-manager.ts';
 export type {

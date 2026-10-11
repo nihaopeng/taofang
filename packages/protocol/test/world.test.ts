@@ -2,13 +2,23 @@ import { describe, expect, it } from 'vitest';
 
 import {
   isGetWorldResponse,
+  isTerrainKind,
+  isTileState,
   isWorldSize,
   isWorldSnapshot,
   parseGetWorldResponse,
+  parseTerrainKind,
+  parseTileState,
   parseWorldSize,
   parseWorldSnapshot,
 } from '../src/index.ts';
-import { captureParseError, validEntityState, validWorldSnapshot } from './support.ts';
+import {
+  captureParseError,
+  phase4WorldSnapshot,
+  validEntityState,
+  validTileState,
+  validWorldSnapshot,
+} from './support.ts';
 
 const nonObjects: Array<[string, unknown]> = [
   ['null', null],
@@ -51,6 +61,81 @@ describe('isWorldSize', () => {
   });
 });
 
+describe('isTerrainKind', () => {
+  it('accepts exactly grass, blocked, and path', () => {
+    expect(isTerrainKind('grass')).toBe(true);
+    expect(isTerrainKind('blocked')).toBe(true);
+    expect(isTerrainKind('path')).toBe(true);
+  });
+
+  it.each([
+    ['an unknown literal', 'water'],
+    ['the empty string', ''],
+    ['a number', 0],
+    ['null', null],
+    ['undefined', undefined],
+    ['a boolean', true],
+    ['an object', {}],
+    ['an array', []],
+  ])('rejects %s', (_label, value) => {
+    expect(isTerrainKind(value)).toBe(false);
+  });
+});
+
+describe('parseTerrainKind', () => {
+  it('returns the value unchanged when valid', () => {
+    expect(parseTerrainKind('path')).toBe('path');
+  });
+
+  it('throws ProtocolParseError with a message when invalid', () => {
+    const error = captureParseError(() => parseTerrainKind('water'));
+    expect(error.message).toBe('Invalid TerrainKind payload');
+    expect(error.code).toBe('BAD_REQUEST');
+  });
+});
+
+describe('isTileState', () => {
+  it('accepts a well-formed TileState', () => {
+    expect(isTileState(validTileState)).toBe(true);
+  });
+
+  it.each(nonObjects)('rejects %s', (_label, value) => {
+    expect(isTileState(value)).toBe(false);
+  });
+
+  it.each(['transform', 'terrain'])('rejects a missing %s', (key) => {
+    const value: Record<string, unknown> = { ...validTileState };
+    delete value[key];
+    expect(isTileState(value)).toBe(false);
+  });
+
+  it('rejects unknown extra fields', () => {
+    expect(isTileState({ ...validTileState, walkable: true })).toBe(false);
+    expect(isTileState({ ...validTileState, extra: 1 })).toBe(false);
+  });
+
+  it('rejects a wrong type for each field', () => {
+    expect(isTileState({ ...validTileState, transform: null })).toBe(false);
+    expect(isTileState({ ...validTileState, transform: { x: 1, y: 2, extra: 3 } })).toBe(false);
+    expect(isTileState({ ...validTileState, transform: { x: 1.5, y: 2 } })).toBe(false);
+    expect(isTileState({ ...validTileState, terrain: 'water' })).toBe(false);
+    expect(isTileState({ ...validTileState, terrain: 1 })).toBe(false);
+    expect(isTileState({ ...validTileState, terrain: null })).toBe(false);
+  });
+});
+
+describe('parseTileState', () => {
+  it('returns the value unchanged when valid', () => {
+    expect(parseTileState(validTileState)).toBe(validTileState);
+  });
+
+  it('throws ProtocolParseError with a message when invalid', () => {
+    const error = captureParseError(() => parseTileState({ ...validTileState, terrain: 'water' }));
+    expect(error.message).toBe('Invalid TileState payload');
+    expect(error.code).toBe('BAD_REQUEST');
+  });
+});
+
 describe('parseWorldSize', () => {
   it('returns the value unchanged when valid', () => {
     const value = { width: 20, height: 15 };
@@ -73,15 +158,20 @@ describe('isWorldSnapshot', () => {
     expect(isWorldSnapshot({ ...validWorldSnapshot, entities: [] })).toBe(true);
   });
 
-  it('accepts a null controlledActorId (caller controls nothing)', () => {
+  it('accepts an empty tiles list and a null controlledActorId', () => {
+    expect(isWorldSnapshot({ ...validWorldSnapshot, tiles: [] })).toBe(true);
     expect(isWorldSnapshot({ ...validWorldSnapshot, controlledActorId: null })).toBe(true);
+  });
+
+  it('accepts a worldId that is any non-empty string', () => {
+    expect(isWorldSnapshot({ ...validWorldSnapshot, worldId: 'overworld' })).toBe(true);
   });
 
   it.each(nonObjects)('rejects %s', (_label, value) => {
     expect(isWorldSnapshot(value)).toBe(false);
   });
 
-  it.each(['size', 'entities', 'controlledActorId', 'serverTime'])(
+  it.each(['worldId', 'size', 'tiles', 'entities', 'controlledActorId', 'serverTime'])(
     'rejects a missing %s',
     (key) => {
       const value: Record<string, unknown> = { ...validWorldSnapshot };
@@ -92,6 +182,12 @@ describe('isWorldSnapshot', () => {
 
   it('rejects unknown extra fields', () => {
     expect(isWorldSnapshot({ ...validWorldSnapshot, extra: 1 })).toBe(false);
+  });
+
+  it('rejects a malformed worldId', () => {
+    expect(isWorldSnapshot({ ...validWorldSnapshot, worldId: '' })).toBe(false);
+    expect(isWorldSnapshot({ ...validWorldSnapshot, worldId: 1 })).toBe(false);
+    expect(isWorldSnapshot({ ...validWorldSnapshot, worldId: null })).toBe(false);
   });
 
   it('rejects a malformed size', () => {
@@ -110,6 +206,15 @@ describe('isWorldSnapshot', () => {
       false,
     );
     expect(isWorldSnapshot({ ...validWorldSnapshot, entities: ['entity-1'] })).toBe(false);
+  });
+
+  it('rejects tiles that are not an array or that contain a malformed tile', () => {
+    expect(isWorldSnapshot({ ...validWorldSnapshot, tiles: null })).toBe(false);
+    expect(isWorldSnapshot({ ...validWorldSnapshot, tiles: {} })).toBe(false);
+    expect(isWorldSnapshot({ ...validWorldSnapshot, tiles: [{ ...validTileState, terrain: 'water' }] })).toBe(
+      false,
+    );
+    expect(isWorldSnapshot({ ...validWorldSnapshot, tiles: ['grass'] })).toBe(false);
   });
 
   it('rejects a malformed controlledActorId', () => {
@@ -141,6 +246,12 @@ describe('isWorldSnapshot', () => {
       }),
     ).toBe(false);
   });
+
+  it('rejects the phase-4 snapshot shape (no worldId, no tiles) — the 3 -> 4 break', () => {
+    expect(isWorldSnapshot(phase4WorldSnapshot)).toBe(false);
+    expect(isWorldSnapshot({ ...phase4WorldSnapshot, worldId: 'world-1' })).toBe(false);
+    expect(isWorldSnapshot({ ...phase4WorldSnapshot, tiles: [] })).toBe(false);
+  });
 });
 
 describe('parseWorldSnapshot', () => {
@@ -162,6 +273,11 @@ describe('parseWorldSnapshot', () => {
         serverTime: validWorldSnapshot.serverTime,
       }),
     );
+    expect(error.message).toBe('Invalid WorldSnapshot payload');
+  });
+
+  it('rejects the phase-4 snapshot shape (no worldId, no tiles)', () => {
+    const error = captureParseError(() => parseWorldSnapshot(phase4WorldSnapshot));
     expect(error.message).toBe('Invalid WorldSnapshot payload');
   });
 });
@@ -196,6 +312,12 @@ describe('isGetWorldResponse', () => {
       }),
     ).toBe(false);
   });
+
+  it('rejects the phase-4 snapshot (no worldId, no tiles) inside `world`', () => {
+    expect(isGetWorldResponse({ world: phase4WorldSnapshot })).toBe(false);
+    expect(isGetWorldResponse({ world: { ...phase4WorldSnapshot, worldId: 'world-1' } })).toBe(false);
+    expect(isGetWorldResponse({ world: { ...phase4WorldSnapshot, tiles: [] } })).toBe(false);
+  });
 });
 
 describe('parseGetWorldResponse', () => {
@@ -208,5 +330,10 @@ describe('parseGetWorldResponse', () => {
     const error = captureParseError(() => parseGetWorldResponse({}));
     expect(error.message).toBe('Invalid GetWorldResponse payload');
     expect(error.code).toBe('BAD_REQUEST');
+  });
+
+  it('rejects the phase-4 snapshot (no worldId, no tiles)', () => {
+    const error = captureParseError(() => parseGetWorldResponse({ world: phase4WorldSnapshot }));
+    expect(error.message).toBe('Invalid GetWorldResponse payload');
   });
 });

@@ -79,17 +79,18 @@ npm run dev:server
 curl -s http://localhost:8787/api/game-info
 curl -s http://localhost:8787/api/health
 curl -s http://localhost:8787/api/world
-curl -s -X POST http://localhost:8787/api/actor/move \
+curl -s -X POST http://localhost:8787/api/command \
   -H 'content-type: application/json' \
-  -d '{"direction":"east"}'
+  -d '{"type":"actor.move","direction":"east"}'
 ```
 
-Movement is authoritative: one tile per command, and a step that would leave the
-12x8 world returns `200` with `moved: false` and an unchanged position (a refused
-step is a normal outcome, not an error). The move command carries **only** `direction`:
-the actor is resolved by the server from the request context, so a client cannot name
-the actor it acts as (an extra `actorId` or `playerId` field is a `400`). Invalid fields,
-malformed JSON, or a body over 64 KiB are `400`.
+Movement is authoritative: one tile per command, and a step that would leave the 10x10 map or
+enter a `blocked` tile returns `200` with an **empty `events` array** and an unchanged position
+(a refused step is a normal outcome, not an error). The move command carries **only** a
+direction (and its `type`): the actor is resolved by the server from the request context, so a
+client cannot name the actor it acts as nor submit a destination (an extra `actorId`, `playerId`,
+`x`/`y`, `position` or `to` field is a `400`). Invalid fields, malformed JSON, or a body over
+64 KiB are `400`.
 
 ## Notes
 

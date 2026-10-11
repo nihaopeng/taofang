@@ -4,21 +4,24 @@ import {
   isActorId,
   isEntityId,
   isPlayerId,
+  isWorldId,
   parseActorId,
   parseEntityId,
   parsePlayerId,
+  parseWorldId,
 } from '../src/index.ts';
 import { captureParseError } from './support.ts';
 
 type Guard = (value: unknown) => boolean;
 type Parser = (value: unknown) => string;
-type Label = 'EntityId' | 'ActorId' | 'PlayerId';
+type Label = 'EntityId' | 'ActorId' | 'PlayerId' | 'WorldId';
 type Concept = { label: Label; is: Guard; parse: Parser };
 
 const concepts: Concept[] = [
   { label: 'EntityId', is: isEntityId, parse: parseEntityId },
   { label: 'ActorId', is: isActorId, parse: parseActorId },
   { label: 'PlayerId', is: isPlayerId, parse: parsePlayerId },
+  { label: 'WorldId', is: isWorldId, parse: parseWorldId },
 ];
 
 const invalidValues: Array<[string, unknown]> = [
@@ -56,9 +59,12 @@ describe.each(concepts)('$label runtime helpers', ({ is, parse, label }) => {
 });
 
 describe('identity helpers are distinct functions', () => {
-  it('does not collapse the three guards into one shared implementation object', () => {
-    expect(isEntityId).not.toBe(isActorId);
-    expect(isActorId).not.toBe(isPlayerId);
-    expect(isEntityId).not.toBe(isPlayerId);
+  it('does not collapse the identity guards into one shared implementation object', () => {
+    const guards = [isEntityId, isActorId, isPlayerId, isWorldId];
+    for (let i = 0; i < guards.length; i += 1) {
+      for (let j = i + 1; j < guards.length; j += 1) {
+        expect(guards[i]).not.toBe(guards[j]);
+      }
+    }
   });
 });

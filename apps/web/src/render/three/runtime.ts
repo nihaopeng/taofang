@@ -18,9 +18,29 @@
  * ------------------
  * Game tiles are 2D with an origin at the top-left and `y` growing south. The
  * scene maps a tile to `scene.x = tile.x` and `scene.y = -tile.y` (so scene `y`
- * grows north), with `scene.z = 0`. This is the only place the mapping exists;
- * `inspect()` inverts it from the real `Object3D` position so a change to the
- * mapping is observable in tests.
+ * grows north), with a layer-dependent `scene.z`. This is the only place the
+ * mapping exists; `inspect()` inverts it from the real `Object3D` position so a
+ * change to the mapping is observable in tests.
+ *
+ * Layer / draw order
+ * ------------------
+ * `node.create` carries a `RenderLayer`. With terrain and actors otherwise at one
+ * depth, draw order would be undefined (the actor could be drawn under the
+ * tiles). Each node's mesh therefore gets both a `renderOrder` and a `z` from
+ * {@link LAYER_ORDER} / {@link LAYER_Z} (`base` behind `object`), and `inspect()`
+ * exposes the resulting `layer` and `depth` so the ordering is asserted directly
+ * rather than assumed from pixels.
+ *
+ * Batching / instancing seam
+ * --------------------------
+ * Alongside the per-node map the runtime maintains a per-`(layer, appearance)`
+ * `Set<NodeId>` bucket index at {@link bucketKey}, updated on create / destroy /
+ * `appearance.set`. The buckets are the only grouping a future instanced renderer
+ * or texture-atlas realisation needs: it can swap the realisation *per bucket*
+ * without changing the Render ISA or the bridge's command stream. The per-node
+ * map stays as the source of truth for identity and interpolation. `inspect()`
+ * exposes bucket keys/counts so their correctness is testable. Instancing and
+ * atlases are deliberately NOT implemented here.
  */
 
 import {
@@ -35,14 +55,20 @@ import {
   WebGLRenderer,
 } from 'three';
 import type { Light, Material } from 'three';
-import type { AppearanceId, NodeId, RenderFrame } from '@starvalley/render-protocol';
+import type {
+  AppearanceId,
+  NodeId,
+  RenderFrame,
+  RenderLayer,
+} from '@starvalley/render-protocol';
 
 /**
  * Plain-data view of the runtime for tests and debugging. Never Three objects.
  *
  * `nodes` coordinates are derived from the real `Object3D` position (inverted
  * back to tile space), not from the runtime's interpolation bookkeeping, so the
- * scene mapping itself is under test.
+ * scene mapping itself is under test. `depth` is the real scene-space `z`, which
+ * is what the renderer uses for depth ordering between layers.
  */
 export interface RenderInspection {
   mounted: boolean;
@@ -54,11 +80,20 @@ export interface RenderInspection {
   camera: { left: number; right: number; top: number; bottom: number };
   nodes: readonly {
     nodeId: string;
+    /** The node's render layer; `base` is drawn behind `object`. */
+    layer: RenderLayer;
     x: number;
     y: number;
+    /** Real scene-space `z`; a lower value is farther from the camera. */
+    depth: number;
     visible: boolean;
     appearance: string;
   }[];
+  /**
+   * Per-`(layer, appearance)` bucket sizes, keyed `"<layer>:<appearance>"` and
+   * sorted by key. This is the batching/instancing seam made observable.
+   */
+  buckets: readonly { key: string; count: number }[];
 }
 
 /** The executor surface the UI wires to the bridge. */
@@ -88,6 +123,7 @@ export interface RenderRuntime {
 /** Internal per-node bookkeeping. `mesh` is the Three object; the rest is state. */
 interface RuntimeNode {
   mesh: Mesh;
+  layer: RenderLayer;
   /** Tile-space position (interpolated). */
   x: number;
   y: number;
@@ -100,6 +136,25 @@ interface RuntimeNode {
   startY: number;
 }
 
+/**
+ * Deterministic draw order per layer: `base` renders before (behind) `object`.
+ * Applied as `Object3D.renderOrder`, the primary sort key for opaque meshes.
+ */
+const LAYER_ORDER: Readonly<Record<RenderLayer, number>> = {
+  base: 0,
+  object: 1,
+};
+
+/**
+ * Scene-space `z` per layer. `base` is pushed away from the camera so depth
+ * testing also resolves the ordering (equal-depth opaque meshes would otherwise
+ * be resolved by draw order alone).
+ */
+const LAYER_Z: Readonly<Record<RenderLayer, number>> = {
+  base: -0.1,
+  object: 0,
+};
+
 /** Visible stand-in for an appearance id the runtime catalogue does not know. */
 const FALLBACK_COLOUR = 0xe8d5a8;
 
@@ -107,7 +162,12 @@ const FALLBACK_COLOUR = 0xe8d5a8;
 const APPEARANCE_COLOURS: Readonly<Record<string, number>> = {
   'appearance.character': 0x8fbf5a,
   'appearance.tree': 0x4f7a2c,
-  // The bridge emits this for a kind it does not know yet; it is a first-class
+  // Terrain placeholders. Distinct colours are enough for a 10x10 map; the
+  // catalogue id is the stable contract, not the colour.
+  'appearance.terrain.grass': 0x6fae42,
+  'appearance.terrain.path': 0xc2a76b,
+  'appearance.terrain.blocked': 0x505050,
+  // The bridge emits this for a value it does not know yet; it is a first-class
   // catalogue entry so the binding test can assert it is covered.
   'appearance.fallback': FALLBACK_COLOUR,
 };
@@ -145,6 +205,11 @@ function disposeMaterial(material: Material | Material[]): void {
   material.dispose();
 }
 
+/** Bucket key for the per-`(layer, appearance)` index. */
+function bucketKey(layer: RenderLayer, appearance: AppearanceId): string {
+  return `${layer}:${appearance}`;
+}
+
 /**
  * Create a render runtime for an authoritative world size.
  *
@@ -167,6 +232,10 @@ export function createThreeRuntime(options: {
 
   const scene = new Scene();
   const nodes = new Map<NodeId, RuntimeNode>();
+  // Per-`(layer, appearance)` node index. This is the seam a future instanced /
+  // atlas renderer swaps its realisation behind; the ISA and the bridge do not
+  // change because of it.
+  const buckets = new Map<string, Set<NodeId>>();
 
   // Centre of the tile grid in scene space: tiles run x = 0..width-1 and
   // y = 0..height-1, and scene y is negated.
@@ -210,19 +279,48 @@ export function createThreeRuntime(options: {
   let resizeObserver: ResizeObserver | null = null;
   let frameHandle: number | null = null;
 
+  function addToBucket(layer: RenderLayer, appearance: AppearanceId, nodeId: NodeId): void {
+    const key = bucketKey(layer, appearance);
+    let set = buckets.get(key);
+    if (set === undefined) {
+      set = new Set<NodeId>();
+      buckets.set(key, set);
+    }
+    set.add(nodeId);
+  }
+
+  function removeFromBucket(
+    layer: RenderLayer,
+    appearance: AppearanceId,
+    nodeId: NodeId,
+  ): void {
+    const key = bucketKey(layer, appearance);
+    const set = buckets.get(key);
+    if (set === undefined) {
+      return;
+    }
+    set.delete(nodeId);
+    if (set.size === 0) {
+      buckets.delete(key);
+    }
+  }
+
   function createNode(command: {
     nodeId: NodeId;
+    layer: RenderLayer;
     appearance: AppearanceId;
     transform: { x: number; y: number };
     visible: boolean;
   }): void {
     const mesh = new Mesh(new BoxGeometry(1, 1, 1), createMaterial(command.appearance));
-    // Tile -> scene: scene y grows north, tile y grows south.
-    mesh.position.set(command.transform.x, -command.transform.y, 0);
+    // Tile -> scene: scene y grows north, tile y grows south; z encodes layer.
+    mesh.position.set(command.transform.x, -command.transform.y, LAYER_Z[command.layer]);
+    mesh.renderOrder = LAYER_ORDER[command.layer];
     mesh.visible = command.visible;
     scene.add(mesh);
     nodes.set(command.nodeId, {
       mesh,
+      layer: command.layer,
       x: command.transform.x,
       y: command.transform.y,
       appearance: command.appearance,
@@ -231,6 +329,7 @@ export function createThreeRuntime(options: {
       startX: command.transform.x,
       startY: command.transform.y,
     });
+    addToBucket(command.layer, command.appearance, command.nodeId);
   }
 
   function destroyNode(nodeId: NodeId): void {
@@ -241,6 +340,7 @@ export function createThreeRuntime(options: {
     scene.remove(node.mesh);
     node.mesh.geometry.dispose();
     disposeMaterial(node.mesh.material);
+    removeFromBucket(node.layer, node.appearance, nodeId);
     nodes.delete(nodeId);
   }
 
@@ -265,7 +365,7 @@ export function createThreeRuntime(options: {
             node.y = command.transform.y;
             node.target = null;
             node.startMs = null;
-            node.mesh.position.set(node.x, -node.y, 0);
+            node.mesh.position.set(node.x, -node.y, LAYER_Z[node.layer]);
           }
           break;
         }
@@ -298,6 +398,10 @@ export function createThreeRuntime(options: {
             const material = createMaterial(command.appearance);
             disposeMaterial(node.mesh.material);
             node.mesh.material = material;
+            // Re-bucket: the old bucket must not keep a node that no longer
+            // matches its appearance.
+            removeFromBucket(node.layer, node.appearance, command.nodeId);
+            addToBucket(node.layer, command.appearance, command.nodeId);
             node.appearance = command.appearance;
           }
           break;
@@ -334,7 +438,7 @@ export function createThreeRuntime(options: {
         node.target = null;
         node.startMs = null;
       }
-      node.mesh.position.set(node.x, -node.y, 0);
+      node.mesh.position.set(node.x, -node.y, LAYER_Z[node.layer]);
     }
   }
 
@@ -351,13 +455,18 @@ export function createThreeRuntime(options: {
       },
       nodes: [...nodes.entries()].map(([nodeId, node]) => ({
         nodeId,
+        layer: node.layer,
         // Derive from the real Object3D, inverting the tile -> scene mapping, so
         // a regression in that mapping cannot hide behind bookkeeping.
         x: node.mesh.position.x,
         y: -node.mesh.position.y,
+        depth: node.mesh.position.z,
         visible: node.mesh.visible,
         appearance: node.appearance,
       })),
+      buckets: [...buckets.entries()]
+        .map(([key, set]) => ({ key, count: set.size }))
+        .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)),
     };
   }
 

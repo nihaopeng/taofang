@@ -12,6 +12,12 @@
  * to its entity state. An empty `events` array is the server *refusing* the
  * command; it is not an error and changes nothing.
  *
+ * Terrain is **static**: no event carries it, so `tiles` is only ever replaced by
+ * a fresh snapshot and is carried over reference-identically by the event applier.
+ * `terrain` stays an opaque string here; walkability is an authoritative Manager
+ * rule, so the store derives no collision rule of its own. A blocked step reaches
+ * the client only as a refusal (empty `events`), never as client-side validation.
+ *
  * Authoritative server state only. There is no prediction, interpolation, deltas,
  * or bounds checking: the visible world changes *only* when a validated snapshot
  * or event is reconciled into the view model.
@@ -25,17 +31,22 @@ import {
   compareEntityViewModels,
   toEntityViewModels,
   toEntityViewModel,
+  toTileViewModels,
   toWorldViewModel,
 } from './world-view-model';
-import type { EntityViewModel, MoveDirection, WorldViewModel } from './world-view-model';
+import type { EntityViewModel, MoveDirection, TileViewModel, WorldViewModel } from './world-view-model';
 
 /** World request lifecycle as observed by the UI. */
 export type WorldStatus = 'idle' | 'loading' | 'ready' | 'error';
 
-/** Observable state. `world`/`entities` are populated once a snapshot is `ready`. */
+/** Observable state. `world`/`tiles`/`entities` are populated once a snapshot is `ready`. */
 export interface WorldState {
   status: WorldStatus;
+  /** The loaded world's identity, or `null` while no snapshot is `ready`. */
+  worldId: string | null;
   world: WorldViewModel | null;
+  /** Static terrain, ordered deterministically by `y` then `x`. */
+  tiles: readonly TileViewModel[];
   /** Authoritative entities, ordered deterministically by `entityId`. */
   entities: readonly EntityViewModel[];
   /** The actor the caller controls, or `null` when the caller controls nothing. */
@@ -48,11 +59,15 @@ type Listener = (state: WorldState) => void;
 
 /** Shared empty list so idle/loading states are reference-stable. */
 const NO_ENTITIES: readonly EntityViewModel[] = Object.freeze([]);
+/** Shared empty tile list so idle/loading states are reference-stable. */
+const NO_TILES: readonly TileViewModel[] = Object.freeze([]);
 
 /** Canonical initial state. Reused so `getWorldState` is reference-stable. */
 const IDLE_STATE: WorldState = {
   status: 'idle',
+  worldId: null,
   world: null,
+  tiles: NO_TILES,
   entities: NO_ENTITIES,
   controlledActorId: null,
   error: null,
@@ -124,7 +139,7 @@ export function resetWorldState(): void {
  * Load the authoritative world snapshot. Never rejects: the returned promise
  * resolves once the state has settled (`ready` or `error`). Concurrent calls
  * while a request is in flight share the same promise and do not trigger a
- * second fetch. A successful snapshot **replaces** the world and entity state
+ * second fetch. A successful snapshot **replaces** the world, tile, and entity state
  * wholesale.
  */
 export function loadWorld(): Promise<void> {
@@ -147,7 +162,9 @@ export function loadWorld(): Promise<void> {
 async function runLoad(requestGeneration: number): Promise<void> {
   setState({
     status: 'loading',
+    worldId: null,
     world: null,
+    tiles: NO_TILES,
     entities: NO_ENTITIES,
     controlledActorId: null,
     error: null,
@@ -160,7 +177,9 @@ async function runLoad(requestGeneration: number): Promise<void> {
     }
     setState({
       status: 'ready',
+      worldId: snapshot.worldId,
       world: toWorldViewModel(snapshot),
+      tiles: toTileViewModels(snapshot.tiles),
       entities: toEntityViewModels(snapshot.entities),
       controlledActorId: snapshot.controlledActorId,
       error: null,
@@ -171,7 +190,9 @@ async function runLoad(requestGeneration: number): Promise<void> {
     }
     setState({
       status: 'error',
+      worldId: null,
       world: null,
+      tiles: NO_TILES,
       entities: NO_ENTITIES,
       controlledActorId: null,
       error: describeApiError(error, 'Something went wrong while loading the world.'),
@@ -298,7 +319,9 @@ async function performMove(direction: MoveDirection, loopGeneration: number): Pr
     // only the status/error signal the failure.
     setState({
       status: 'error',
+      worldId: state.worldId,
       world: state.world,
+      tiles: state.tiles,
       entities: state.entities,
       controlledActorId: state.controlledActorId,
       error: toMoveErrorMessage(error),
@@ -401,7 +424,9 @@ export function applyEvents(events: readonly GameEvent[]): void {
 
   setState({
     status: 'ready',
+    worldId: state.worldId,
     world: state.world,
+    tiles: state.tiles,
     entities: [...byId.values()].sort(compareEntityViewModels),
     controlledActorId: state.controlledActorId,
     error: null,

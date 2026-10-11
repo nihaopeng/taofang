@@ -59,6 +59,7 @@ vi.mock('../src/render/three/runtime.ts', () => ({
       ground: false,
       camera: { left: 0, right: 0, top: 0, bottom: 0 },
       nodes: [],
+      buckets: [],
     }),
     dispose: () => {},
   }),
@@ -85,7 +86,12 @@ const VALID_ENTITY = {
 };
 
 const VALID_SNAPSHOT = {
+  worldId: 'world-1',
   size: { width: 10, height: 8 },
+  tiles: [
+    { transform: { x: 0, y: 0 }, terrain: 'grass' },
+    { transform: { x: 3, y: 4 }, terrain: 'path' },
+  ],
   entities: [VALID_ENTITY],
   controlledActorId: 'actor-1',
   serverTime: SERVER_TIME,

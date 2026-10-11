@@ -14,10 +14,15 @@
  *   Organizer barrel and the render ISA types.
  * - No clock: `frameFor` is a pure function of `(state, previously-known nodes)`
  *   so it is deterministic and unit-testable without timers.
+ * - No terrain -> walkability rule. `terrain` is an opaque presentation input:
+ *   mapping it to an appearance is presentation, but whether it is walkable is
+ *   an authoritative Manager rule the client must never infer.
  *
- * Identity: a render `NodeId` is derived from the game `entityId`, but the two
- * are deliberately different types. The renderer must not be able to read game
- * identity (it receives only `NodeId`); game identity stops here.
+ * Identity: a render `NodeId` is derived from game identity, but the two are
+ * deliberately different types. The renderer must not be able to read game
+ * identity (it receives only `NodeId`); game identity stops here. Tile and entity
+ * ids are **namespaced** (`tile:<x>,<y>` / `entity:<entityId>`) so a tile can
+ * never collide with an entity whose id happens to look like a coordinate.
  */
 
 import type { AppearanceId, NodeId, RenderCommand, RenderFrame } from '@starvalley/render-protocol';
@@ -42,38 +47,81 @@ const DEFAULT_STEP_DURATION_MS = 120;
  * The runtime owns what an appearance id *looks like*; the bridge only chooses
  * the id. Adding an entity kind is a game-protocol change; the bridge gains an
  * entry here independently.
+ *
+ * Like terrain, an unknown kind is **not** reachable through the real
+ * transport: the Organizer validates every entity against the closed
+ * `EntityKind` union before a frame is built, so an unknown kind rejects there
+ * and the client settles into `error`. The fallback is defence-in-depth for
+ * direct or looser callers of the bridge.
  */
 const APPEARANCE_BY_KIND: Readonly<Record<string, AppearanceId>> = {
   character: asAppearanceId('appearance.character'),
 };
 
 /**
- * Documented fallback for a `kind` the catalogue does not know.
+ * Appearance catalogue: server terrain string -> opaque render `AppearanceId`.
  *
- * A new server-side kind must never crash the client: an unknown kind renders as
- * this appearance until a catalogue entry is added here. It is intentionally a
- * visible "unknown" look rather than a silent blank.
+ * `terrain` is an opaque string at the bridge boundary, but nothing the real
+ * transport delivers is absent from this catalogue: the Organizer's world guard
+ * validates every tile against the closed `TerrainKind` union before a frame is
+ * built, so an unknown terrain rejects there and the client settles into
+ * `error` without the bridge ever seeing it. The fallback is therefore
+ * defence-in-depth for direct or looser callers, not for a value the server can
+ * deliver through the transport.
+ */
+const APPEARANCE_BY_TERRAIN: Readonly<Record<string, AppearanceId>> = {
+  grass: asAppearanceId('appearance.terrain.grass'),
+  path: asAppearanceId('appearance.terrain.path'),
+  blocked: asAppearanceId('appearance.terrain.blocked'),
+};
+
+/**
+ * Documented fallback for a value the catalogue does not know (an entity `kind`
+ * or a tile `terrain`).
+ *
+ * Neither unknown value is reachable through the real transport: the Organizer
+ * validates every kind and terrain against its closed union before a frame is
+ * built, so an unknown value rejects there and the client settles into `error`.
+ * This fallback is defence-in-depth for direct or looser callers of the bridge;
+ * it keeps such a value rendering as a visible "unknown" look rather than
+ * throwing or silently blanking.
  */
 export const FALLBACK_APPEARANCE: AppearanceId = asAppearanceId('appearance.fallback');
 
 /**
- * Every appearance id the bridge can emit: one per known kind plus the fallback.
+ * Every appearance id the bridge can emit: one per known kind, one per known
+ * terrain, plus the fallback.
  *
  * Exported so the runtime can bind its own colour catalogue to it: a rename on
  * either side becomes a test failure instead of a silent fallback colour. A new
- * kind added to {@link APPEARANCE_BY_KIND} grows this list automatically.
+ * kind or terrain added above grows this list automatically.
  */
 export const BRIDGE_APPEARANCES: readonly AppearanceId[] = [
-  ...new Set([...Object.values(APPEARANCE_BY_KIND), FALLBACK_APPEARANCE]),
+  ...new Set([
+    ...Object.values(APPEARANCE_BY_KIND),
+    ...Object.values(APPEARANCE_BY_TERRAIN),
+    FALLBACK_APPEARANCE,
+  ]),
 ];
 
 /**
  * The Render ISA ships branded id *types* only (no runtime constructors), so the
  * bridge performs the branding at the one point where it is legitimate: the
  * Organizer/ISA boundary. Downstream, a `NodeId` is opaque.
+ *
+ * Ids are namespaced by kind so the two collections can never collide.
  */
-function asNodeId(entityId: string): NodeId {
-  return entityId as NodeId;
+function tileNodeId(x: number, y: number): NodeId {
+  return `tile:${x},${y}` as NodeId;
+}
+
+function entityNodeId(entityId: string): NodeId {
+  return `entity:${entityId}` as NodeId;
+}
+
+/** Key for the internal tile bookkeeping; position is the tile's identity. */
+function tileKey(x: number, y: number): string {
+  return `${x},${y}`;
 }
 
 function asAppearanceId(value: string): AppearanceId {
@@ -85,12 +133,24 @@ function appearanceForKind(kind: string): AppearanceId {
   return APPEARANCE_BY_KIND[kind] ?? FALLBACK_APPEARANCE;
 }
 
-/** The render state the bridge believes exists for one node. */
-interface KnownNode {
+/** Resolve the catalogue appearance for a terrain, falling back for unknown values. */
+function appearanceForTerrain(terrain: string): AppearanceId {
+  return APPEARANCE_BY_TERRAIN[terrain] ?? FALLBACK_APPEARANCE;
+}
+
+/** The render state the bridge believes exists for one entity node. */
+interface KnownEntity {
   appearance: AppearanceId;
   x: number;
   y: number;
   visible: boolean;
+}
+
+/** The render state the bridge believes exists for one tile node. */
+interface KnownTile {
+  x: number;
+  y: number;
+  terrain: string;
 }
 
 /**
@@ -111,44 +171,133 @@ function byEntityId(
   return 0;
 }
 
+/** Deterministic tile order: ascending by `y`, then `x` (row-major). */
+function byTilePosition(
+  a: { x: number; y: number },
+  b: { x: number; y: number },
+): number {
+  return a.y - b.y || a.x - b.x;
+}
+
 /** Stateful mapper from `WorldState` to ordered render frames. */
 export interface RenderBridge {
-  /** Produce the diff needed to move the runtime from its previous frame to this state. */
+  /**
+   * Produce the diff needed to move the runtime from its previous frame to this
+   * state. A change of `WorldState.worldId` is a full world switch: the known-node
+   * memory is reset first, so every node is re-created (a snap) and any node the
+   * new world does not contain is destroyed.
+   */
   frameFor(state: WorldState): RenderFrame;
-  /** Forget every known node, so the next call re-emits `node.create` for all entities. */
+  /** Forget every known node, so the next call re-emits `node.create` for all tiles and entities. */
   reset(): void;
 }
 
 /**
  * Create a fresh bridge. `stepDurationMs` is the interpolation duration attached
  * to `transform.setTarget` (defaults to {@link DEFAULT_STEP_DURATION_MS}).
+ *
+ * ## Emitted command order (part of the contract)
+ *
+ * `RenderFrame` is applied **in order**, so the order is deterministic and
+ * documented:
+ *
+ * 1. base-layer creates (`node.create` for new tiles), sorted `y` then `x`;
+ * 2. object-layer commands (`node.create` for new entities, then per-entity
+ *    `transform.setTarget` / `visibility.set` / `appearance.set`), sorted by
+ *    `entityId`;
+ * 3. base-layer terrain changes (`appearance.set`), sorted `y` then `x`;
+ * 4. base-layer destroys (`node.destroy` for removed tiles), sorted `y` then `x`;
+ * 5. object-layer destroys (`node.destroy` for removed entities), sorted by
+ *    `entityId`.
+ *
+ * Why this shape: all base-layer creation is a contiguous block emitted before
+ * any object-layer creation, so a runtime that prepares object draw state (or
+ * draw order) on top of the base can rely on the base existing first; every node
+ * is created before any node in the same frame is destroyed, so a node that
+ * leaves the world can never be recreated by a later command; and every phase is
+ * a pure function of coordinates or ids, so the frame is byte-identical across
+ * runs and input orderings.
  */
 export function createRenderBridge(options?: { stepDurationMs?: number }): RenderBridge {
   const stepDurationMs = options?.stepDurationMs ?? DEFAULT_STEP_DURATION_MS;
-  const known = new Map<string, KnownNode>();
+  const knownEntities = new Map<string, KnownEntity>();
+  const knownTiles = new Map<string, KnownTile>();
+  // Identity of the world the known-node maps describe. `undefined` means "no
+  // frame has been produced yet"; `null` is a real (pre-ready) world id.
+  let knownWorldId: string | null | undefined;
+
+  /** Forget every known node so the next frame re-creates all of them. */
+  function forgetAll(): void {
+    knownEntities.clear();
+    knownTiles.clear();
+    knownWorldId = undefined;
+  }
 
   return {
     frameFor(state: WorldState): RenderFrame {
       const commands: RenderCommand[] = [];
-      const seen = new Set<string>();
+      const sortedTiles = [...state.tiles].sort(byTilePosition);
+      const sortedEntities = [...state.entities].sort(byEntityId);
 
-      for (const entity of [...state.entities].sort(byEntityId)) {
-        const nodeId = asNodeId(entity.entityId);
+      // A change of `worldId` means every known node belongs to a different
+      // world. Node ids are derived from position/entity id, so a new world can
+      // reuse `tile:<x>,<y>` / `entity:<id>` for a DIFFERENT node; diffing
+      // against the old world would emit `transform.setTarget` and make the
+      // actor interpolate out of its previous world instead of snapping in.
+      // Snapshot the old nodes (so any the new world does not contain are still
+      // destroyed) and reset the maps so the diff below re-emits `node.create`
+      // for every node of the new world.
+      let previousTiles: readonly KnownTile[] = [];
+      let previousEntityIds: readonly string[] = [];
+      if (knownWorldId !== state.worldId) {
+        previousTiles = [...knownTiles.values()];
+        previousEntityIds = [...knownEntities.keys()];
+        forgetAll();
+        knownWorldId = state.worldId;
+      }
+
+      // 1. Base-layer creates: first sight of a tile.
+      const seenTiles = new Set<string>();
+      for (const tile of sortedTiles) {
+        const key = tileKey(tile.x, tile.y);
+        seenTiles.add(key);
+        if (!knownTiles.has(key)) {
+          commands.push({
+            type: 'node.create',
+            layer: 'base',
+            nodeId: tileNodeId(tile.x, tile.y),
+            appearance: appearanceForTerrain(tile.terrain),
+            transform: { x: tile.x, y: tile.y },
+            visible: true,
+          });
+          knownTiles.set(key, {
+            x: tile.x,
+            y: tile.y,
+            terrain: tile.terrain,
+          });
+        }
+      }
+
+      // 2. Object-layer commands: entity create/update diff.
+      const seenEntities = new Set<string>();
+      for (const entity of sortedEntities) {
+        const nodeId = entityNodeId(entity.entityId);
         const appearance = appearanceForKind(entity.kind);
-        seen.add(entity.entityId);
+        seenEntities.add(entity.entityId);
 
-        const previous = known.get(entity.entityId);
+        const previous = knownEntities.get(entity.entityId);
 
         if (previous === undefined) {
           // First sight: materialise the node with its authoritative transform.
           commands.push({
             type: 'node.create',
+            layer: 'object',
             nodeId,
             appearance,
             transform: { x: entity.x, y: entity.y },
             visible: entity.visible,
           });
-          known.set(entity.entityId, {
+          knownEntities.set(entity.entityId, {
             appearance,
             x: entity.x,
             y: entity.y,
@@ -180,19 +329,51 @@ export function createRenderBridge(options?: { stepDurationMs?: number }): Rende
         }
       }
 
-      // Any known node with no matching entity left the world. Destroy it in a
-      // deterministic id order so the frame is stable across runs.
-      const removed = [...known.keys()].filter((entityId) => !seen.has(entityId)).sort();
-      for (const entityId of removed) {
-        commands.push({ type: 'node.destroy', nodeId: asNodeId(entityId) });
-        known.delete(entityId);
+      // 3. Base-layer terrain changes: a static tile whose terrain changed swaps
+      //    appearance in place (it must not be recreated).
+      for (const tile of sortedTiles) {
+        const previous = knownTiles.get(tileKey(tile.x, tile.y));
+        if (previous === undefined || previous.terrain === tile.terrain) {
+          continue;
+        }
+        const appearance = appearanceForTerrain(tile.terrain);
+        commands.push({
+          type: 'appearance.set',
+          nodeId: tileNodeId(tile.x, tile.y),
+          appearance,
+        });
+        previous.terrain = tile.terrain;
+      }
+
+      // 4. Base-layer destroys: tiles that disappeared. After a world switch the
+      //    known map only holds the new world's tiles, so the previous world's
+      //    tiles are considered here too, minus any the new world re-created.
+      const removedTiles = [
+        ...[...knownTiles.entries()].filter(([key]) => !seenTiles.has(key)),
+        ...previousTiles
+          .filter((tile) => !seenTiles.has(tileKey(tile.x, tile.y)))
+          .map((tile): [string, KnownTile] => [tileKey(tile.x, tile.y), tile]),
+      ].sort(([, a], [, b]) => byTilePosition(a, b));
+      for (const [key, tile] of removedTiles) {
+        commands.push({ type: 'node.destroy', nodeId: tileNodeId(tile.x, tile.y) });
+        knownTiles.delete(key);
+      }
+
+      // 5. Object-layer destroys: entities that disappeared, in id order.
+      const removedEntities = [
+        ...[...knownEntities.keys()].filter((entityId) => !seenEntities.has(entityId)),
+        ...previousEntityIds.filter((entityId) => !seenEntities.has(entityId)),
+      ].sort();
+      for (const entityId of removedEntities) {
+        commands.push({ type: 'node.destroy', nodeId: entityNodeId(entityId) });
+        knownEntities.delete(entityId);
       }
 
       return commands;
     },
 
     reset(): void {
-      known.clear();
+      forgetAll();
     },
   };
 }

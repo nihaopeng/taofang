@@ -19,7 +19,7 @@ describe('protocol constants', () => {
     expect(COMMAND_PATH).toBe('/api/command');
   });
 
-  it('exposes the primitive-reshape protocol version', () => {
-    expect(PROTOCOL_VERSION).toBe(3);
+  it('exposes the phase-5 world/tile protocol version', () => {
+    expect(PROTOCOL_VERSION).toBe(4);
   });
 });

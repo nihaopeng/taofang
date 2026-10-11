@@ -20,7 +20,7 @@ export {
 export { useGameInfo } from './use-game-info';
 
 // World / entity / command feature.
-export type { EntityViewModel, MoveDirection, WorldViewModel } from './world-view-model';
+export type { EntityViewModel, MoveDirection, TileViewModel, WorldViewModel } from './world-view-model';
 export type { WorldState, WorldStatus } from './world-store';
 
 export {

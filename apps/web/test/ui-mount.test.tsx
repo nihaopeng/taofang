@@ -36,7 +36,7 @@ vi.mock('../src/render/three/runtime.ts', () => ({
     mount: () => {},
     apply: () => {},
     update: () => {},
-    inspect: () => ({ mounted: false, nodes: [] }),
+    inspect: () => ({ mounted: false, lights: 0, ground: false, camera: { left: 0, right: 0, top: 0, bottom: 0 }, nodes: [], buckets: [] }),
     dispose: () => {},
   }),
 }));
@@ -58,7 +58,9 @@ const VALID_RESPONSE = { gameInfo: VALID_GAME_INFO };
 // A minimal valid world so `<App />`'s world load settles without network access.
 const VALID_WORLD_RESPONSE = {
   world: {
+    worldId: 'world-1',
     size: { width: 10, height: 8 },
+    tiles: [{ transform: { x: 0, y: 0 }, terrain: 'grass' }],
     entities: [],
     controlledActorId: null,
     serverTime: VALID_GAME_INFO.serverTime,

@@ -18,6 +18,7 @@ import type {
   RenderCommand,
   RenderCommandType,
   RenderFrame,
+  RenderLayer,
   RenderTransform,
 } from '../src/index.ts';
 
@@ -27,10 +28,12 @@ const appearanceFarmer = 'appearance.farmer' as AppearanceId;
 const appearanceTree = 'appearance.tree' as AppearanceId;
 const transformOrigin: RenderTransform = { x: 0, y: 0 };
 const transformTarget: RenderTransform = { x: 4, y: 7 };
+const baseLayer: RenderLayer = 'base';
 
 /** One literal for every `RenderCommand` member (adding a member breaks this). */
 export const nodeCreate: RenderCommand = {
   type: 'node.create',
+  layer: baseLayer,
   nodeId: nodeA,
   appearance: appearanceFarmer,
   transform: transformOrigin,
@@ -129,6 +132,7 @@ export const nodeAsAppearance: AppearanceId = nodeA;
 export const misspelledType: RenderCommand = {
   // @ts-expect-error a misspelled `type` is not a RenderCommand
   type: 'node.creat',
+  layer: baseLayer,
   nodeId: nodeA,
   appearance: appearanceFarmer,
   transform: transformOrigin,
@@ -138,7 +142,21 @@ export const misspelledType: RenderCommand = {
 // @ts-expect-error node.create without `appearance` is not a RenderCommand
 export const missingAppearance: RenderCommand = {
   type: 'node.create',
+  layer: baseLayer,
   nodeId: nodeA,
   transform: transformOrigin,
   visible: true,
 };
+
+// @ts-expect-error node.create without `layer` is not a RenderCommand
+// (layer is required: terrain and actors must not share an undefined depth)
+export const missingLayer: RenderCommand = {
+  type: 'node.create',
+  nodeId: nodeA,
+  appearance: appearanceFarmer,
+  transform: transformOrigin,
+  visible: true,
+};
+
+// @ts-expect-error an invalid layer string is not a RenderLayer
+export const invalidLayer: RenderLayer = 'foreground';

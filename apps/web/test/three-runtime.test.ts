@@ -9,7 +9,13 @@
 
 import { describe, expect, it } from 'vitest';
 
-import type { AppearanceId, NodeId, RenderFrame } from '@starvalley/render-protocol';
+import type {
+  AppearanceId,
+  NodeCreateCommand,
+  NodeId,
+  RenderFrame,
+  RenderLayer,
+} from '@starvalley/render-protocol';
 
 import { BRIDGE_APPEARANCES } from '../src/render/bridge.ts';
 import { KNOWN_APPEARANCES, createThreeRuntime } from '../src/render/three/runtime.ts';
@@ -19,11 +25,25 @@ const nodeA = 'node-a' as NodeId;
 const nodeB = 'node-b' as NodeId;
 const appearanceCharacter = 'appearance.character' as AppearanceId;
 const appearanceTree = 'appearance.tree' as AppearanceId;
+const appearanceGrass = 'appearance.terrain.grass' as AppearanceId;
+const appearancePath = 'appearance.terrain.path' as AppearanceId;
 
 const WORLD_SIZE = { width: 12, height: 8 } as const;
 
 function makeRuntime(): RenderRuntime {
   return createThreeRuntime({ worldSize: WORLD_SIZE });
+}
+
+/** `node.create` with the layer supplied explicitly and sensible defaults. */
+function createCommand(
+  nodeId: NodeId,
+  layer: RenderLayer,
+  appearance: AppearanceId = appearanceCharacter,
+  x = 0,
+  y = 0,
+  visible = true,
+): NodeCreateCommand {
+  return { type: 'node.create', layer, nodeId, appearance, transform: { x, y }, visible };
 }
 
 function findNode(runtime: RenderRuntime, nodeId: NodeId): RenderInspection['nodes'][number] {
@@ -34,24 +54,16 @@ function findNode(runtime: RenderRuntime, nodeId: NodeId): RenderInspection['nod
   return node;
 }
 
+function bucketCount(runtime: RenderRuntime, key: string): number {
+  return runtime.inspect().buckets.find((bucket) => bucket.key === key)?.count ?? 0;
+}
+
 describe('three runtime command execution', () => {
   it('applies a frame containing all six primitives without throwing', () => {
     const runtime = makeRuntime();
     const frame: RenderFrame = [
-      {
-        type: 'node.create',
-        nodeId: nodeA,
-        appearance: appearanceCharacter,
-        transform: { x: 0, y: 0 },
-        visible: true,
-      },
-      {
-        type: 'node.create',
-        nodeId: nodeB,
-        appearance: appearanceCharacter,
-        transform: { x: 1, y: 1 },
-        visible: true,
-      },
+      createCommand(nodeA, 'object', appearanceCharacter, 0, 0),
+      createCommand(nodeB, 'object', appearanceCharacter, 1, 1),
       { type: 'transform.set', nodeId: nodeA, transform: { x: 1, y: 1 } },
       {
         type: 'transform.setTarget',
@@ -73,6 +85,7 @@ describe('three runtime command execution', () => {
     expect(inspection.nodes).toHaveLength(1);
     expect(findNode(runtime, nodeA)).toMatchObject({
       nodeId: 'node-a',
+      layer: 'object',
       appearance: 'appearance.tree',
     });
 
@@ -81,20 +94,14 @@ describe('three runtime command execution', () => {
 
   it('reflects created nodes and their transforms in inspect()', () => {
     const runtime = makeRuntime();
-    runtime.apply([
-      {
-        type: 'node.create',
-        nodeId: nodeA,
-        appearance: appearanceCharacter,
-        transform: { x: 3, y: 4 },
-        visible: true,
-      },
-    ]);
+    runtime.apply([createCommand(nodeA, 'object', appearanceCharacter, 3, 4)]);
 
     expect(findNode(runtime, nodeA)).toEqual({
       nodeId: 'node-a',
+      layer: 'object',
       x: 3,
       y: 4,
+      depth: 0,
       visible: true,
       appearance: 'appearance.character',
     });
@@ -104,15 +111,7 @@ describe('three runtime command execution', () => {
 
   it('removes a destroyed node from inspect()', () => {
     const runtime = makeRuntime();
-    runtime.apply([
-      {
-        type: 'node.create',
-        nodeId: nodeA,
-        appearance: appearanceCharacter,
-        transform: { x: 0, y: 0 },
-        visible: true,
-      },
-    ]);
+    runtime.apply([createCommand(nodeA, 'object', appearanceCharacter)]);
     expect(runtime.inspect().nodes).toHaveLength(1);
 
     runtime.apply([{ type: 'node.destroy', nodeId: nodeA }]);
@@ -123,15 +122,7 @@ describe('three runtime command execution', () => {
 
   it('reflects visibility.set in inspect()', () => {
     const runtime = makeRuntime();
-    runtime.apply([
-      {
-        type: 'node.create',
-        nodeId: nodeA,
-        appearance: appearanceCharacter,
-        transform: { x: 0, y: 0 },
-        visible: true,
-      },
-    ]);
+    runtime.apply([createCommand(nodeA, 'object', appearanceCharacter)]);
 
     runtime.apply([{ type: 'visibility.set', nodeId: nodeA, visible: false }]);
 
@@ -143,15 +134,7 @@ describe('three runtime command execution', () => {
 describe('three runtime coordinate mapping', () => {
   it('derives inspect() coordinates from the real Object3D position', () => {
     const runtime = makeRuntime();
-    runtime.apply([
-      {
-        type: 'node.create',
-        nodeId: nodeA,
-        appearance: appearanceCharacter,
-        transform: { x: 3, y: 4 },
-        visible: true,
-      },
-    ]);
+    runtime.apply([createCommand(nodeA, 'object', appearanceCharacter, 3, 4)]);
 
     // Tile -> scene is scene.y = -tile.y. inspect() inverts that from the actual
     // mesh, so changing the mapping (e.g. dropping the negation) fails here even
@@ -165,15 +148,7 @@ describe('three runtime coordinate mapping', () => {
 
   it('reads an interpolated position back off the mesh, not off bookkeeping', () => {
     const runtime = makeRuntime();
-    runtime.apply([
-      {
-        type: 'node.create',
-        nodeId: nodeA,
-        appearance: appearanceCharacter,
-        transform: { x: 0, y: 0 },
-        visible: true,
-      },
-    ]);
+    runtime.apply([createCommand(nodeA, 'object', appearanceCharacter, 0, 0)]);
     runtime.apply([
       { type: 'transform.setTarget', nodeId: nodeA, transform: { x: 10, y: 20 }, durationMs: 100 },
     ]);
@@ -192,15 +167,7 @@ describe('three runtime coordinate mapping', () => {
 describe('three runtime transforms', () => {
   it('applies transform.set instantly', () => {
     const runtime = makeRuntime();
-    runtime.apply([
-      {
-        type: 'node.create',
-        nodeId: nodeA,
-        appearance: appearanceCharacter,
-        transform: { x: 0, y: 0 },
-        visible: true,
-      },
-    ]);
+    runtime.apply([createCommand(nodeA, 'object', appearanceCharacter, 0, 0)]);
 
     runtime.apply([{ type: 'transform.set', nodeId: nodeA, transform: { x: 5, y: 6 } }]);
 
@@ -210,15 +177,7 @@ describe('three runtime transforms', () => {
 
   it('interpolates a transform.setTarget toward the target and reaches it', () => {
     const runtime = makeRuntime();
-    runtime.apply([
-      {
-        type: 'node.create',
-        nodeId: nodeA,
-        appearance: appearanceCharacter,
-        transform: { x: 0, y: 0 },
-        visible: true,
-      },
-    ]);
+    runtime.apply([createCommand(nodeA, 'object', appearanceCharacter, 0, 0)]);
     runtime.apply([
       { type: 'transform.setTarget', nodeId: nodeA, transform: { x: 10, y: 20 }, durationMs: 100 },
     ]);
@@ -244,15 +203,7 @@ describe('three runtime transforms', () => {
 
   it('cancels interpolation when a transform.set snaps mid-flight', () => {
     const runtime = makeRuntime();
-    runtime.apply([
-      {
-        type: 'node.create',
-        nodeId: nodeA,
-        appearance: appearanceCharacter,
-        transform: { x: 0, y: 0 },
-        visible: true,
-      },
-    ]);
+    runtime.apply([createCommand(nodeA, 'object', appearanceCharacter, 0, 0)]);
     runtime.apply([
       { type: 'transform.setTarget', nodeId: nodeA, transform: { x: 10, y: 0 }, durationMs: 100 },
     ]);
@@ -270,15 +221,7 @@ describe('three runtime transforms', () => {
 describe('three runtime lifecycle', () => {
   it('composes the scene at construction and releases lights, ground and nodes on dispose', () => {
     const runtime = makeRuntime();
-    runtime.apply([
-      {
-        type: 'node.create',
-        nodeId: nodeA,
-        appearance: appearanceCharacter,
-        transform: { x: 0, y: 0 },
-        visible: true,
-      },
-    ]);
+    runtime.apply([createCommand(nodeA, 'object', appearanceCharacter)]);
 
     // Built without mount: the composition is what the runtime owns.
     const before = runtime.inspect();
@@ -317,18 +260,107 @@ describe('three runtime lifecycle', () => {
   it('does not throw for an unknown appearance and falls back to a material', () => {
     const runtime = makeRuntime();
     expect(() => {
-      runtime.apply([
-        {
-          type: 'node.create',
-          nodeId: nodeA,
-          appearance: 'appearance.unknown' as AppearanceId,
-          transform: { x: 0, y: 0 },
-          visible: true,
-        },
-      ]);
+      runtime.apply([createCommand(nodeA, 'object', 'appearance.unknown' as AppearanceId)]);
     }).not.toThrow();
     expect(findNode(runtime, nodeA).appearance).toBe('appearance.unknown');
     runtime.dispose();
+  });
+});
+
+describe('three runtime layers', () => {
+  /** A 10x10 base-layer grid plus one object-layer node: 101 creations. */
+  function makeFullFrame(): RenderFrame {
+    const frame: NodeCreateCommand[] = [];
+    for (let y = 0; y < 10; y += 1) {
+      for (let x = 0; x < 10; x += 1) {
+        frame.push(
+          createCommand(`tile:${x},${y}` as NodeId, 'base', appearanceGrass, x, y),
+        );
+      }
+    }
+    frame.push(createCommand('entity:actor' as NodeId, 'object', appearanceCharacter, 1, 1));
+    return frame;
+  }
+
+  it('applies a 10x10 base-layer frame plus an object-layer node and reports all 101 with layers', () => {
+    const runtime = makeRuntime();
+
+    runtime.apply(makeFullFrame());
+
+    const inspection = runtime.inspect();
+    expect(inspection.nodes).toHaveLength(101);
+    expect(inspection.nodes.filter((node) => node.layer === 'base')).toHaveLength(100);
+    expect(inspection.nodes.filter((node) => node.layer === 'object')).toHaveLength(1);
+    expect(findNode(runtime, 'entity:actor' as NodeId)).toMatchObject({
+      layer: 'object',
+      x: 1,
+      y: 1,
+    });
+
+    runtime.dispose();
+  });
+
+  it('draws the base layer behind the object layer (depth ordering, not pixels)', () => {
+    const runtime = makeRuntime();
+    runtime.apply(makeFullFrame());
+
+    const nodes = runtime.inspect().nodes;
+    const object = nodes.find((node) => node.layer === 'object');
+    const base = nodes.find((node) => node.layer === 'base');
+    if (object === undefined || base === undefined) {
+      throw new Error('expected both a base and an object node');
+    }
+
+    // Base is pushed away from the camera; the object layer sits at the front.
+    expect(base.depth).toBeLessThan(object.depth);
+    expect(Math.max(...nodes.filter((node) => node.layer === 'base').map((node) => node.depth)))
+      .toBeLessThan(
+        Math.min(...nodes.filter((node) => node.layer === 'object').map((node) => node.depth)),
+      );
+
+    runtime.dispose();
+  });
+
+  it('groups nodes into (layer, appearance) buckets and updates them on appearance.set/node.destroy', () => {
+    const runtime = makeRuntime();
+    runtime.apply(makeFullFrame());
+
+    // 100 grass tiles in one base bucket, the actor alone in an object bucket.
+    expect(bucketCount(runtime, 'base:appearance.terrain.grass')).toBe(100);
+    expect(bucketCount(runtime, 'object:appearance.character')).toBe(1);
+    expect(runtime.inspect().buckets).toHaveLength(2);
+
+    runtime.apply([
+      { type: 'appearance.set', nodeId: 'tile:0,0' as NodeId, appearance: appearancePath },
+    ]);
+
+    expect(bucketCount(runtime, 'base:appearance.terrain.grass')).toBe(99);
+    expect(bucketCount(runtime, 'base:appearance.terrain.path')).toBe(1);
+
+    runtime.apply([{ type: 'node.destroy', nodeId: 'tile:1,0' as NodeId }]);
+
+    expect(bucketCount(runtime, 'base:appearance.terrain.grass')).toBe(98);
+    // The emptied path bucket is removed, not left at zero.
+    runtime.apply([
+      { type: 'appearance.set', nodeId: 'tile:0,0' as NodeId, appearance: appearanceGrass },
+    ]);
+    expect(runtime.inspect().buckets.map((bucket) => bucket.key)).not.toContain(
+      'base:appearance.terrain.path',
+    );
+
+    runtime.dispose();
+  });
+
+  it('releases all 101 nodes and their buckets on dispose', () => {
+    const runtime = makeRuntime();
+    runtime.apply(makeFullFrame());
+    expect(runtime.inspect().nodes).toHaveLength(101);
+
+    runtime.dispose();
+
+    const after = runtime.inspect();
+    expect(after.nodes).toHaveLength(0);
+    expect(after.buckets).toHaveLength(0);
   });
 });
 

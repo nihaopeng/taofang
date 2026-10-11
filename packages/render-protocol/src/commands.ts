@@ -1,6 +1,14 @@
 import type { AppearanceId, NodeId } from './ids.ts';
 
 /**
+ * Render-space layer bucket. It names no game object: it exists because
+ * terrain and actors would otherwise be created at the same depth, leaving draw
+ * order undefined (the actor can be drawn under the tiles). A layer is also the
+ * natural key for later batching/instancing.
+ */
+export type RenderLayer = 'base' | 'object';
+
+/**
  * Integer coordinates for the render scene. This is a render-space value, not a
  * game tile coordinate; the bridge chooses the mapping.
  */
@@ -12,6 +20,7 @@ export interface RenderTransform {
 /** Create a node with an initial transform and visibility. */
 export interface NodeCreateCommand {
   type: 'node.create';
+  layer: RenderLayer;
   nodeId: NodeId;
   appearance: AppearanceId;
   transform: RenderTransform;

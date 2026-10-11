@@ -1,13 +1,16 @@
 /**
- * Organizer unit tests for the Phase-4 primitive world feature.
+ * Organizer unit tests for the Phase-5 world feature (tiles + entities).
  *
  * Focuses on the client-application contract: request lifecycle, protocol
- * validation, authoritative-event reconciliation, no-optimism, and deterministic
- * command serialization. Transport mechanics are injected through `setWorldFetch`.
+ * validation, authoritative-event reconciliation, static-terrain handling,
+ * no-optimism, and deterministic command serialization. Transport mechanics are
+ * injected through `setWorldFetch`.
  *
  * The client is event-driven: a command returns a `{ events, serverTime }` delta
- * and the store applies those events to its entity list. The move body is exactly
- * `{ type: 'actor.move', direction }`; no actor/player id is ever sent.
+ * and the store applies those events to its entity list. Tiles are static, so no
+ * event carries terrain: they only ever change through a fresh snapshot. The move
+ * body is exactly `{ type: 'actor.move', direction }`; no actor/player id and no
+ * destination coordinate is ever sent.
  */
 
 import { createElement } from 'react';
@@ -77,8 +80,23 @@ const ENTITY_B_VM = {
   visible: true,
 };
 
+// Deliberately scrambled wire order: the deterministic mapper must re-sort by
+// `y` then `x` so the snapshot's tile array does not depend on iteration order.
+const TILE_PATH = { transform: { x: 1, y: 0 }, terrain: 'path' };
+const TILE_BLOCKED = { transform: { x: 0, y: 1 }, terrain: 'blocked' };
+const TILE_GRASS = { transform: { x: 0, y: 0 }, terrain: 'grass' };
+
+const TILE_GRASS_VM = { x: 0, y: 0, terrain: 'grass' };
+const TILE_PATH_VM = { x: 1, y: 0, terrain: 'path' };
+const TILE_BLOCKED_VM = { x: 0, y: 1, terrain: 'blocked' };
+const ORDERED_TILES = [TILE_GRASS_VM, TILE_PATH_VM, TILE_BLOCKED_VM];
+
+const WORLD_ID = 'world-main';
+
 const VALID_SNAPSHOT = {
+  worldId: WORLD_ID,
   size: { width: 10, height: 8 },
+  tiles: [TILE_PATH, TILE_BLOCKED, TILE_GRASS],
   entities: [ENTITY_A, ENTITY_B],
   controlledActorId: 'actor-1',
   serverTime: SERVER_TIME,
@@ -165,7 +183,7 @@ afterEach(() => {
 });
 
 describe('loadWorld', () => {
-  it('maps entities and controlledActorId into ready state with no error', async () => {
+  it('maps worldId/tiles/entities and controlledActorId into ready state with no error', async () => {
     let calls = 0;
     setWorldFetch(async () => {
       calls += 1;
@@ -178,9 +196,26 @@ describe('loadWorld', () => {
     expect(calls).toBe(1);
     expect(state.status).toBe('ready');
     expect(state.error).toBeNull();
+    expect(state.worldId).toBe(WORLD_ID);
     expect(state.world).toEqual({ width: 10, height: 8 });
+    // One `TileViewModel` per tile, `terrain` preserved verbatim as an opaque string.
+    expect(state.tiles).toEqual(ORDERED_TILES);
     expect(state.entities).toEqual([ENTITY_A_VM, ENTITY_B_VM]);
     expect(state.controlledActorId).toBe('actor-1');
+  });
+
+  it('orders tiles deterministically by y then x regardless of wire order', async () => {
+    // The fixture crosses the wire as [path(1,0), blocked(0,1), grass(0,0)] and must
+    // come out row-major: grass(0,0), path(1,0), blocked(0,1).
+    setWorldFetch(async () => fakeResponse(VALID_WORLD_RESPONSE));
+
+    await loadWorld();
+
+    expect(getWorldState().tiles).toEqual([
+      { x: 0, y: 0, terrain: 'grass' },
+      { x: 1, y: 0, terrain: 'path' },
+      { x: 0, y: 1, terrain: 'blocked' },
+    ]);
   });
 
   it('orders entities deterministically by entityId regardless of wire order', async () => {
@@ -214,7 +249,9 @@ describe('loadWorld', () => {
 
     const state = getWorldState();
     expect(state.status).toBe('error');
+    expect(state.worldId).toBeNull();
     expect(state.world).toBeNull();
+    expect(state.tiles).toEqual([]);
     expect(state.entities).toEqual([]);
     expect(state.controlledActorId).toBeNull();
     expect(state.error).toBeTruthy();
@@ -234,7 +271,9 @@ describe('loadWorld', () => {
 
     const state = getWorldState();
     expect(state.status).toBe('error');
+    expect(state.worldId).toBeNull();
     expect(state.world).toBeNull();
+    expect(state.tiles).toEqual([]);
     expect(state.entities).toEqual([]);
     expect(state.controlledActorId).toBeNull();
     expect(state.error).toContain('503');
@@ -258,9 +297,59 @@ describe('loadWorld', () => {
 
     const state = getWorldState();
     expect(state.status).toBe('error');
+    expect(state.worldId).toBeNull();
     expect(state.world).toBeNull();
+    expect(state.tiles).toEqual([]);
     expect(state.entities).toEqual([]);
     expect(state.controlledActorId).toBeNull();
+    expect(state.error).toBeTruthy();
+  });
+
+  it('rejects a phase-4-shaped snapshot missing `worldId`/`tiles` with no partial data', async () => {
+    // Phase-4 shape: `{ world: { size, entities, controlledActorId, serverTime } }`.
+    // `worldId` and `tiles` are required and keyed exactly, so this is a contract
+    // failure: the store must not adopt the entities when the snapshot is not whole.
+    setWorldFetch(async () =>
+      fakeResponse({
+        world: {
+          size: { width: 10, height: 8 },
+          entities: [ENTITY_A, ENTITY_B],
+          controlledActorId: 'actor-1',
+          serverTime: SERVER_TIME,
+        },
+      }),
+    );
+
+    await loadWorld();
+
+    const state = getWorldState();
+    expect(state.status).toBe('error');
+    expect(state.worldId).toBeNull();
+    expect(state.world).toBeNull();
+    expect(state.tiles).toEqual([]);
+    expect(state.entities).toEqual([]);
+    expect(state.controlledActorId).toBeNull();
+    expect(state.error).toBeTruthy();
+  });
+
+  it('rejects a snapshot carrying an unknown extra tile key (no partial data)', async () => {
+    // Tiles are keyed exactly and walkability is NOT on the wire; a stray
+    // `walkable` field must fail validation rather than be silently ignored.
+    setWorldFetch(async () =>
+      fakeResponse({
+        world: {
+          ...VALID_SNAPSHOT,
+          tiles: [{ ...TILE_GRASS, walkable: true }],
+        },
+      }),
+    );
+
+    await loadWorld();
+
+    const state = getWorldState();
+    expect(state.status).toBe('error');
+    expect(state.tiles).toEqual([]);
+    expect(state.entities).toEqual([]);
     expect(state.error).toBeTruthy();
   });
 
@@ -279,6 +368,8 @@ describe('loadWorld', () => {
 
     const state = getWorldState();
     expect(state.status).toBe('error');
+    expect(state.worldId).toBeNull();
+    expect(state.tiles).toEqual([]);
     expect(state.entities).toEqual([]);
     expect(state.error).toBeTruthy();
   });
@@ -357,7 +448,21 @@ describe('moveActor', () => {
     expect(entity(state, 'entity-b')).toMatchObject({ x: 1, y: 2 });
   });
 
-  it('sends a body of exactly `{ type, direction }` to COMMAND_PATH with no actor field', async () => {
+  it('keeps static tiles/worldId reference-identical across a move event', async () => {
+    // No event carries terrain: only a fresh snapshot may replace `tiles`.
+    await loadValidWorld();
+    const before = getWorldState();
+    setWorldFetch(async () => fakeResponse(commandResponse([transformChanged('entity-a', 4, 4)])));
+
+    await moveActor('east');
+
+    const after = getWorldState();
+    expect(after.entities).not.toBe(before.entities);
+    expect(after.tiles).toBe(before.tiles);
+    expect(after.worldId).toBe(before.worldId);
+  });
+
+  it('sends a body of exactly `{ type, direction }` to COMMAND_PATH with no actor or destination', async () => {
     await loadValidWorld();
     const requests: Array<{
       url: string;
@@ -378,7 +483,9 @@ describe('moveActor', () => {
     // Transport contract lives here, not in the UI tests: the Organizer builds
     // the primitive command itself and posts it to the canonical Protocol path.
     // The actor is resolved server-side from transport context, so the body must
-    // NOT carry an actor/player id.
+    // NOT carry an actor/player id. The destination is computed by the Manager,
+    // so the body must NOT carry a target coordinate either — a client cannot
+    // submit a final position and thereby bypass collision.
     expect(requests).toHaveLength(1);
     expect(requests[0].url).toBe(COMMAND_PATH);
     expect(requests[0].method).toBe('POST');
@@ -386,6 +493,10 @@ describe('moveActor', () => {
     expect(Object.keys(requests[0].body)).toEqual(['type', 'direction']);
     expect('actorId' in requests[0].body).toBe(false);
     expect('playerId' in requests[0].body).toBe(false);
+    expect('x' in requests[0].body).toBe(false);
+    expect('y' in requests[0].body).toBe(false);
+    expect('position' in requests[0].body).toBe(false);
+    expect('to' in requests[0].body).toBe(false);
   });
 
   it('does not move optimistically while the request is in flight', async () => {
@@ -405,7 +516,10 @@ describe('moveActor', () => {
     expect(entity(getWorldState(), 'entity-a')).toMatchObject({ x: 4, y: 4 });
   });
 
-  it('treats an empty events array (refusal) as a no-op with no error', async () => {
+  it('treats an empty events array (blocked step) as a no-op with no error and no state change', async () => {
+    // A blocked step is expressed as a refusal: the server returns 200 with an
+    // empty `events` array. That is NOT an error, and it must leave the whole
+    // snapshot untouched — tiles, entities and worldId stay reference-identical.
     await loadValidWorld();
     setWorldFetch(async () => fakeResponse(commandResponse([])));
 
@@ -413,8 +527,10 @@ describe('moveActor', () => {
     await moveActor('west');
     const after = getWorldState();
 
-    // Refusal is not an error and changes nothing: the state object is reused.
     expect(after).toBe(before);
+    expect(after.tiles).toBe(before.tiles);
+    expect(after.entities).toBe(before.entities);
+    expect(after.worldId).toBe(before.worldId);
     expect(after.status).toBe('ready');
     expect(after.error).toBeNull();
     expect(entity(after, 'entity-a')).toMatchObject({ x: 3, y: 4 });
@@ -604,6 +720,8 @@ describe('moveActor', () => {
     expect(calls).toBe(0);
     const state = getWorldState();
     expect(state.status).toBe('idle');
+    expect(state.worldId).toBeNull();
+    expect(state.tiles).toEqual([]);
     expect(state.entities).toEqual([]);
     expect(state.controlledActorId).toBeNull();
   });
@@ -681,7 +799,7 @@ describe('world store identity and subscription', () => {
     unsubscribe();
   });
 
-  it('exposes `controlledActorId`/`entities` and has no legacy `controlledActor`/`player` fields', () => {
+  it('exposes `worldId`/`tiles`/`controlledActorId`/`entities` and has no legacy fields', () => {
     const state: WorldState = getWorldState();
 
     // Compile-level guarantee of the frozen Organizer contract: the phase-3
@@ -693,6 +811,8 @@ describe('world store identity and subscription', () => {
     expect(state.player).toBeUndefined();
     expect(Object.prototype.hasOwnProperty.call(state, 'controlledActor')).toBe(false);
     expect(Object.prototype.hasOwnProperty.call(state, 'player')).toBe(false);
+    expect(state.worldId).toBeNull();
+    expect(state.tiles).toEqual([]);
     expect(state.controlledActorId).toBeNull();
     expect(state.entities).toEqual([]);
   });
@@ -715,7 +835,9 @@ describe('world store identity and subscription', () => {
 
     const state = getWorldState();
     expect(state.status).toBe('idle');
+    expect(state.worldId).toBeNull();
     expect(state.world).toBeNull();
+    expect(state.tiles).toEqual([]);
     expect(state.entities).toEqual([]);
     expect(state.controlledActorId).toBeNull();
     expect(seen).toHaveLength(1);

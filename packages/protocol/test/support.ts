@@ -17,11 +17,16 @@ export function captureParseError(fn: () => unknown): ProtocolParseError {
 export const validGameInfo = {
   gameName: 'Starvalley',
   serverVersion: '0.1.0',
-  protocolVersion: 3,
+  protocolVersion: 4,
   serverTime: '2025-01-02T03:04:05.000Z',
 };
 
 export const validTransform = { x: 3, y: 4 };
+
+export const validTileState = {
+  transform: validTransform,
+  terrain: 'grass',
+};
 
 export const validEntityState = {
   entityId: 'entity-1',
@@ -32,6 +37,19 @@ export const validEntityState = {
 };
 
 export const validWorldSnapshot = {
+  worldId: 'world-1',
+  size: { width: 20, height: 15 },
+  tiles: [validTileState],
+  entities: [validEntityState],
+  controlledActorId: 'actor-1',
+  serverTime: '2025-01-02T03:04:05.000Z',
+};
+
+/**
+ * The phase-4 snapshot shape: no `worldId`, no `tiles`. Used to prove the
+ * incompatible 3 -> 4 change is actually enforced by the exact-key guards.
+ */
+export const phase4WorldSnapshot = {
   size: { width: 20, height: 15 },
   entities: [validEntityState],
   controlledActorId: 'actor-1',

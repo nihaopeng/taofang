@@ -16,6 +16,7 @@ export type {
   RenderCommand,
   RenderCommandType,
   RenderFrame,
+  RenderLayer,
   RenderTransform,
   TransformSetCommand,
   TransformSetTargetCommand,

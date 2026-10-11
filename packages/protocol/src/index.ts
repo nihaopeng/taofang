@@ -77,18 +77,24 @@ export {
   isActorId,
   isEntityId,
   isPlayerId,
+  isWorldId,
   parseActorId,
   parseEntityId,
   parsePlayerId,
+  parseWorldId,
 } from './identity.ts';
-export type { ActorId, EntityId, PlayerId } from './identity.ts';
+export type { ActorId, EntityId, PlayerId, WorldId } from './identity.ts';
 
 export {
   isGetWorldResponse,
+  isTerrainKind,
+  isTileState,
   isWorldSize,
   isWorldSnapshot,
   parseGetWorldResponse,
+  parseTerrainKind,
+  parseTileState,
   parseWorldSize,
   parseWorldSnapshot,
 } from './world.ts';
-export type { GetWorldResponse, WorldSize, WorldSnapshot } from './world.ts';
+export type { GetWorldResponse, TerrainKind, TileState, WorldSize, WorldSnapshot } from './world.ts';

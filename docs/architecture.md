@@ -231,6 +231,111 @@ with the primitive contract (`submitCommand`, `EntityState`, `WorldState.entitie
 `controlledActorId`). See "Phase 4 frozen contract — primitive-driven architecture" above for the
 current surface; this section is kept only so the phase-3 history is not silently rewritten.
 
+## Phase 5 frozen contract — World / Tile / Collision (reusing the phase-4 primitives)
+
+The goal is to prove the two ISAs can carry a NON-actor world object without growing new
+instructions. Main froze the following before implementation.
+
+### Model
+
+```ts
+type WorldId = string & brand            // world identity (branded, like the other ids)
+type TerrainKind = 'grass' | 'blocked' | 'path'   // 'path' is walkable but visually different
+interface TileState { transform: Transform; terrain: TerrainKind }
+
+interface WorldSnapshot {
+  worldId: WorldId
+  size: WorldSize
+  tiles: TileState[]          // static terrain
+  entities: EntityState[]     // dynamic world objects (actor, later NPCs/items/crops)
+  controlledActorId: ActorId | null
+  serverTime: string
+}
+```
+
+`PROTOCOL_VERSION` 3 -> 4: adding required `worldId`/`tiles` fields is an incompatible change
+(guards are exact), exactly as the phase-4 notes predicted.
+
+### Decisions (and the reasoning that must not be silently reversed)
+
+1. **Tiles are static terrain in their own collection, NOT entities.** Terrain does not move,
+   spawn or despawn, so making it an entity would force `EntityState` to grow a terrain field and
+   would make the entity lifecycle meaningless for static data. `entities` stays "things the
+   server can create/destroy", `tiles` is "the world's shape".
+2. **Walkability is NOT on the wire.** The wire carries `terrain` (a world fact). Whether a
+   terrain is walkable is a Manager rule (`WALKABILITY_BY_TERRAIN`), because collision is
+   authoritative gameplay. Shipping `walkable` today would invite client-side collision rules,
+   which this phase explicitly forbids. Consequence, recorded deliberately: client-side
+   prediction will need either this field or a shared rule module — that is a later, deliberate
+   decision, not an oversight.
+3. **No new commands and no new events.** Terrain is static, so movement stays `actor.move` and
+   collision becomes an additional Manager rule on the same command. `entity.spawned` /
+   `entity.removed` remain for dynamic objects only.
+4. **Tiles are not protocol instructions.** There is no per-terrain command or event; there is one
+   `terrain` enum value per tile and nothing else. Adding a terrain is a data + appearance
+   change, not a new instruction.
+5. **The actor's world is the snapshot's scope.** `worldId` sits on the snapshot, so "which world
+   is the actor in" is implied and needs no per-entity field. A per-entity `worldId` is the
+   multi-world extension point, not something to add now.
+6. **Fixed 10x10 map, defined as a literal layout in the Manager** (an ASCII map: `g` grass,
+   `p` path, `#` blocked). No procedural generation, no chunk streaming, no biome/height/
+   buildings/crops. The actor spawns on a walkable tile (an invariant the Manager must hold:
+   an unwalkable spawn is a configuration error).
+
+### Collision
+
+```
+actor.move -> Manager resolves the target transform
+           -> out of bounds            -> refusal
+           -> target terrain unwalkable -> refusal
+           -> otherwise: update the authoritative transform, emit transform.changed
+refusal == empty events array (unchanged phase-4 semantics; still no 'moved' boolean)
+```
+
+A client cannot bypass this: the command carries no destination and no actor, so there is no way
+to submit a final coordinate. The only movement input is a direction, and the destination is
+computed by the Manager.
+
+### Render ISA: exactly ONE addition
+
+`node.create` gains `layer: RenderLayer` with `RenderLayer = 'base' | 'object'`.
+
+Why it is needed now, not speculation: with terrain and actors both created at the same depth,
+draw order is undefined (z-fighting / the actor can be drawn under the tiles). A render-layer
+bucket is a pure render concept — it names no game thing — and it is the natural key for later
+batching (see below). Nothing else in the ISA changed: no tile primitive, no terrain primitive,
+no collision primitive.
+
+### Tile rendering and the upgrade path (no server protocol change)
+
+Terrain reaches the renderer as ordinary render nodes:
+
+```
+WorldSnapshot.tiles -> Organizer TileViewModel -> bridge -> node.create { layer: 'base',
+                       appearance: <terrain appearance id> }
+WorldSnapshot.entities -> bridge -> node.create { layer: 'object', appearance: <kind appearance id> }
+```
+
+The ISA stays business-free: it knows "a node with an appearance in a layer", never "a grass
+tile". Therefore the visual upgrade path is entirely inside the runtime:
+
+- **now**: one placeholder mesh per node, appearance -> colour.
+- **later (quality)**: appearance -> sprite/atlas frame, instanced meshes batched by the
+  `(layer, appearance)` bucket, chunked terrain meshes. All of it is runtime-internal, so the
+  server contract and the bridge's command stream do not change. This is the concrete payoff of
+  keeping the ISA declarative.
+
+### Who owns chunking / visibility / batching when the map grows
+
+- **Render batching, instancing, atlas frames, chunk meshes, frustum culling of the scene**: the
+  Three.js runtime (an ISA executor detail).
+- **Deciding which nodes should exist at all** (e.g. only the visible region): the render bridge
+  (client) — it can emit `node.create`/`node.destroy` as the viewport moves, using the same
+  primitives.
+- **Deciding which world data the server sends** (interest management, viewport-scoped tile
+  queries): a later, explicit *protocol* change, because it changes what crosses the wire.
+  Chunking is therefore split: rendering-side is free, data-side needs a contract.
+
 ## Phase 4 frozen contract — primitive-driven architecture (two instruction sets)
 
 A feature is now expressed by **composing primitives**, not by adding a bespoke endpoint pair
@@ -412,20 +517,24 @@ Recorded so they are not mistaken for solved problems:
 4. **`transform.set`, `entity.spawned` and `entity.removed` are declared with no producer** — see
    the primitive-stability notes above for why each is kept.
 
-### Reserved identity vocabulary vs. dead exports (Main decision)
+### Reserved identity vocabulary: outcome after the Tile/World slice
 
-`EntityId`/`isEntityId`/`parseEntityId` and `PlayerId`/`isPlayerId`/`parsePlayerId` have **no
-production consumer yet** — they are exported vocabulary, deliberately reserved:
-`EntityId` for the Tile/World/objects slice, `PlayerId` for the session slice. This is the one
-place where the contract is intentionally ahead of its consumers, because the whole point of
-this phase was to fix the *semantics* of the three ids before any of them spread. Re-evaluate
-in the Tile/World slice: if `EntityId` still has no consumer afterwards, trim it from
-`index.ts` until it does.
+When this vocabulary was added, `EntityId`/`isEntityId`/`parseEntityId` and
+`PlayerId`/`isPlayerId`/`parsePlayerId` had no production consumer, and the plan was to trim
+whatever the Tile/World slice failed to consume. Recording the outcome (phase 5 is that slice):
+
+- `EntityId` **earned its keep** and stays: the actor is an entity that can act, so the Manager
+  builds one with `parseEntityId` and the entity guards consume it.
+- `PlayerId` **still has no consumer** and stays only as declared vocabulary for the session
+  slice. This is the last reservation of this kind: if the session slice does not consume it
+  either, delete it rather than carrying it further.
 
 ### Adding fields to `WorldSnapshot` is a breaking change
 
-All payload guards use exact-key matching (`hasExactKeys`), so **adding** a field (e.g. the
-upcoming `tiles`) is an incompatible change that requires a `PROTOCOL_VERSION` bump. That is a
+All payload guards use exact-key matching (`hasExactKeys`), so **adding** a field is an
+incompatible change that requires a `PROTOCOL_VERSION` bump. Phase 4 predicted this and phase 5
+did it for real: adding `worldId` and `tiles` forced 3 -> 4, and a test pins that the phase-4
+snapshot shape is now rejected. That is a
 deliberate trade-off: strict guards catch client/server drift immediately (they have already
 caught real drift in this project). It is safe while there are no deployed clients and no
 version negotiation. When compatibility actually matters, we must choose between version
@@ -450,8 +559,11 @@ fixing it today needs a handler/context union that buys nothing until a session 
    but no repository exists).
 3. **No event channel.** Router registers request routes only, so one client cannot observe
    another's movement. Realtime push is not implemented.
-4. **The world has no terrain.** `WorldSnapshot.size` is the only world data; there are no
-   tiles, objects, or collision surfaces.
+4. **~~The world has no terrain.~~ RESOLVED IN PHASE 5.** `WorldSnapshot` now carries `worldId`
+   and `tiles` (`TileState { transform, terrain }`), the Manager holds a real 10x10 map, and
+   collision is enforced authoritatively against `WALKABILITY_BY_TERRAIN`. What is still NOT
+   built: other terrain besides `grass`/`path`/`blocked`, elevation, buildings, crops, more than
+   one map, and any client-side collision/prediction.
 5. **A load overlapping an in-flight move can render a stale position.** `performMove` drops a
    move result when the store has no controlled actor yet (`state.controlledActor === null`),
    and a snapshot fetched before the move was applied can be older than the server's current
