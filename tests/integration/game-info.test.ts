@@ -56,6 +56,9 @@ afterAll(async () => {
       }
       resolve();
     });
+    // Deterministic teardown: `close()` waits for idle keep-alive sockets to time
+    // out, which makes suites slow and occasionally flaky.
+    server.closeAllConnections();
   });
 });
 

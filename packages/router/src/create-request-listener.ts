@@ -12,11 +12,14 @@ export interface RouterDependencies {
 const JSON_CONTENT_TYPE = 'application/json; charset=utf-8';
 
 function sendJson(response: ServerResponse, status: number, body: unknown): void {
+  const payload = JSON.stringify(body);
   response.statusCode = status;
   response.setHeader('content-type', JSON_CONTENT_TYPE);
-  // `ServerResponse` suppresses the body for HEAD/204/304; the payload is still
-  // serialized so HEAD responses advertise the same representation.
-  response.end(JSON.stringify(body));
+  // Advertise the exact length so GET and HEAD agree on the representation.
+  // `ServerResponse` suppresses the body for HEAD/204/304 while keeping this
+  // header (and the status/content-type) intact.
+  response.setHeader('content-length', Buffer.byteLength(payload));
+  response.end(payload);
 }
 
 function sendProtocolError(

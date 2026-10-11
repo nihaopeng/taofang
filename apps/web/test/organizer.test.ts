@@ -1,6 +1,6 @@
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
   getGameInfoState,
@@ -37,9 +37,30 @@ function fakeResponse(body: unknown, init: FakeResponseInit = {}): Response {
   return response as unknown as Response;
 }
 
+/** A promise whose settlement the test controls explicitly (no timers/sleeps). */
+function createDeferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason?: unknown) => void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 beforeEach(() => {
   resetGameInfoState();
   resetGameInfoFetch();
+});
+
+afterEach(() => {
+  // Ensure a deferred/stubbed fetch can never leak into the next test.
+  resetGameInfoFetch();
+  resetGameInfoState();
 });
 
 describe('loadGameInfo', () => {
@@ -128,6 +149,86 @@ describe('loadGameInfo', () => {
     expect(state.status).toBe('error');
     expect(state.data).toBeNull();
     expect(state.error).not.toContain('SyntaxError');
+  });
+
+  it('ignores a superseded success response after a reset', async () => {
+    let resolveFetch!: (response: Response) => void;
+    const pending = new Promise<Response>((resolve) => {
+      resolveFetch = resolve;
+    });
+    setGameInfoFetch(() => pending);
+
+    const superseded = loadGameInfo();
+    expect(getGameInfoState().status).toBe('connecting');
+
+    resetGameInfoState();
+    expect(getGameInfoState().status).toBe('idle');
+
+    // The in-flight request settles *after* the reset; its valid payload must
+    // not resurrect `connected` state over the newer `idle` state.
+    resolveFetch(fakeResponse(VALID_RESPONSE));
+    await superseded;
+
+    const state = getGameInfoState();
+    expect(state.status).toBe('idle');
+    expect(state.data).toBeNull();
+    expect(state.error).toBeNull();
+  });
+
+  it('ignores a superseded failure response after a reset', async () => {
+    let rejectFetch!: (error: unknown) => void;
+    const pending = new Promise<Response>((_resolve, reject) => {
+      rejectFetch = reject;
+    });
+    setGameInfoFetch(() => pending);
+
+    const superseded = loadGameInfo();
+    expect(getGameInfoState().status).toBe('connecting');
+
+    resetGameInfoState();
+    expect(getGameInfoState().status).toBe('idle');
+
+    // The in-flight request rejects *after* the reset; it must not write an
+    // `error` state over the newer state.
+    rejectFetch(new TypeError('Failed to fetch'));
+    await superseded;
+
+    const state = getGameInfoState();
+    expect(state.status).toBe('idle');
+    expect(state.data).toBeNull();
+    expect(state.error).toBeNull();
+  });
+
+  it('lets a newer request win while a superseded response is in flight', async () => {
+    const firstDeferred = createDeferred<Response>();
+    const secondDeferred = createDeferred<Response>();
+    let calls = 0;
+    setGameInfoFetch(() => {
+      calls += 1;
+      return calls === 1 ? firstDeferred.promise : secondDeferred.promise;
+    });
+
+    const first = loadGameInfo();
+    // Reset drops the in-flight marker, so the next call starts a new request
+    // at the bumped generation.
+    resetGameInfoState();
+    const second = loadGameInfo();
+    expect(calls).toBe(2);
+
+    // Resolve the superseded request first: its payload must be ignored and
+    // the store must keep `connecting` for the newer request.
+    firstDeferred.resolve(fakeResponse({ gameInfo: { ...VALID_GAME_INFO, gameName: 'First' } }));
+    await first;
+    expect(getGameInfoState().status).toBe('connecting');
+
+    secondDeferred.resolve(
+      fakeResponse({ gameInfo: { ...VALID_GAME_INFO, gameName: 'Second' } }),
+    );
+    await second;
+
+    const state = getGameInfoState();
+    expect(state.status).toBe('connected');
+    expect(state.data?.gameName).toBe('Second');
   });
 
   it('dedupes concurrent calls into a single fetch', async () => {

@@ -49,9 +49,15 @@ async function startServer(gameInfo: GameInfoManager): Promise<string> {
 
 afterEach(async () => {
   await Promise.all(
-    openServers
-      .splice(0)
-      .map((server) => new Promise<void>((resolve) => server.close(() => resolve()))),
+    openServers.splice(0).map(
+      (server) =>
+        new Promise<void>((resolve) => {
+          server.close(() => resolve());
+          // Undici keeps idle keep-alive sockets for ~4s; close them eagerly
+          // so teardown does not depend on socket timeouts.
+          server.closeAllConnections();
+        }),
+    ),
   );
 });
 
@@ -100,19 +106,23 @@ describe('createRequestListener', () => {
     const response = await fetch(`${baseUrl}${GAME_INFO_PATH}`, { method: 'POST' });
 
     expect(response.status).toBe(405);
-    expect(response.headers.get('allow')).toBe('GET');
+    expect(response.headers.get('allow')).toBe('GET, HEAD');
     const body = (await response.json()) as ProtocolError;
     expect(body.error.code).toBe('METHOD_NOT_ALLOWED');
   });
 
-  it('returns 405 with an Allow header and an empty body for HEAD on a known path', async () => {
+  it('serves HEAD for a GET resource with matching headers and an empty body', async () => {
     const baseUrl = await startServer(createFakeManager());
 
-    const response = await fetch(`${baseUrl}${HEALTH_PATH}`, { method: 'HEAD' });
+    const getResponse = await fetch(`${baseUrl}${HEALTH_PATH}`);
+    const headResponse = await fetch(`${baseUrl}${HEALTH_PATH}`, { method: 'HEAD' });
 
-    expect(response.status).toBe(405);
-    expect(response.headers.get('allow')).toBe('GET');
-    expect(await response.text()).toBe('');
+    expect(headResponse.status).toBe(200);
+    expect(headResponse.headers.get('content-type')).toBe('application/json; charset=utf-8');
+    expect(headResponse.headers.get('content-length')).toBe(
+      getResponse.headers.get('content-length'),
+    );
+    expect(await headResponse.text()).toBe('');
   });
 
   it('maps a thrown manager error to an opaque 500 INTERNAL_ERROR', async () => {

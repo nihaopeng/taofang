@@ -1,0 +1,109 @@
+// @vitest-environment jsdom
+/**
+ * Startup-path tests for the page shell.
+ *
+ * Unlike `ui.test.tsx` (which renders `GameInfoPanel` with
+ * `renderToStaticMarkup` and therefore never runs effects), these tests mount
+ * the real `<App />` in a DOM. That is the only way to prove that the mount
+ * effect in `App.tsx` actually starts the Organizer load: if
+ * `useEffect(() => void loadGameInfo(), [])` were deleted, the store would stay
+ * `idle`, the fake fetch would never be called, and the "game name" assertion
+ * below would time out.
+ *
+ * The tests consume only the Organizer-facing API (`organizer/index.ts`). They
+ * never import Protocol, backend, or Node modules.
+ */
+
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+
+import {
+  getGameInfoState,
+  resetGameInfoFetch,
+  resetGameInfoState,
+  setGameInfoFetch,
+} from '../src/organizer/index.ts';
+import { App } from '../src/ui/App.tsx';
+
+const VALID_GAME_INFO = {
+  gameName: 'Starvalley',
+  serverVersion: '0.1.0',
+  protocolVersion: 1,
+  serverTime: '2025-01-02T03:04:05.000Z',
+};
+
+const VALID_RESPONSE = { gameInfo: VALID_GAME_INFO };
+
+/** Minimal `Response` stand-in: the organizer only reads `ok`, `status`, `json`. */
+function fakeResponse(body: unknown, init: { ok?: boolean; status?: number } = {}): Response {
+  const response = {
+    ok: init.ok ?? true,
+    status: init.status ?? 200,
+    json: async (): Promise<unknown> => body,
+  };
+  return response as unknown as Response;
+}
+
+beforeEach(() => {
+  resetGameInfoState();
+  resetGameInfoFetch();
+});
+
+afterEach(() => {
+  cleanup();
+  resetGameInfoState();
+  resetGameInfoFetch();
+});
+
+describe('App mount', () => {
+  it('starts the game-info load on mount and renders the loaded game name', async () => {
+    let calls = 0;
+    setGameInfoFetch(async () => {
+      calls += 1;
+      return fakeResponse(VALID_RESPONSE);
+    });
+
+    render(<App />);
+
+    const panel = screen.getByTestId('game-info-panel');
+    // This query only succeeds once the mount effect has driven the Organizer
+    // through `idle -> connecting -> connected` and the panel has re-rendered.
+    // Remove the effect and this rejects, so the assertion genuinely depends on it.
+    const gameNameNode = await within(panel).findByText(VALID_GAME_INFO.gameName);
+    expect(gameNameNode.textContent).toBe(VALID_GAME_INFO.gameName);
+
+    expect(calls).toBe(1);
+    expect(getGameInfoState().status).toBe('connected');
+    expect(getGameInfoState().status).not.toBe('idle');
+    expect(panel.getAttribute('data-status')).toBe('connected');
+    expect(within(panel).getByText(VALID_GAME_INFO.serverVersion)).toBeTruthy();
+  });
+
+  it('retries after an error and recovers to connected', async () => {
+    let calls = 0;
+    setGameInfoFetch(async () => {
+      calls += 1;
+      if (calls === 1) {
+        throw new TypeError('Failed to fetch');
+      }
+      return fakeResponse(VALID_RESPONSE);
+    });
+
+    render(<App />);
+
+    const panel = screen.getByTestId('game-info-panel');
+    // The first (mount-driven) fetch rejects, so the retry control appears.
+    const retryButton = await within(panel).findByRole('button', { name: 'Retry' });
+    expect(calls).toBe(1);
+    expect(getGameInfoState().status).toBe('error');
+    expect(panel.getAttribute('data-status')).toBe('error');
+
+    // A real interaction must issue a second Organizer intent.
+    fireEvent.click(retryButton);
+
+    await within(panel).findByText(VALID_GAME_INFO.gameName);
+    expect(calls).toBe(2);
+    expect(getGameInfoState().status).toBe('connected');
+    expect(panel.getAttribute('data-status')).toBe('connected');
+  });
+});

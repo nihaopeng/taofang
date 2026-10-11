@@ -144,7 +144,9 @@ export default tseslint.config(
   },
   {
     // UI: presentation only. Must not know how the backend is called.
-    files: ['apps/web/src/ui/**/*.{ts,tsx}'],
+    // Covers all client files EXCEPT the Organizer (which owns transport).
+    files: ['apps/web/src/**/*.{ts,tsx}'],
+    ignores: ['apps/web/src/organizer/**'],
     rules: {
       'no-restricted-imports': [
         'error',
@@ -165,10 +167,28 @@ export default tseslint.config(
           ],
         },
       ],
+      // Any way of reaching the network directly is forbidden. Note that ESLint
+      // matches identifiers, so `fetch`, `globalThis.fetch`, `window.fetch` are all
+      // listed: closing one form is not enough.
       'no-restricted-globals': [
         'error',
         {
           name: 'fetch',
+          message:
+            'ui must not call the backend directly; use an Organizer action instead (AGENTS.md: UI).',
+        },
+        {
+          name: 'WebSocket',
+          message:
+            'ui must not open socket transports directly; use an Organizer action instead (AGENTS.md: UI).',
+        },
+        {
+          name: 'EventSource',
+          message:
+            'ui must not open event streams directly; use an Organizer action instead (AGENTS.md: UI).',
+        },
+        {
+          name: 'XMLHttpRequest',
           message:
             'ui must not call the backend directly; use an Organizer action instead (AGENTS.md: UI).',
         },
@@ -180,6 +200,24 @@ export default tseslint.config(
           property: 'fetch',
           message:
             'ui must not call the backend directly; use an Organizer action instead (AGENTS.md: UI).',
+        },
+        {
+          object: 'globalThis',
+          property: 'fetch',
+          message:
+            'ui must not call the backend directly; use an Organizer action instead (AGENTS.md: UI).',
+        },
+        {
+          object: 'globalThis',
+          property: 'WebSocket',
+          message:
+            'ui must not open socket transports directly; use an Organizer action instead (AGENTS.md: UI).',
+        },
+        {
+          object: 'navigator',
+          property: 'sendBeacon',
+          message:
+            'ui must not send network beacons directly; use an Organizer action instead (AGENTS.md: UI).',
         },
       ],
     },

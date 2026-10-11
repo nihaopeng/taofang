@@ -108,6 +108,10 @@ export async function fetchGameInfo(): Promise<GameInfo> {
     if (error instanceof ProtocolParseError) {
       throw new GameInfoApiError('contract', 'Game server response did not match the protocol.');
     }
+    // Defensive fallback: today `parseGetGameInfoResponse` only ever throws
+    // `ProtocolParseError`, so this branch is intentionally not covered by
+    // tests. It is retained so a future parser change cannot leak a non-
+    // `GameInfoApiError` through this boundary.
     throw new GameInfoApiError('contract', 'Game server response could not be parsed.');
   }
 }

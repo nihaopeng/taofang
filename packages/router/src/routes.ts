@@ -50,11 +50,32 @@ export function isKnownPath(path: string): boolean {
   return ROUTES.some((route) => route.path === path);
 }
 
+/**
+ * Resolve a route for the given path/method.
+ *
+ * HEAD is resolved to the GET handler when no explicit HEAD route exists:
+ * RFC 9110 requires every GET resource to support HEAD. `node:http` then
+ * suppresses the response body while preserving status, headers, and
+ * Content-Length, so the same representation is advertised.
+ */
 export function findRoute(path: string, method: string): RouteDefinition | undefined {
-  return ROUTES.find((route) => route.path === path && route.method === method);
+  const route = ROUTES.find((candidate) => candidate.path === path && candidate.method === method);
+  if (route !== undefined || method !== 'HEAD') {
+    return route;
+  }
+  return ROUTES.find((candidate) => candidate.path === path && candidate.method === 'GET');
 }
 
-/** Methods registered for a known path, in declaration order, deduplicated. */
+/**
+ * Methods allowed for a known path, in declaration order, deduplicated.
+ *
+ * GET implies HEAD (RFC 9110), so HEAD is advertised wherever GET is allowed
+ * even though only the GET handler is registered.
+ */
 export function allowedMethods(path: string): string[] {
-  return [...new Set(ROUTES.filter((route) => route.path === path).map((route) => route.method))];
+  const methods = ROUTES.filter((route) => route.path === path).map((route) => route.method);
+  if (methods.includes('GET')) {
+    methods.push('HEAD');
+  }
+  return [...new Set(methods)];
 }
