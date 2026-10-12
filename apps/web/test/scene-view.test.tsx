@@ -615,10 +615,50 @@ describe('SceneView mouse-first interaction', () => {
       expect(recorder.orientationCalls.length).toBeGreaterThan(0);
     });
     const last = recorder.orientationCalls.at(-1);
-    // yaw += 60px * 0.3deg, pitch += 40px * 0.3deg (58 -> 70, still clamped range).
-    expect(last?.yawDegrees).toBeCloseTo(18, 6);
+    // Drag input policy (phase 11): a rightward drag makes the world rotate
+    // counter-clockwise from above, which is a DECREASE of the rig yaw
+    // (yaw -= 60px * 0.3deg). Pitch is unchanged (58 -> 70, still in range).
+    expect(last?.yawDegrees).toBeCloseTo(-18, 6);
     expect(last?.pitchDegrees).toBeCloseTo(70, 6);
     // A drag must never pick or emit.
+    expect(recorder.pickCalls).toHaveLength(0);
+    expect(requests).toHaveLength(0);
+  });
+
+  it('pins the drag-to-orbit yaw convention: right = world counter-clockwise from above', async () => {
+    const recorder = createRecordingRuntime();
+    // If a drag wrongly clicked, this would produce an intent.
+    recorder.pickResult = { kind: 'ground', point: { x: 0, y: 0, z: 0 } };
+    const requests: CapturedRequest[] = [];
+    const canvas = await mountWithRuntime(recorder, requests);
+
+    // The rig keeps `cameraRig.rotation.y = yawDegrees` and screen +y as north.
+    // A POSITIVE rig yaw turns the view clockwise from above (the behaviour the
+    // user reported as unnatural), so making a rightward drag feel
+    // counter-clockwise requires it to DECREASE yawDegrees. A leftward drag is
+    // the exact inverse. Measure the delta from the live rig so the two gestures
+    // are compared on equal footing even though the mock state accumulates.
+    async function yawDeltaForDrag(deltaX: number, pointerId: number): Promise<number> {
+      recorder.orientationCalls.length = 0;
+      const start = recorder.runtime.getCameraState().yawDegrees;
+      fireEvent.pointerDown(canvas, { clientX: 100, clientY: 60, pointerId, button: 0 });
+      fireEvent.pointerMove(canvas, { clientX: 100 + deltaX, clientY: 60, pointerId });
+      fireEvent.pointerUp(canvas, { clientX: 100 + deltaX, clientY: 60, pointerId, button: 0 });
+      await waitFor(() => {
+        expect(recorder.orientationCalls.length).toBeGreaterThan(0);
+      });
+      return (recorder.orientationCalls.at(-1)?.yawDegrees ?? NaN) - start;
+    }
+
+    const rightDelta = await yawDeltaForDrag(60, 11);
+    const leftDelta = await yawDeltaForDrag(-60, 12);
+
+    // Rightward drag: yaw decreases (world rotates counter-clockwise from above).
+    expect(rightDelta).toBeCloseTo(-18, 6);
+    // Leftward drag: exactly the inverse.
+    expect(leftDelta).toBeCloseTo(18, 6);
+    expect(rightDelta + leftDelta).toBeCloseTo(0, 6);
+    // A drag still never emits an intent.
     expect(recorder.pickCalls).toHaveLength(0);
     expect(requests).toHaveLength(0);
   });

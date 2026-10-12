@@ -688,6 +688,31 @@ describe('three runtime shadows', () => {
 
     runtime.dispose();
   });
+
+  it('keeps the oversized backdrop out of shadowing while the terrain still receives', () => {
+    const runtime = makeRuntime();
+    runtime.apply([createCommand('tile:0,0' as NodeId, 'base', appearanceGrass)]);
+
+    const inspection = runtime.inspect();
+    const backdrop = inspection.backdrop;
+    expect(backdrop).not.toBeNull();
+    if (backdrop === null) {
+      return;
+    }
+
+    // A mutation that re-enables `receiveShadow` (or makes the backdrop cast) on
+    // the oversized base would fail here. The backdrop extends far past the +-10
+    // shadow frustum, so a shadow lookup on it clamps to the border texel and
+    // paints a false world-space boundary (the reported "trapezoid").
+    expect(backdrop.receivesShadow).toBe(false);
+    expect(backdrop.castsShadow).toBe(false);
+
+    // The terrain plates are inside the shadow frustum and remain the visible
+    // lit ground, so they must KEEP receiving shadows.
+    expect(findNode(runtime, 'tile:0,0' as NodeId).receivesShadow).toBe(true);
+
+    runtime.dispose();
+  });
 });
 
 describe('three runtime lifecycle', () => {

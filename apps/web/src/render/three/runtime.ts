@@ -228,11 +228,19 @@ export interface RenderInspection {
    * frustum's projected footprint with an overshoot (see
    * {@link backdropHalfExtents}). Tests can prove the floor silhouette never
    * reaches the viewport edge at any yaw or zoom.
+   *
+   * `castsShadow`/`receivesShadow` are both `false` by design: the backdrop is
+   * larger than the sun's shadow frustum, so a shadow lookup on it clamps to the
+   * border texel and paints a false straight boundary in WORLD space (read as a
+   * tapering floor under a yawed camera). Pinned so a mutation cannot silently
+   * re-enable shadowing on it.
    */
   backdrop: {
     sizeX: number;
     sizeZ: number;
     center: { x: number; y: number; z: number };
+    castsShadow: boolean;
+    receivesShadow: boolean;
   } | null;
   /** The scene clear colour as a hex number, or `null` when unset. */
   background: number | null;
@@ -1459,13 +1467,32 @@ export function createThreeRuntime(options: {
 
   // Single ground backdrop. The geometry stays a unit plane so reframing only
   // rescales ONE mesh instead of rebuilding/disposing geometry every frame. It
-  // lies in the XZ plane just below the terrain plates and receives shadows.
+  // lies in the XZ plane just below the terrain plates.
   const groundGeometry = new PlaneGeometry(1, 1);
   const groundMaterial = new MeshStandardMaterial({ color: 0x241c14 });
   let ground: Mesh | null = new Mesh(groundGeometry, groundMaterial);
   ground.rotation.x = -Math.PI / 2;
   ground.position.set(worldCenterX, groundY - BACKDROP_DROP, worldCenterZ);
-  ground.receiveShadow = true;
+  //
+  // It deliberately does NOT receive (or cast) shadows. This backdrop is an
+  // effectively unbounded base sized from the frustum footprint plus overshoot,
+  // so it extends far beyond the sun's shadow frustum (which only covers the
+  // world plus a margin: `shadowExtent = max(worldWidth, worldDepth) / 2 + 4`,
+  // i.e. +-10 for the default world). Measured before this fix:
+  //   zoom 1:    backdrop  75.3 x  75.3 (half  37.6) -> 73.4% of the visible
+  //              floor lay beyond the +-10 shadow map
+  //   zoom 0.25: backdrop 263.6 x 263.6 (half 131.8) -> 92.4% lay beyond it
+  // Outside a directional light's shadow frustum the lookup clamps to the border
+  // texel, so most of the floor was shaded by a value that is not its own,
+  // producing a hard straight boundary in WORLD space. Projected through a yawed
+  // camera that boundary reads exactly as a floor that tapers away / is seen from
+  // below (the false "trapezoid"). The TERRAIN plates keep receiving shadows:
+  // they are the visible lit ground and lie inside the +-10 frustum, as do all
+  // props (the world is only +-6 here), so nothing else meaningful is outside it.
+  // Do NOT restore receiveShadow here and do NOT shrink the backdrop back to a
+  // bounds-sized plane (that reintroduces the phase-10 clipped floor edge).
+  ground.receiveShadow = false;
+  ground.castShadow = false;
   scene.add(ground);
 
   /**
@@ -1993,6 +2020,8 @@ export function createThreeRuntime(options: {
                 y: ground.position.y,
                 z: ground.position.z,
               },
+              castsShadow: ground.castShadow,
+              receivesShadow: ground.receiveShadow,
             },
       background: scene.background instanceof Color ? scene.background.getHex() : null,
       groups: Object.values(groups).filter((group) => group.parent === worldRoot).length,

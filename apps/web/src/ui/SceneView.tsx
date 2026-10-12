@@ -208,7 +208,14 @@ export function SceneView(props: {
     }
     const camera = runtime.getCameraState();
     runtime.setCameraOrientation({
-      yawDegrees: camera.yawDegrees + dx * DRAG_DEGREES_PER_PIXEL,
+      // Drag-to-orbit input policy: dragging the mouse to the RIGHT makes the
+      // world appear to rotate COUNTER-CLOCKWISE seen from above (equivalently,
+      // the camera orbits clockwise). The rig convention is unchanged
+      // (`cameraRig.rotation.y = yaw`, screen +y is north, pitch/up basis
+      // untouched); only the input-to-yaw sign is negated here, so a rightward
+      // drag DECREASES yawDegrees. Camera-relative movement follows the rig yaw
+      // automatically and is unaffected.
+      yawDegrees: camera.yawDegrees - dx * DRAG_DEGREES_PER_PIXEL,
       // `setCameraOrientation` clamps pitch to the rig's 20-80 range.
       pitchDegrees: camera.pitchDegrees + dy * DRAG_DEGREES_PER_PIXEL,
     });
