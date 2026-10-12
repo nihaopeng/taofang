@@ -18,12 +18,13 @@ export interface Transform {
 }
 
 /**
- * Closed union of entity kinds. It grows only as features land, and because the
- * payload guards match keys exactly, adding a kind is a breaking wire change.
+ * Closed union of entity kinds: `'character' | 'tree'`. It grows only as
+ * features land, and because the payload guards match keys exactly, adding a
+ * kind is a breaking wire change.
  *
  * A kind is a *game* label; what it looks like is decided by the render bridge.
  */
-export type EntityKind = 'character';
+export type EntityKind = 'character' | 'tree';
 
 /**
  * A world object as exposed on the wire.
@@ -64,9 +65,9 @@ export function parseTransform(value: unknown): Transform {
   return value;
 }
 
-/** Structural guard for `EntityKind` (exactly `'character'` today). */
+/** Structural guard for `EntityKind` (exactly `'character' | 'tree'` today). */
 export function isEntityKind(value: unknown): value is EntityKind {
-  return value === 'character';
+  return value === 'character' || value === 'tree';
 }
 
 /** Parse and validate `EntityKind`, throwing `ProtocolParseError` on mismatch. */

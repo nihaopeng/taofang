@@ -1,4 +1,4 @@
-import type { AppearanceId, NodeId } from './ids.ts';
+import type { AnimationId, AppearanceId, NodeId } from './ids.ts';
 
 /**
  * Render-space layer bucket. It names no game object: it exists because
@@ -73,6 +73,24 @@ export interface VisibilitySetCommand {
 }
 
 /**
+ * Play (or switch to) an animation on a node.
+ *
+ * Re-added in phase 6, deliberately reversing the phase-4 deletion. The phase-4
+ * criterion for deleting it was "no producer AND no driving state"; that is now
+ * false: the bridge has a real driving state — whether a visual move is in
+ * flight — so it emits `idle`/`walk`, and the runtime records the current
+ * animation so it is observable via `inspect()` rather than write-only.
+ * Re-adding a primitive merely because a checklist mentions it would still be
+ * wrong; it is legitimate here only because a driving state now exists.
+ */
+export interface AnimationPlayCommand {
+  type: 'animation.play';
+  nodeId: NodeId;
+  animation: AnimationId;
+  loop: boolean;
+}
+
+/**
  * The Render ISA: a discriminated union of render primitives.
  *
  * It says *what the scene should contain*, never *how* a particular runtime does
@@ -86,7 +104,8 @@ export type RenderCommand =
   | TransformSetCommand
   | TransformSetTargetCommand
   | AppearanceSetCommand
-  | VisibilitySetCommand;
+  | VisibilitySetCommand
+  | AnimationPlayCommand;
 
 /** The `type` discriminant of every render primitive. */
 export type RenderCommandType = RenderCommand['type'];

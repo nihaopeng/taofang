@@ -13,6 +13,7 @@
  */
 
 import type {
+  AnimationId,
   AppearanceId,
   NodeId,
   RenderCommand,
@@ -26,6 +27,7 @@ const nodeA = 'node-a' as NodeId;
 const nodeB = 'node-b' as NodeId;
 const appearanceFarmer = 'appearance.farmer' as AppearanceId;
 const appearanceTree = 'appearance.tree' as AppearanceId;
+const animationWalk = 'animation.walk' as AnimationId;
 const transformOrigin: RenderTransform = { x: 0, y: 0 };
 const transformTarget: RenderTransform = { x: 4, y: 7 };
 const baseLayer: RenderLayer = 'base';
@@ -57,6 +59,12 @@ export const appearanceSet: RenderCommand = {
   appearance: appearanceTree,
 };
 export const visibilitySet: RenderCommand = { type: 'visibility.set', nodeId: nodeB, visible: false };
+export const animationPlay: RenderCommand = {
+  type: 'animation.play',
+  nodeId: nodeA,
+  animation: animationWalk,
+  loop: true,
+};
 
 /** The ordered diff: every member is a `RenderCommand`. */
 export const frame: RenderFrame = [
@@ -66,13 +74,13 @@ export const frame: RenderFrame = [
   transformSetTarget,
   appearanceSet,
   visibilitySet,
+  animationPlay,
 ];
 
 /**
- * Exactly the six remaining primitives. The list is a literal tuple and its
- * element union is compared against `RenderCommandType` below, so a future
- * accidental re-addition or removal is a compile error rather than a silently
- * stale list.
+ * Exactly the seven primitives. The list is a literal tuple and its element
+ * union is compared against `RenderCommandType` below, so a future accidental
+ * re-addition or removal is a compile error rather than a silently stale list.
  */
 export const commandTypes = [
   'node.create',
@@ -81,6 +89,7 @@ export const commandTypes = [
   'transform.setTarget',
   'appearance.set',
   'visibility.set',
+  'animation.play',
 ] as const satisfies readonly RenderCommandType[];
 
 type ListedCommandType = (typeof commandTypes)[number];
@@ -90,7 +99,7 @@ type Exact<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
 
 /**
  * Exported so it is not a swallowed `noUnusedLocals` case: the ISA must declare
- * exactly the six primitives listed in `commandTypes`, no more and no fewer.
+ * exactly the seven primitives listed in `commandTypes`, no more and no fewer.
  */
 export const commandTypesAreExact: Exact<RenderCommandType, ListedCommandType> = true;
 
@@ -112,6 +121,8 @@ export function label(command: RenderCommand): string {
       return `appearance:${command.nodeId}:${command.appearance}`;
     case 'visibility.set':
       return `visible:${command.nodeId}:${command.visible}`;
+    case 'animation.play':
+      return `animation:${command.nodeId}:${command.animation}:${command.loop}`;
     default: {
       const exhaustive: never = command;
       return exhaustive;
@@ -125,6 +136,9 @@ export const labels: readonly string[] = frame.map((command) => label(command));
 
 // @ts-expect-error a plain string is not a NodeId
 export const plainAsNode: NodeId = 'node-a';
+
+// @ts-expect-error a plain string is not an AnimationId
+export const plainAsAnimation: AnimationId = 'animation.walk';
 
 // @ts-expect-error a NodeId is not an AppearanceId
 export const nodeAsAppearance: AppearanceId = nodeA;
@@ -160,3 +174,10 @@ export const missingLayer: RenderCommand = {
 
 // @ts-expect-error an invalid layer string is not a RenderLayer
 export const invalidLayer: RenderLayer = 'foreground';
+
+// @ts-expect-error animation.play without `loop` is not a RenderCommand
+export const missingLoop: RenderCommand = {
+  type: 'animation.play',
+  nodeId: nodeA,
+  animation: animationWalk,
+};

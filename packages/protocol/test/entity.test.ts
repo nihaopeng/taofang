@@ -65,8 +65,13 @@ describe('parseTransform', () => {
 });
 
 describe('isEntityKind', () => {
-  it("accepts the single current kind 'character'", () => {
+  it("accepts exactly the current kinds 'character' and 'tree'", () => {
     expect(isEntityKind('character')).toBe(true);
+    expect(isEntityKind('tree')).toBe(true);
+  });
+
+  it('rejects an unknown value even though the union grew (exact-union regression guard)', () => {
+    expect(isEntityKind('npc')).toBe(false);
   });
 
   it('rejects any other kind or non-string', () => {
@@ -82,6 +87,7 @@ describe('isEntityKind', () => {
 describe('parseEntityKind', () => {
   it('returns the value unchanged when valid', () => {
     expect(parseEntityKind('character')).toBe('character');
+    expect(parseEntityKind('tree')).toBe('tree');
   });
 
   it('throws ProtocolParseError with a message when invalid', () => {
@@ -98,6 +104,12 @@ describe('isEntityState', () => {
 
   it('accepts a null actorId (entity present, not actor-controllable)', () => {
     expect(isEntityState({ ...validEntityState, actorId: null })).toBe(true);
+  });
+
+  it("accepts a 'tree' entity with a null actorId (phase-6 vocabulary)", () => {
+    expect(
+      isEntityState({ ...validEntityState, entityId: 'entity-tree', actorId: null, kind: 'tree' }),
+    ).toBe(true);
   });
 
   it('rejects a missing actorId (present-and-nullable, not optional)', () => {

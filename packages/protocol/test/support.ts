@@ -17,7 +17,7 @@ export function captureParseError(fn: () => unknown): ProtocolParseError {
 export const validGameInfo = {
   gameName: 'Starvalley',
   serverVersion: '0.1.0',
-  protocolVersion: 4,
+  protocolVersion: 5,
   serverTime: '2025-01-02T03:04:05.000Z',
 };
 

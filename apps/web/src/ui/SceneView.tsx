@@ -9,6 +9,15 @@
  * It imports no `three` and no `@starvalley/render-protocol`: the bridge is the
  * single entry point to the ISA, and the runtime is the only Three.js importer.
  *
+ * Camera follow
+ * -------------
+ * The runtime's orthographic camera follows the CONTROLLED ACTOR. `SceneView`
+ * derives that node's id through `controlledActorNodeId(state)` (the bridge owns
+ * node id namespacing) and calls `runtime.setFollowTarget(...)`. That is viewer
+ * configuration, not scene content, so it is deliberately not an ISA primitive.
+ * A `null` target (no controlled actor) stops the follow without moving the
+ * camera.
+ *
  * World size
  * ----------
  * The runtime needs the authoritative world dimensions, and the only source is
@@ -38,7 +47,7 @@
 import { useEffect, useRef } from 'react';
 
 import { useWorld } from '../organizer';
-import { createRenderBridge } from '../render/bridge';
+import { controlledActorNodeId, createRenderBridge } from '../render/bridge';
 import type { RenderBridge } from '../render/bridge';
 import { createThreeRuntime } from '../render/three/runtime';
 import type { RenderRuntime } from '../render/three/runtime';
@@ -97,6 +106,8 @@ export function SceneView(props: {
     // and re-push the current state rather than diffing against a dead scene.
     bridge.reset();
     runtime.apply(bridge.frameFor(stateRef.current));
+    // A fresh runtime has no follow target; point it at the controlled actor.
+    runtime.setFollowTarget(controlledActorNodeId(stateRef.current));
 
     return () => {
       runtimeRef.current = null;
@@ -111,6 +122,10 @@ export function SceneView(props: {
       return;
     }
     runtime.apply(bridge.frameFor(state));
+    // Sync the follow target on every state change: `null` when there is no
+    // controlled actor, so the camera stops following rather than tracking a
+    // stale node.
+    runtime.setFollowTarget(controlledActorNodeId(state));
   }, [state]);
 
   return <canvas ref={canvasRef} className="scene-view__canvas" data-testid="scene-canvas" />;

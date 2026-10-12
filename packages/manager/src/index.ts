@@ -10,6 +10,7 @@ export { SERVER_VERSION, createGameInfoManager } from './game-info-manager.ts';
 export type { CreateGameInfoManagerDeps, GameInfoManager } from './game-info-manager.ts';
 
 export {
+  BLOCKING_BY_ENTITY_KIND,
   DEFAULT_WORLD_MAP,
   UnknownActorError,
   WALKABILITY_BY_TERRAIN,

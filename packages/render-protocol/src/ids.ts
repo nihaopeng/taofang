@@ -15,9 +15,13 @@
 
 declare const nodeIdBrand: unique symbol;
 declare const appearanceIdBrand: unique symbol;
+declare const animationIdBrand: unique symbol;
 
 /** Identifier of a render node. A `NodeId` is not an entity id and not any other id. */
 export type NodeId = string & { readonly [nodeIdBrand]: true };
 
 /** Opaque identifier of an appearance in the runtime's catalogue. */
 export type AppearanceId = string & { readonly [appearanceIdBrand]: true };
+
+/** Opaque identifier of an animation in the runtime's catalogue. */
+export type AnimationId = string & { readonly [animationIdBrand]: true };

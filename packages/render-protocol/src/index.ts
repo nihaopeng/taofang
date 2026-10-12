@@ -7,9 +7,10 @@
  * typed, so it intentionally ships no runtime guards.
  */
 
-export type { AppearanceId, NodeId } from './ids.ts';
+export type { AnimationId, AppearanceId, NodeId } from './ids.ts';
 
 export type {
+  AnimationPlayCommand,
   AppearanceSetCommand,
   NodeCreateCommand,
   NodeDestroyCommand,

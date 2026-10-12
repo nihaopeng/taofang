@@ -11,6 +11,7 @@ import {
 import type { ActorId, GameCommand, MoveDirection, WorldSnapshot } from '@starvalley/protocol';
 
 import {
+  BLOCKING_BY_ENTITY_KIND,
   DEFAULT_WORLD_MAP,
   UnknownActorError,
   WALKABILITY_BY_TERRAIN,
@@ -53,7 +54,7 @@ function entityTransform(manager: ReturnType<typeof createWorldManager>): { x: n
 }
 
 describe('DEFAULT_WORLD_MAP', () => {
-  it('is a 10x10 ASCII layout containing all three terrains', () => {
+  it('is a 10x10 ASCII layout containing the full legend', () => {
     expect(DEFAULT_WORLD_MAP).toHaveLength(10);
     for (const row of DEFAULT_WORLD_MAP) {
       expect(row).toHaveLength(10);
@@ -63,17 +64,48 @@ describe('DEFAULT_WORLD_MAP', () => {
     expect(characters).toContain('g');
     expect(characters).toContain('p');
     expect(characters).toContain('#');
+    expect(characters).toContain('w');
+    expect(characters).toContain('T');
   });
 
-  it('has a walkable centre tile', () => {
+  it('has exactly the frozen water, tree and blocked coordinates', () => {
+    const at = (x: number, y: number): string => DEFAULT_WORLD_MAP[y][x];
+    expect(at(3, 3)).toBe('w');
+    expect(at(4, 3)).toBe('w');
+    expect(at(3, 4)).toBe('w');
+    expect(at(4, 4)).toBe('w');
+    expect(at(6, 4)).toBe('T');
+    expect(at(4, 7)).toBe('T');
+    expect(at(2, 8)).toBe('#');
+    expect(at(3, 8)).toBe('#');
+    // The presenter's occlusion demo: walkable grass north/south of the tree.
+    expect(at(6, 3)).toBe('g');
+    expect(at(6, 5)).toBe('g');
+  });
+
+  it('has a walkable, unoccupied centre tile', () => {
     const centre = DEFAULT_WORLD_MAP[5][5];
-    expect(centre === 'g' || centre === 'p').toBe(true);
+    expect(centre).toBe('g');
   });
 });
 
 describe('WALKABILITY_BY_TERRAIN', () => {
-  it('is the server-side collision rule: grass/path walkable, blocked not', () => {
-    expect(WALKABILITY_BY_TERRAIN).toEqual({ grass: true, path: true, blocked: false });
+  it('is the server-side collision rule: grass/path walkable, blocked/water not', () => {
+    expect(WALKABILITY_BY_TERRAIN).toEqual({
+      grass: true,
+      path: true,
+      blocked: false,
+      water: false,
+    });
+    expect(WALKABILITY_BY_TERRAIN.water).toBe(false);
+  });
+});
+
+describe('BLOCKING_BY_ENTITY_KIND', () => {
+  it('is the second authoritative rule: trees block, characters do not', () => {
+    expect(BLOCKING_BY_ENTITY_KIND).toEqual({ character: false, tree: true });
+    expect(BLOCKING_BY_ENTITY_KIND.tree).toBe(true);
+    expect(BLOCKING_BY_ENTITY_KIND.character).toBe(false);
   });
 });
 
@@ -130,6 +162,19 @@ describe('getSnapshot shape', () => {
     }
   });
 
+  it('decodes all four terrain kinds from the default map (water at (3,3))', () => {
+    const manager = createWorldManager();
+    const snapshot = manager.getSnapshot({ actorId: ACTOR_ID });
+
+    expect(tileAt(snapshot, 0, 0).terrain).toBe('grass');
+    expect(tileAt(snapshot, 1, 1).terrain).toBe('path');
+    expect(tileAt(snapshot, 2, 8).terrain).toBe('blocked');
+    expect(tileAt(snapshot, 3, 3).terrain).toBe('water');
+    expect(tileAt(snapshot, 4, 3).terrain).toBe('water');
+    expect(tileAt(snapshot, 3, 4).terrain).toBe('water');
+    expect(tileAt(snapshot, 4, 4).terrain).toBe('water');
+  });
+
   it('snapshot is Protocol-valid', () => {
     const manager = createWorldManager();
     expect(isWorldSnapshot(manager.getSnapshot({ actorId: ACTOR_ID }))).toBe(true);
@@ -183,12 +228,111 @@ describe('actor spawn', () => {
   });
 });
 
+describe('entity collection', () => {
+  it('contains the controlled actor plus exactly one entity per tree, in row-major order', () => {
+    const manager = createWorldManager();
+    const snapshot = manager.getSnapshot({ actorId: ACTOR_ID });
+
+    expect(snapshot.entities).toHaveLength(3);
+
+    const [actor, tree1, tree2] = snapshot.entities;
+    expect(actor).toEqual({
+      entityId: 'entity-1',
+      actorId: 'actor-1',
+      kind: 'character',
+      transform: { x: 5, y: 5 },
+      visible: true,
+    });
+    expect(actor.actorId).toBe(snapshot.controlledActorId);
+
+    expect(tree1).toEqual({
+      entityId: 'tree-1',
+      actorId: null,
+      kind: 'tree',
+      transform: { x: 6, y: 4 },
+      visible: true,
+    });
+    expect(tree2).toEqual({
+      entityId: 'tree-2',
+      actorId: null,
+      kind: 'tree',
+      transform: { x: 4, y: 7 },
+      visible: true,
+    });
+  });
+
+  it('assigns tree ids through parseEntityId (branded, no cast)', () => {
+    const manager = createWorldManager();
+    const trees = manager
+      .getSnapshot({ actorId: ACTOR_ID })
+      .entities.filter((entity) => entity.kind === 'tree');
+
+    expect(trees.map((tree) => tree.entityId)).toEqual([
+      parseEntityId('tree-1'),
+      parseEntityId('tree-2'),
+    ]);
+  });
+
+  it('the T cells carry grass terrain (trees stand on walkable ground)', () => {
+    const manager = createWorldManager();
+    const snapshot = manager.getSnapshot({ actorId: ACTOR_ID });
+
+    expect(tileAt(snapshot, 6, 4)).toEqual({
+      transform: { x: 6, y: 4 },
+      terrain: 'grass',
+    });
+    expect(tileAt(snapshot, 4, 7)).toEqual({
+      transform: { x: 4, y: 7 },
+      terrain: 'grass',
+    });
+    expect(WALKABILITY_BY_TERRAIN[tileAt(snapshot, 6, 4).terrain]).toBe(true);
+  });
+
+  it('delivers props whole in the snapshot (no entity.spawned event)', () => {
+    const manager = createWorldManager();
+    const snapshot = manager.getSnapshot({ actorId: ACTOR_ID });
+
+    expect(snapshot.entities.filter((entity) => entity.kind === 'tree')).toHaveLength(2);
+    expect(isWorldSnapshot(snapshot)).toBe(true);
+  });
+});
+
 describe('construction validation', () => {
   it('throws RangeError when the map centre is not walkable', () => {
     expect(() => createWorldManager({ map: ['ggg', 'g#g', 'ggg'] })).toThrow(RangeError);
     expect(() => createWorldManager({ map: ['ggggg', 'ggggg', 'gg#gg', 'ggggg', 'ggggg'] })).toThrow(
       RangeError,
     );
+
+    // The failure names the centre coordinate and the broken rule (walkability).
+    let caught: unknown;
+    try {
+      createWorldManager({ map: ['ggg', 'g#g', 'ggg'] });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(RangeError);
+    const message = (caught as RangeError).message;
+    expect(message).toContain('(1, 1)');
+    expect(message).toMatch(/walkable/i);
+  });
+
+  it('throws RangeError when a blocking entity occupies the map centre', () => {
+    // A `T` centre has WALKABLE grass terrain but a blocking tree: walkability
+    // alone would let the actor spawn on a tile it can never legally re-enter.
+    const map = ['ggg', 'gTg', 'ggg'];
+
+    let caught: unknown;
+    try {
+      createWorldManager({ map });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(RangeError);
+    const message = (caught as RangeError).message;
+    expect(message).toContain('(1, 1)');
+    expect(message).toMatch(/blocking/i);
   });
 
   it.each([
@@ -200,6 +344,23 @@ describe('construction validation', () => {
     ['unknown character in first row', ['gx', 'gg']],
   ])('throws RangeError for an %s', (_label, map) => {
     expect(() => createWorldManager({ map })).toThrow(RangeError);
+  });
+
+  it('accepts the new water and tree legend characters', () => {
+    const water = createWorldManager({ map: ['wgg', 'ggg', 'ggg'] });
+    expect(tileAt(water.getSnapshot({ actorId: ACTOR_ID }), 0, 0).terrain).toBe('water');
+
+    const tree = createWorldManager({ map: ['Tgg', 'ggg', 'ggg'] });
+    const treeSnapshot = tree.getSnapshot({ actorId: ACTOR_ID });
+    expect(tileAt(treeSnapshot, 0, 0).terrain).toBe('grass');
+    expect(treeSnapshot.entities).toHaveLength(2);
+    expect(treeSnapshot.entities[1]).toEqual({
+      entityId: 'tree-1',
+      actorId: null,
+      kind: 'tree',
+      transform: { x: 0, y: 0 },
+      visible: true,
+    });
   });
 
   it('derives size from the map, so the two can never disagree', () => {
@@ -325,6 +486,100 @@ describe('collision refusal', () => {
       manager.submitCommand({ actorId: ACTOR_ID, command: actorMove('north') }),
     ).not.toThrow();
     expect(manager.submitCommand({ actorId: ACTOR_ID, command: actorMove('north') }).events).toEqual([]);
+  });
+});
+
+describe('entity blocking (second authoritative rule)', () => {
+  it('refuses a step south from (6,3) into the tree at (6,4), then recovers', () => {
+    const clock = fakeClock(START);
+    const manager = createWorldManager({ clock: clock.now });
+
+    // Walk to (6,3): (5,5) -> (5,4) -> (5,3) -> (6,3), all walkable grass.
+    expect(
+      manager.submitCommand({ actorId: ACTOR_ID, command: actorMove('north') }).events,
+    ).toHaveLength(1);
+    expect(
+      manager.submitCommand({ actorId: ACTOR_ID, command: actorMove('north') }).events,
+    ).toHaveLength(1);
+    expect(
+      manager.submitCommand({ actorId: ACTOR_ID, command: actorMove('east') }).events,
+    ).toHaveLength(1);
+    expect(entityTransform(manager)).toEqual({ x: 6, y: 3 });
+
+    // (6,4) is walkable grass terrain, but occupied by the tree -> refused.
+    const before = manager.getSnapshot({ actorId: ACTOR_ID });
+    expect(tileAt(before, 6, 4).terrain).toBe('grass');
+    expect(WALKABILITY_BY_TERRAIN[tileAt(before, 6, 4).terrain]).toBe(true);
+
+    const refused = manager.submitCommand({ actorId: ACTOR_ID, command: actorMove('south') });
+
+    expect(refused).toEqual({ events: [], serverTime: START.toISOString() });
+    expect(entityTransform(manager)).toEqual({ x: 6, y: 3 });
+    expect(manager.getSnapshot({ actorId: ACTOR_ID })).toEqual(before);
+
+    // Recoverable: a legal step still works and emits exactly one event.
+    const recovered = manager.submitCommand({ actorId: ACTOR_ID, command: actorMove('east') });
+    expect(recovered.events).toHaveLength(1);
+    expect(entityTransform(manager)).toEqual({ x: 7, y: 3 });
+  });
+
+  it('refuses a step north from (6,5) into the same tree, then recovers', () => {
+    const clock = fakeClock(START);
+    const manager = createWorldManager({ clock: clock.now });
+
+    // Walk to (6,5): (5,5) -> (6,5), walkable grass.
+    expect(
+      manager.submitCommand({ actorId: ACTOR_ID, command: actorMove('east') }).events,
+    ).toHaveLength(1);
+    expect(entityTransform(manager)).toEqual({ x: 6, y: 5 });
+
+    const before = manager.getSnapshot({ actorId: ACTOR_ID });
+    const refused = manager.submitCommand({ actorId: ACTOR_ID, command: actorMove('north') });
+
+    expect(refused).toEqual({ events: [], serverTime: START.toISOString() });
+    expect(entityTransform(manager)).toEqual({ x: 6, y: 5 });
+    expect(manager.getSnapshot({ actorId: ACTOR_ID })).toEqual(before);
+
+    const recovered = manager.submitCommand({ actorId: ACTOR_ID, command: actorMove('south') });
+    expect(recovered.events).toHaveLength(1);
+    expect(entityTransform(manager)).toEqual({ x: 6, y: 6 });
+  });
+
+  it('treats blocking as per-tile occupancy: the actor stands at (6,3) and (6,5)', () => {
+    const north = createWorldManager();
+    // (6,3): (5,5) -> (5,4) -> (5,3) -> (6,3)
+    north.submitCommand({ actorId: ACTOR_ID, command: actorMove('north') });
+    north.submitCommand({ actorId: ACTOR_ID, command: actorMove('north') });
+    north.submitCommand({ actorId: ACTOR_ID, command: actorMove('east') });
+    expect(entityTransform(north)).toEqual({ x: 6, y: 3 });
+
+    const south = createWorldManager();
+    // (6,5): (5,5) -> (6,5)
+    south.submitCommand({ actorId: ACTOR_ID, command: actorMove('east') });
+    expect(entityTransform(south)).toEqual({ x: 6, y: 5 });
+  });
+
+  it('refuses water exactly like blocked terrain', () => {
+    const clock = fakeClock(START);
+    const manager = createWorldManager({ clock: clock.now });
+
+    // Walk to (5,3), adjacent to the water at (4,3).
+    expect(
+      manager.submitCommand({ actorId: ACTOR_ID, command: actorMove('north') }).events,
+    ).toHaveLength(1);
+    expect(
+      manager.submitCommand({ actorId: ACTOR_ID, command: actorMove('north') }).events,
+    ).toHaveLength(1);
+    expect(entityTransform(manager)).toEqual({ x: 5, y: 3 });
+
+    const before = manager.getSnapshot({ actorId: ACTOR_ID });
+    expect(tileAt(before, 4, 3).terrain).toBe('water');
+    expect(WALKABILITY_BY_TERRAIN[tileAt(before, 4, 3).terrain]).toBe(false);
+
+    const refused = manager.submitCommand({ actorId: ACTOR_ID, command: actorMove('west') });
+    expect(refused).toEqual({ events: [], serverTime: START.toISOString() });
+    expect(entityTransform(manager)).toEqual({ x: 5, y: 3 });
+    expect(manager.getSnapshot({ actorId: ACTOR_ID })).toEqual(before);
   });
 });
 
@@ -472,9 +727,57 @@ describe('defensive copies', () => {
           transform: { x: 5, y: 5 },
           visible: true,
         },
+        {
+          entityId: 'tree-1',
+          actorId: null,
+          kind: 'tree',
+          transform: { x: 6, y: 4 },
+          visible: true,
+        },
+        {
+          entityId: 'tree-2',
+          actorId: null,
+          kind: 'tree',
+          transform: { x: 4, y: 7 },
+          visible: true,
+        },
       ],
       controlledActorId: 'actor-1',
       serverTime: expect.any(String),
+    });
+  });
+
+  it('mutating the entities array or a tree transform does not affect later reads', () => {
+    const manager = createWorldManager();
+
+    const snapshot = manager.getSnapshot({ actorId: ACTOR_ID });
+    snapshot.entities[1].transform.x = 999;
+    snapshot.entities[1].transform.y = 999;
+    snapshot.entities[1].actorId = parseActorId('hacked');
+    snapshot.entities.push({ ...snapshot.entities[0] });
+    snapshot.entities.length = 0;
+
+    const fresh = manager.getSnapshot({ actorId: ACTOR_ID });
+    expect(fresh.entities).toHaveLength(3);
+    expect(fresh.entities[1]).toEqual({
+      entityId: 'tree-1',
+      actorId: null,
+      kind: 'tree',
+      transform: { x: 6, y: 4 },
+      visible: true,
+    });
+    expect(fresh.entities[2].transform).toEqual({ x: 4, y: 7 });
+  });
+
+  it('returns fresh entities arrays and fresh nested entity transforms each read', () => {
+    const manager = createWorldManager();
+    const first = manager.getSnapshot({ actorId: ACTOR_ID });
+    const second = manager.getSnapshot({ actorId: ACTOR_ID });
+
+    expect(first.entities).not.toBe(second.entities);
+    first.entities.forEach((entity, index) => {
+      expect(entity).not.toBe(second.entities[index]);
+      expect(entity.transform).not.toBe(second.entities[index].transform);
     });
   });
 

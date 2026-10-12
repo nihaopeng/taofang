@@ -12,12 +12,18 @@ export interface WorldSize {
 }
 
 /**
- * Closed union of terrain kinds. `'path'` is walkable but visually different
- * from `'grass'`; whether a kind is walkable is deliberately **not** on the
+ * Closed union of terrain kinds: `'grass' | 'path' | 'blocked' | 'water'`.
+ * `'path'` is walkable but visually different from `'grass'`; `'water'` is a
+ * distinct ground kind so the presenter can tell it apart from generic
+ * impassability. Whether a kind is walkable is deliberately **not** on the
  * wire — it is a Manager runtime rule (`WALKABILITY_BY_TERRAIN`). Adding a kind
  * is a breaking wire change because `TileState` guards keys exactly.
+ *
+ * Modelling note: `'blocked'` is really a *property* (impassable), not a ground
+ * kind; when real terrain art lands, prefer concrete kinds (`'rock'`) over a
+ * generic `'blocked'`.
  */
-export type TerrainKind = 'grass' | 'blocked' | 'path';
+export type TerrainKind = 'grass' | 'path' | 'blocked' | 'water';
 
 /**
  * Static terrain of one tile. Reuses the canonical `Transform` (do not
@@ -90,9 +96,12 @@ export function parseWorldSize(value: unknown): WorldSize {
   return value;
 }
 
-/** Structural guard for `TerrainKind` (exactly `'grass' | 'blocked' | 'path'`). */
+/**
+ * Structural guard for `TerrainKind`
+ * (exactly `'grass' | 'path' | 'blocked' | 'water'`).
+ */
 export function isTerrainKind(value: unknown): value is TerrainKind {
-  return value === 'grass' || value === 'blocked' || value === 'path';
+  return value === 'grass' || value === 'path' || value === 'blocked' || value === 'water';
 }
 
 /** Parse and validate `TerrainKind`, throwing `ProtocolParseError` on mismatch. */

@@ -1,11 +1,12 @@
 /**
- * Main-owned integration test for the phase-5 primitive path:
- * World + Tile + authoritative collision + movement, over the phase-4 primitives.
+ * Main-owned integration test for the phase-5/6 primitive path:
+ * World + Tile + authoritative collision (terrain AND entity occupancy) + movement,
+ * over the phase-4 primitives.
  *
  * Movement is asserted as a COMPOSITION OF PRIMITIVES, not as a bespoke endpoint:
  *   UI intent -> GameCommand { type: 'actor.move' } -> POST COMMAND_PATH
- *   -> Manager: bounds AND terrain walkability -> GameEvent { type: 'transform.changed' }
- *   -> Organizer entity state
+ *   -> Manager: bounds, terrain walkability, blocking-entity occupancy
+ *   -> GameEvent { type: 'transform.changed' } -> Organizer entity state
  *
  * It boots the real Router/Manager over `node:http` and drives the real Organizer
  * against it over an HTTP loopback, so the whole
@@ -13,12 +14,14 @@
  * with nothing mocked. Importing a client module together with backend modules is
  * forbidden inside module code (AGENTS.md) and is the point here.
  *
- * The default 10x10 map (see `@starvalley/manager`) is used as-is, so the collision
- * assertions below are anchored to real terrain:
- *   row 3 = 'gg###ggggg'  => (2,3) (3,3) (4,3) blocked
- *   row 4 = 'gg#ggggggg'  => (2,4) blocked
- *   row 6 = 'gggggppggg'  => (5,6) (6,6) path (walkable, visually different)
- *   centre (5,5) is grass.
+ * The Manager's frozen 10x10 map, in tile coordinates (x, y) with y increasing south:
+ *   y=0 'gggggggggg'   y=5 'gpggggggpg'
+ *   y=1 'gppppppppg'   y=6 'gppppppppg'
+ *   y=2 'gpggggggpg'   y=7 'ggggTggggg'   tree-2 at (4,7)
+ *   y=3 'gpgwwgggpg'   y=8 'gg##gggggg'   blocked at (2,8) (3,8)
+ *   y=4 'gpgwwgTgpg'   y=9 'gggggggggg'
+ *          ^^ water at (3,3) (4,3) (3,4) (4,4); tree-1 at (6,4)
+ * The actor spawns at the walkable, unoccupied centre (5,5).
  */
 
 import { createServer } from 'node:http';
@@ -48,8 +51,15 @@ import {
   subscribeWorld,
 } from '../../apps/web/src/organizer';
 import type { MoveDirection } from '../../apps/web/src/organizer';
+import { BRIDGE_TERRAINS } from '../../apps/web/src/render/bridge';
 
 const ACTOR_ID = parseActorId('actor-1');
+
+const GRASS = 'grass';
+const WATER = 'water';
+const BLOCKED = 'blocked';
+const PATH = 'path';
+const TREE = 'tree';
 
 let server: Server;
 let baseUrl: string;
@@ -135,8 +145,8 @@ async function postCommand(body: unknown): Promise<Response> {
   });
 }
 
-describe('vertical slice: world + tile + authoritative collision', () => {
-  it('loads the authoritative world: identity, dimensions, terrain and actor', async () => {
+describe('vertical slice: world + tile + collision + world objects', () => {
+  it('loads the authoritative world: identity, terrain kinds, objects and actor', async () => {
     useRealServer();
 
     await loadWorld();
@@ -148,21 +158,48 @@ describe('vertical slice: world + tile + authoritative collision', () => {
     expect(state.world).toEqual({ width: 10, height: 10 });
     expect(state.tiles).toHaveLength(100);
 
-    // Terrain is carried per tile and is not a client-derived property.
+    // All four terrain kinds reach the client, carried per tile.
     expect(new Set(state.tiles.map((tile) => tile.terrain))).toEqual(
-      new Set(['grass', 'path', 'blocked']),
+      new Set([GRASS, PATH, BLOCKED, WATER]),
     );
-    expect(terrainAt(0, 0)).toBe('grass');
-    expect(terrainAt(2, 4)).toBe('blocked');
-    expect(terrainAt(5, 6)).toBe('path');
+    expect(terrainAt(0, 0)).toBe(GRASS);
+    expect(terrainAt(1, 1)).toBe(PATH);
+    expect(terrainAt(2, 8)).toBe(BLOCKED);
+    expect(terrainAt(3, 3)).toBe(WATER);
 
-    // The actor spawns on the walkable centre tile.
+    // World objects arrive as entities, separate from the terrain layer.
     expect(state.controlledActorId).toBe('actor-1');
+    const trees = state.entities.filter((entity) => entity.kind === TREE);
+    expect(trees).toHaveLength(2);
+    expect(trees.map((tree) => ({ x: tree.x, y: tree.y })).sort((a, b) => a.y - b.y)).toEqual([
+      { x: 6, y: 4 },
+      { x: 4, y: 7 },
+    ]);
+    for (const tree of trees) {
+      expect(tree.actorId).toBeNull();
+      // A tree stands ON walkable ground: terrain and object are different layers.
+      expect(terrainAt(tree.x, tree.y)).toBe(GRASS);
+    }
+
     expect(actorTransform()).toEqual({ x: 5, y: 5 });
-    expect(terrainAt(5, 5)).toBe('grass');
+    expect(terrainAt(5, 5)).toBe(GRASS);
   });
 
-  it('moves one tile east through the real chain on walkable terrain', async () => {
+  it('covers every terrain the real server can send with a bridge appearance', async () => {
+    // Cross-module guard against a silently-fallback terrain. The bridge cannot know
+    // the server's terrain vocabulary (it must not import the game protocol), so the
+    // coverage is asserted here, where both sides are legitimately importable.
+    useRealServer();
+    await loadWorld();
+
+    const terrainsOnTheWire = new Set(getWorldState().tiles.map((tile) => tile.terrain));
+    expect(terrainsOnTheWire.size).toBe(4);
+    for (const terrain of terrainsOnTheWire) {
+      expect(BRIDGE_TERRAINS).toContain(terrain);
+    }
+  });
+
+  it('moves one tile on walkable terrain through the real chain', async () => {
     useRealServer();
     await loadWorld();
 
@@ -188,56 +225,75 @@ describe('vertical slice: world + tile + authoritative collision', () => {
     expect(event.transform).toEqual({ x: 5, y: 4 });
   });
 
-  it('blocks movement into a blocked tile: empty events, unchanged position, no client error', async () => {
+  it('refuses water: empty events, unchanged position, no client error', async () => {
     useRealServer();
     await loadWorld();
 
-    // (5,5) -> north -> (5,4) grass -> west -> (4,4) grass -> west -> (3,4) grass
-    await step('north');
+    // (5,5) -> west (4,5) -> west (3,5); the next north step targets (3,4) = water.
     await step('west');
     await step('west');
-    expect(actorTransform()).toEqual({ x: 3, y: 4 });
+    expect(actorTransform()).toEqual({ x: 3, y: 5 });
 
-    // The next west step targets (2,4), which is 'blocked' terrain.
-    const refused = await postCommand({ type: 'actor.move', direction: 'west' });
+    const refused = await postCommand({ type: 'actor.move', direction: 'north' });
     expect(refused.status).toBe(200);
     expect(parseSubmitCommandResponse(await refused.json()).events).toEqual([]);
 
-    await step('west');
+    await step('north');
     let state = getWorldState();
     expect(state.status).toBe('ready');
     expect(state.error).toBeNull();
-    expect(actorTransform()).toEqual({ x: 3, y: 4 });
+    expect(actorTransform()).toEqual({ x: 3, y: 5 });
 
-    // (3,3) is blocked too (row 3 is 'gg###ggggg'), so the whole cluster resists.
-    await step('north');
-    expect(actorTransform()).toEqual({ x: 3, y: 4 });
-
-    // ...and the world is still usable: a legal step afterwards works.
-    await step('east');
+    // The world stays usable: a legal step afterwards works.
+    await step('south');
     state = getWorldState();
     expect(state.error).toBeNull();
-    expect(actorTransform()).toEqual({ x: 4, y: 4 });
+    expect(actorTransform()).toEqual({ x: 3, y: 6 });
   });
 
-  it('treats path terrain as walkable but visually distinct', async () => {
+  it('refuses a blocking world object: the tree tile cannot be entered', async () => {
     useRealServer();
     await loadWorld();
 
-    // (5,5) grass -> south -> (5,6) path
-    await step('south');
+    // (5,5) -> north (5,4) -> north (5,3) -> east (6,3): directly NORTH of tree-1 at (6,4).
+    await step('north');
+    await step('north');
+    await step('east');
+    expect(actorTransform()).toEqual({ x: 6, y: 3 });
 
-    expect(getWorldState().error).toBeNull();
-    expect(actorTransform()).toEqual({ x: 5, y: 6 });
-    expect(terrainAt(5, 6)).toBe('path');
+    // South into the tree's tile is refused by entity occupancy, not by terrain.
+    const refused = await postCommand({ type: 'actor.move', direction: 'south' });
+    expect(refused.status).toBe(200);
+    expect(parseSubmitCommandResponse(await refused.json()).events).toEqual([]);
+
+    await step('south');
+    const state = getWorldState();
+    expect(state.status).toBe('ready');
+    expect(state.error).toBeNull();
+    expect(actorTransform()).toEqual({ x: 6, y: 3 });
+    expect(terrainAt(6, 4)).toBe(GRASS);
+  });
+
+  it('lets the actor stand both behind and in front of the tree', async () => {
+    useRealServer();
+    await loadWorld();
+
+    // South of tree-1 at (6,4): one step east from the spawn.
+    await step('east');
+    expect(actorTransform()).toEqual({ x: 6, y: 5 });
+
+    // ...and back around to the north side is reachable (occupancy is per tile, not a radius).
+    await step('west');
+    await step('north');
+    await step('north');
+    await step('east');
+    expect(actorTransform()).toEqual({ x: 6, y: 3 });
   });
 
   it('gives a client no way to submit a destination, so collision cannot be bypassed', async () => {
     useRealServer();
     await loadWorld();
 
-    // The only mutation primitive is a direction. A hand-crafted body that tries to
-    // teleport (a destination) or to name the actor is rejected outright.
     for (const body of [
       { type: 'actor.move', direction: 'east', x: 9, y: 9 },
       { type: 'actor.move', direction: 'east', position: { x: 9, y: 9 } },
@@ -249,8 +305,6 @@ describe('vertical slice: world + tile + authoritative collision', () => {
       expect(response.status).toBe(400);
     }
 
-    // And no legal client path can move more than one tile: the authoritative answer
-    // is produced by the Manager, not by the payload.
     await step('east');
     expect(actorTransform()).toEqual({ x: 6, y: 5 });
   });
@@ -300,6 +354,7 @@ describe('vertical slice: world + tile + authoritative collision', () => {
     expect(parsed.world.worldId).toBe('world-1');
     expect(parsed.world.tiles).toHaveLength(100);
     expect(Object.keys(parsed.world.tiles[0] ?? {}).sort()).toEqual(['terrain', 'transform']);
+    expect(parsed.world.entities).toHaveLength(3);
 
     const info = await fetch(new URL('/api/game-info', baseUrl));
     const payload = (await info.json()) as { gameInfo: { protocolVersion: number } };

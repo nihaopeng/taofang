@@ -18,6 +18,18 @@
  *   mapping it to an appearance is presentation, but whether it is walkable is
  *   an authoritative Manager rule the client must never infer.
  *
+ * When `animation.play` is emitted (documented driving state)
+ * ---------------------------------------------------------
+ * `animation.play` is re-added in phase 6 because a real driving state now
+ * exists: whether a visual move is in flight. The bridge owns the **vocabulary**
+ * only — it emits `walk` on the frame that starts a move (the same frame as
+ * `transform.setTarget`). It deliberately does **not** emit a settle animation:
+ * the runtime interpolates to the target, so the runtime owns WHEN the move is
+ * over and returns the node to its prefab's `defaultAnimation` when that
+ * interpolation completes. A client-side settle emission would also be
+ * unreachable: the world store is event-driven, so after the last move no further
+ * frame arrives for the bridge to observe the settle.
+ *
  * Identity: a render `NodeId` is derived from game identity, but the two are
  * deliberately different types. The renderer must not be able to read game
  * identity (it receives only `NodeId`); game identity stops here. Tile and entity
@@ -25,7 +37,13 @@
  * never collide with an entity whose id happens to look like a coordinate.
  */
 
-import type { AppearanceId, NodeId, RenderCommand, RenderFrame } from '@starvalley/render-protocol';
+import type {
+  AnimationId,
+  AppearanceId,
+  NodeId,
+  RenderCommand,
+  RenderFrame,
+} from '@starvalley/render-protocol';
 
 import type { WorldState } from '../organizer';
 
@@ -39,7 +57,13 @@ export type { RenderCommand, RenderFrame } from '@starvalley/render-protocol';
  * presentation-only smoothing: the target already came from the server, so
  * easing toward it is not client prediction.
  */
-const DEFAULT_STEP_DURATION_MS = 120;
+const DEFAULT_STEP_DURATION_MS = 150;
+
+/**
+ * Animation ids the bridge can emit. The runtime owns what they look like and
+ * when a move is over; the bridge owns which animation a move start uses.
+ */
+const ANIMATION_WALK = 'walk' as AnimationId;
 
 /**
  * Appearance catalogue: game `kind` -> opaque render `AppearanceId`.
@@ -56,6 +80,7 @@ const DEFAULT_STEP_DURATION_MS = 120;
  */
 const APPEARANCE_BY_KIND: Readonly<Record<string, AppearanceId>> = {
   character: asAppearanceId('appearance.character'),
+  tree: asAppearanceId('appearance.tree'),
 };
 
 /**
@@ -73,7 +98,20 @@ const APPEARANCE_BY_TERRAIN: Readonly<Record<string, AppearanceId>> = {
   grass: asAppearanceId('appearance.terrain.grass'),
   path: asAppearanceId('appearance.terrain.path'),
   blocked: asAppearanceId('appearance.terrain.blocked'),
+  water: asAppearanceId('appearance.terrain.water'),
 };
+
+/**
+ * Every terrain key the bridge renders with a real (non-fallback) appearance.
+ *
+ * Exported so a cross-module coverage assertion can pin that every terrain the
+ * real server can send is a key here: a new terrain silently falling through to
+ * the fallback is exactly the bug this export exists to make impossible. It is
+ * derived from the catalogue, so it cannot drift.
+ */
+export const BRIDGE_TERRAINS: readonly string[] = Object.freeze(
+  Object.keys(APPEARANCE_BY_TERRAIN),
+);
 
 /**
  * Documented fallback for a value the catalogue does not know (an entity `kind`
@@ -193,6 +231,23 @@ export interface RenderBridge {
 }
 
 /**
+ * The render node id of the actor the caller controls, or `null` when there is
+ * no controlled actor (including before the world loads).
+ *
+ * Exported so the UI can wire the runtime's camera follow target without
+ * duplicating the bridge's id-namespacing rule: node identity is owned here.
+ */
+export function controlledActorNodeId(state: WorldState): NodeId | null {
+  if (state.controlledActorId === null) {
+    return null;
+  }
+  const entity = state.entities.find(
+    (candidate) => candidate.actorId === state.controlledActorId,
+  );
+  return entity === undefined ? null : entityNodeId(entity.entityId);
+}
+
+/**
  * Create a fresh bridge. `stepDurationMs` is the interpolation duration attached
  * to `transform.setTarget` (defaults to {@link DEFAULT_STEP_DURATION_MS}).
  *
@@ -203,8 +258,8 @@ export interface RenderBridge {
  *
  * 1. base-layer creates (`node.create` for new tiles), sorted `y` then `x`;
  * 2. object-layer commands (`node.create` for new entities, then per-entity
- *    `transform.setTarget` / `visibility.set` / `appearance.set`), sorted by
- *    `entityId`;
+ *    `transform.setTarget` / `animation.play` / `visibility.set` /
+ *    `appearance.set`), sorted by `entityId`;
  * 3. base-layer terrain changes (`appearance.set`), sorted `y` then `x`;
  * 4. base-layer destroys (`node.destroy` for removed tiles), sorted `y` then `x`;
  * 5. object-layer destroys (`node.destroy` for removed entities), sorted by
@@ -316,6 +371,16 @@ export function createRenderBridge(options?: { stepDurationMs?: number }): Rende
           });
           previous.x = entity.x;
           previous.y = entity.y;
+          // A visual move is in flight, so the actor walks. The runtime resets to
+          // its rest animation when the interpolation completes; the bridge does
+          // not emit a settle. `appearance`/`visible` changes below do not affect
+          // this: they are not movement.
+          commands.push({
+            type: 'animation.play',
+            nodeId,
+            animation: ANIMATION_WALK,
+            loop: true,
+          });
         }
 
         if (previous.visible !== entity.visible) {

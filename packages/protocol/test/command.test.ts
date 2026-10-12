@@ -193,3 +193,27 @@ describe('parseSubmitCommandResponse', () => {
     expect(error.code).toBe('BAD_REQUEST');
   });
 });
+
+/**
+ * Type-level exactness guard: `GameCommand` must stay exactly one member. The
+ * literal tuple and the `Exact` comparison fail `tsc` if a member is added or
+ * removed, so "no new instruction" is enforced by the compiler, not just
+ * asserted in prose.
+ */
+const gameCommandTypes = ['actor.move'] as const;
+type ListedGameCommandType = (typeof gameCommandTypes)[number];
+type Exact<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+
+/** Exported so `noUnusedLocals` cannot swallow the compile-time exactness proof. */
+export const gameCommandTypesAreExact: Exact<
+  GameCommand['type'],
+  ListedGameCommandType
+> = true;
+
+describe('GameCommand exact shape', () => {
+  it('is exactly one member (`actor.move`) and has no catch-all', () => {
+    expect(gameCommandTypesAreExact).toBe(true);
+    expect(gameCommandTypes).toHaveLength(1);
+    expect(gameCommandTypes[0]).toBe('actor.move');
+  });
+});

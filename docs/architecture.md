@@ -231,6 +231,127 @@ with the primitive contract (`submitCommand`, `EntityState`, `WorldState.entitie
 `controlledActorId`). See "Phase 4 frozen contract — primitive-driven architecture" above for the
 current surface; this section is kept only so the phase-3 history is not silently rewritten.
 
+## Phase 6 frozen contract — 2.5D rendering foundation (UI-led milestone)
+
+The lower layers are verified; the client is still a box tech demo. This milestone turns it into
+a grey-box 2.5D scene that shows the intended direction. It is a **presentation** milestone: the
+work happens in the bridge / Three runtime / UI, and the game contract changes only where the
+existing abstraction genuinely cannot express required world semantics.
+
+### Protocol delta — vocabulary only, ZERO new instructions
+
+The only changes, both enum members (data), are the minimum needed to satisfy the visual
+requirements. No new **game-protocol** command, no new game-protocol event, and no new
+instruction of any kind. (The Render ISA separately gained back `animation.play` — see below;
+that is an in-process presentation primitive, not a wire instruction, and it is called out
+rather than glossed so the claim stays checkable.)
+
+- `TerrainKind` gains `'water'`; `WALKABILITY_BY_TERRAIN.water = false`. Justification: `terrain`
+  is the only per-tile semantic on the wire, so with a single generic `'blocked'` value water and
+  rock are indistinguishable to the presenter. Modelling note, recorded: `'blocked'` is really a
+  *property* (impassable), not a ground kind; when real terrain art lands, prefer concrete kinds
+  (`rock`) over a generic `blocked`.
+- `EntityKind` gains `'tree'`. Justification: the phase requires a raised world object to validate
+  occlusion and the `WorldObjects` scene group, and a tall object cannot be terrain without
+  conflating `` terrain `` with `` object ``. This also makes "how do trees/crops/buildings/NPCs
+  plug in" a demonstrated path instead of a designed one.
+- `PROTOCOL_VERSION` 4 -> 5. Both additions are incompatible under exact-key/exact-union guards.
+
+### Manager delta
+
+- The world map legend gains `w` (water, unwalkable) and `T` (a tree standing on grass). The map
+  stays a fixed literal 10x10 layout; no procedural generation, no streaming.
+- `entities` becomes a real **collection** (the actor plus static props), still delivered whole in
+  the snapshot (props are part of the initial world, so they need no `entity.spawned` event).
+- A SECOND authoritative rule joins terrain walkability:
+  `BLOCKING_BY_ENTITY_KIND = { character: false, tree: true }`. A move is refused if the target
+  terrain is unwalkable **or** a blocking entity occupies the target tile. Same refusal semantics
+  (empty `events`, transform untouched). `character: false` is deliberate (a single actor cannot
+  block itself, and multi-actor blocking is a later decision).
+
+### Render ISA delta — `animation.play` returns, with a real producer
+
+`animation.play { nodeId, animation: AnimationId, loop }` plus `AnimationId` are re-added.
+
+This is a deliberate reversal of the phase-4 deletion, and the phase-4 criterion is what makes it
+legitimate: that criterion was "no producer AND no driving state", and it is now false. The bridge
+has a real driving state — whether a visual move is in flight — so it emits `idle`/`walk` for the
+actor, and the runtime records the current animation in `inspect()` so it is **observable** rather
+than write-only. Re-adding a primitive because a checklist mentions it would still be wrong; this
+is re-adding it because a driving state now exists.
+
+### 2.5D rendering model (decided by Main, implemented by the UI owner)
+
+- **Orthographic**, not perspective. A fixed view with no perspective distortion keeps tile shape
+  uniform across the small map, makes depth sorting stable, and is the standard 2.5D look.
+- **Front-facing, tilted down.** No yaw (camera looks along -Z), pitch about 55-60 degrees down.
+  So tile `+y` (south) moves toward the camera and appears lower on screen: depth is a pure
+  function of tile `y`, which is what makes occlusion predictable without per-object hacks.
+- **Y-up world; ground lies in the XZ plane.** `tile (x, y) -> render (x, 0, y)`, i.e. `+y` tile is
+  `+z` render (toward the camera). This mapping lives ONLY in the runtime — Protocol never sees a
+  render coordinate, and `RenderTransform` keeps carrying tile coordinates.
+- **Camera follows the controlled actor** with light smoothing. The follow target is runtime
+  configuration (`setFollowTarget(nodeId)`), NOT a new ISA primitive: the ISA describes scene
+  content, the camera is a viewer. If multi-camera or cutscenes arrive, that is when a `camera.*`
+  primitive should be considered.
+
+### Scene graph
+
+```
+Scene
+├─ WorldRoot
+│   ├─ Terrain        // layer: 'base'
+│   ├─ WorldObjects   // layer: 'object' + a prefab whose group is WorldObjects (tree)
+│   ├─ Actors         // layer: 'object' + a prefab whose group is Actors (character)
+│   └─ Effects        // empty today; reserved so one-off visuals need no new group
+├─ CameraRig          // orthographic camera + follow target
+└─ Lights             // sun (directional, casts shadows) + ambient fill
+```
+
+Which group an object-layer node belongs to is decided by the runtime's PREFAB registry for that
+appearance id, not by a game concept on the wire. That is why a tree and an NPC can live in
+different groups while the ISA only knows "a node with an appearance in a layer".
+
+### Depth / occlusion policy (no per-object z-index patching, ever)
+
+- Use a **real 3D depth buffer**: opaque geometry plus a tilted orthographic camera resolves
+  occlusion geometrically. There is no hand-written z per business object, and none may be added.
+- `layer` remains for coarse ordering (terrain behind objects) and is applied as a depth offset
+  inside the runtime, not by callers.
+- Placeholder visuals are OPAQUE (alpha-tested at most) precisely so the depth buffer does the
+  work. Recorded consequence: real sprite/billboard art with alpha transparency will need a
+  y-sorted render pass — that is a runtime-internal policy applied uniformly to every transparent
+  node, still not per-object z patches.
+
+### Actor presentation
+
+- A visual root `Group` per node, anchored at the FEET (tile centre, y = 0), so scale/rotation/
+  animation compose without moving the anchor.
+- Facing is derived presentationally from the visual movement delta (the runtime rotates the visual
+  root). **Authoritative facing does not exist yet** and is recorded as a future protocol addition
+  (it matters for "which tile do I interact with", which is gameplay, not presentation).
+- **Authoritative vs visual transform are separate**: the runtime interpolates toward the last
+  `transform.setTarget`; the visual position is never reported back as authoritative. Movement is
+  therefore smooth without introducing prediction.
+
+### Asset abstraction
+
+A runtime-internal **prefab registry**: `AppearanceId -> prefab { group, realisation, footprint,
+height, material }`. Prefabs are composed from standard Three.js primitives (no custom shaders, no
+external art assets). Swapping to a sprite atlas, billboards, GLTF, or instanced meshes is a
+registry change confined to the runtime, because the ISA only ever names an appearance.
+
+Qualification (recorded after review): "registry-only" is fully true for a sprite atlas, a
+billboard realisation, or a GLTF prefab, but **instancing additionally requires changing the
+per-node bookkeeping** — the runtime today keeps one `Group`/visual per node (a `nodes` map plus
+the tile↔scene inversion in `inspect()`), and an instanced renderer would batch those away. The
+`(layer, appearance)` bucket index is the key that makes that change local, not the whole change.
+
+### Explicitly out of scope
+
+Farming, inventory, NPC behaviour, accounts, persistence, procedural worlds, large-map streaming,
+production art assets, complex shaders.
+
 ## Phase 5 frozen contract — World / Tile / Collision (reusing the phase-4 primitives)
 
 The goal is to prove the two ISAs can carry a NON-actor world object without growing new

@@ -13,7 +13,11 @@ import { describe, expect, it } from 'vitest';
 import type { RenderCommand, RenderFrame } from '@starvalley/render-protocol';
 
 import type { WorldState } from '../src/organizer/index.ts';
-import { FALLBACK_APPEARANCE, createRenderBridge } from '../src/render/bridge.ts';
+import {
+  BRIDGE_TERRAINS,
+  FALLBACK_APPEARANCE,
+  createRenderBridge,
+} from '../src/render/bridge.ts';
 
 type Entity = WorldState['entities'][number];
 type Tile = WorldState['tiles'][number];
@@ -206,7 +210,7 @@ describe('render bridge entity diff rules', () => {
 
     const appearance = commandOfType(frame, 'appearance.set');
     expect(appearance.nodeId).toBe('entity:entity-a');
-    expect(appearance.appearance).toBe(FALLBACK_APPEARANCE);
+    expect(appearance.appearance).toBe('appearance.tree');
   });
 
   it('emits node.destroy when an entity disappears', () => {
@@ -234,6 +238,116 @@ describe('render bridge entity diff rules', () => {
     const frame = bridge.frameFor(makeState([makeEntity({ entityId: 'entity-a', x: 3, y: 4 })]));
 
     expect(frame).toEqual([]);
+  });
+});
+
+describe('render bridge terrain catalogue', () => {
+  it('maps all four terrains to distinct non-fallback appearances', () => {
+    const bridge = createRenderBridge();
+    const terrains = ['grass', 'path', 'blocked', 'water'];
+
+    const frame = bridge.frameFor(
+      makeState([], {
+        tiles: terrains.map((terrain, x) => makeTile({ x, y: 0, terrain })),
+      }),
+    );
+
+    const appearances = creates(frame).map((command) => command.appearance);
+    expect(appearances).toHaveLength(4);
+    expect(new Set(appearances).size).toBe(4);
+    for (const appearance of appearances) {
+      expect(appearance).not.toBe(FALLBACK_APPEARANCE);
+    }
+  });
+
+  it('exposes BRIDGE_TERRAINS as every terrain key it renders non-fallback', () => {
+    // A terrain the real server can send that is missing here would silently
+    // fall through to the fallback look. This is the client-side half of the
+    // cross-module coverage assertion Main owns.
+    expect([...BRIDGE_TERRAINS].sort()).toEqual(['blocked', 'grass', 'path', 'water']);
+
+    for (const terrain of BRIDGE_TERRAINS) {
+      // A fresh bridge sees each terrain for the first time, so it emits
+      // node.create rather than an appearance.set.
+      const bridge = createRenderBridge();
+      const frame = bridge.frameFor(
+        makeState([], { tiles: [makeTile({ x: 0, y: 0, terrain })] }),
+      );
+      expect(commandOfType(frame, 'node.create').appearance).not.toBe(FALLBACK_APPEARANCE);
+    }
+  });
+
+  it('does not throw for an unknown terrain and uses the documented fallback', () => {
+    const bridge = createRenderBridge();
+
+    let frame: RenderFrame = [];
+    expect(() => {
+      frame = bridge.frameFor(
+        makeState([], { tiles: [makeTile({ x: 4, y: 4, terrain: 'sand' })] }),
+      );
+    }).not.toThrow();
+
+    const create = commandOfType(frame, 'node.create');
+    expect(create.appearance).toBe(FALLBACK_APPEARANCE);
+  });
+});
+
+describe('render bridge animation driving state', () => {
+  /** The `animation.play` animations emitted in a frame, in order. */
+  function animations(frame: RenderFrame): string[] {
+    return frame
+      .filter(
+        (command): command is Extract<RenderCommand, { type: 'animation.play' }> =>
+          command.type === 'animation.play',
+      )
+      .map((command) => command.animation);
+  }
+
+  it('emits walk when a move starts and never emits a settle animation', () => {
+    const bridge = createRenderBridge();
+    bridge.frameFor(makeState([makeEntity({ entityId: 'entity-a', x: 5, y: 5 })]));
+
+    const moveFrame = bridge.frameFor(makeState([makeEntity({ entityId: 'entity-a', x: 6, y: 5 })]));
+    expect(animations(moveFrame)).toEqual(['walk']);
+    expect(moveFrame.some((command) => command.type === 'transform.setTarget')).toBe(true);
+
+    // The runtime owns settling, so the bridge must NOT emit an `idle` on a
+    // later frame that observes no position change. Two consecutive unchanged
+    // frames prove the settle emission is gone, not merely deferred.
+    const settleFrame = bridge.frameFor(
+      makeState([makeEntity({ entityId: 'entity-a', x: 6, y: 5 })]),
+    );
+    expect(animations(settleFrame)).toEqual([]);
+    expect(
+      animations(bridge.frameFor(makeState([makeEntity({ entityId: 'entity-a', x: 6, y: 5 })]))),
+    ).toEqual([]);
+  });
+
+  it('stays on walk across consecutive moves without a transitional idle', () => {
+    const bridge = createRenderBridge();
+    bridge.frameFor(makeState([makeEntity({ entityId: 'entity-a', x: 5, y: 5 })]));
+
+    expect(
+      animations(bridge.frameFor(makeState([makeEntity({ entityId: 'entity-a', x: 6, y: 5 })]))),
+    ).toEqual(['walk']);
+    expect(
+      animations(bridge.frameFor(makeState([makeEntity({ entityId: 'entity-a', x: 7, y: 5 })]))),
+    ).toEqual(['walk']);
+    expect(
+      animations(bridge.frameFor(makeState([makeEntity({ entityId: 'entity-a', x: 7, y: 5 })]))),
+    ).toEqual([]);
+  });
+
+  it('issues no animation.play when a move is blocked and the position does not change', () => {
+    const bridge = createRenderBridge();
+    bridge.frameFor(makeState([makeEntity({ entityId: 'entity-a', x: 5, y: 5 })]));
+
+    // Walking into a wall: the authoritative position is unchanged, so there is
+    // no move to start and no settle to emit. The actor cannot be left on a
+    // walk animation that nothing ever ends.
+    const frame = bridge.frameFor(makeState([makeEntity({ entityId: 'entity-a', x: 5, y: 5 })]));
+    expect(frame).toEqual([]);
+    expect(animations(frame)).toEqual([]);
   });
 });
 
@@ -330,7 +444,9 @@ describe('render bridge reset and determinism', () => {
 
     expect(frame.map((command) => `${command.type}:${command.nodeId}`)).toEqual([
       'transform.setTarget:entity:entity-a',
+      'animation.play:entity:entity-a',
       'transform.setTarget:entity:entity-c',
+      'animation.play:entity:entity-c',
       'appearance.set:tile:0,0',
       'node.destroy:tile:1,0',
       'node.destroy:entity:entity-b',

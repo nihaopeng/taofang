@@ -4,7 +4,7 @@
  * `PROTOCOL_VERSION` is the client/server compatibility marker carried in
  * `GameInfo`. Bump it only for breaking wire changes.
  */
-export const PROTOCOL_VERSION = 4;
+export const PROTOCOL_VERSION = 5;
 
 /** Wire path for the game-info endpoint. Transport-neutral: Router maps it. */
 export const GAME_INFO_PATH = '/api/game-info';

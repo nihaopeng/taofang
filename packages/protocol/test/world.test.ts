@@ -62,14 +62,19 @@ describe('isWorldSize', () => {
 });
 
 describe('isTerrainKind', () => {
-  it('accepts exactly grass, blocked, and path', () => {
+  it('accepts exactly grass, path, blocked, and water', () => {
     expect(isTerrainKind('grass')).toBe(true);
-    expect(isTerrainKind('blocked')).toBe(true);
     expect(isTerrainKind('path')).toBe(true);
+    expect(isTerrainKind('blocked')).toBe(true);
+    expect(isTerrainKind('water')).toBe(true);
+  });
+
+  it('rejects an unknown value even though the union grew (exact-union regression guard)', () => {
+    expect(isTerrainKind('lava')).toBe(false);
   });
 
   it.each([
-    ['an unknown literal', 'water'],
+    ['a non-member literal', 'lava'],
     ['the empty string', ''],
     ['a number', 0],
     ['null', null],
@@ -88,7 +93,7 @@ describe('parseTerrainKind', () => {
   });
 
   it('throws ProtocolParseError with a message when invalid', () => {
-    const error = captureParseError(() => parseTerrainKind('water'));
+    const error = captureParseError(() => parseTerrainKind('lava'));
     expect(error.message).toBe('Invalid TerrainKind payload');
     expect(error.code).toBe('BAD_REQUEST');
   });
@@ -97,6 +102,10 @@ describe('parseTerrainKind', () => {
 describe('isTileState', () => {
   it('accepts a well-formed TileState', () => {
     expect(isTileState(validTileState)).toBe(true);
+  });
+
+  it("accepts a 'water' tile (the phase-6 ground kind)", () => {
+    expect(isTileState({ ...validTileState, terrain: 'water' })).toBe(true);
   });
 
   it.each(nonObjects)('rejects %s', (_label, value) => {
@@ -118,7 +127,7 @@ describe('isTileState', () => {
     expect(isTileState({ ...validTileState, transform: null })).toBe(false);
     expect(isTileState({ ...validTileState, transform: { x: 1, y: 2, extra: 3 } })).toBe(false);
     expect(isTileState({ ...validTileState, transform: { x: 1.5, y: 2 } })).toBe(false);
-    expect(isTileState({ ...validTileState, terrain: 'water' })).toBe(false);
+    expect(isTileState({ ...validTileState, terrain: 'lava' })).toBe(false);
     expect(isTileState({ ...validTileState, terrain: 1 })).toBe(false);
     expect(isTileState({ ...validTileState, terrain: null })).toBe(false);
   });
@@ -130,7 +139,7 @@ describe('parseTileState', () => {
   });
 
   it('throws ProtocolParseError with a message when invalid', () => {
-    const error = captureParseError(() => parseTileState({ ...validTileState, terrain: 'water' }));
+    const error = captureParseError(() => parseTileState({ ...validTileState, terrain: 'lava' }));
     expect(error.message).toBe('Invalid TileState payload');
     expect(error.code).toBe('BAD_REQUEST');
   });
@@ -152,6 +161,23 @@ describe('parseWorldSize', () => {
 describe('isWorldSnapshot', () => {
   it('accepts a well-formed WorldSnapshot', () => {
     expect(isWorldSnapshot(validWorldSnapshot)).toBe(true);
+  });
+
+  it('still validates the phase-5 shape (the additions are additive)', () => {
+    expect(isWorldSnapshot(validWorldSnapshot)).toBe(true);
+    expect(
+      isWorldSnapshot({ ...validWorldSnapshot, tiles: [{ ...validTileState, terrain: 'grass' }] }),
+    ).toBe(true);
+  });
+
+  it("accepts a snapshot containing a 'water' tile and a 'tree' entity (phase-6 vocabulary)", () => {
+    expect(
+      isWorldSnapshot({
+        ...validWorldSnapshot,
+        tiles: [{ ...validTileState, terrain: 'water' }],
+        entities: [{ ...validEntityState, entityId: 'entity-tree', actorId: null, kind: 'tree' }],
+      }),
+    ).toBe(true);
   });
 
   it('accepts an empty entities list (a world with nothing in it yet)', () => {
@@ -199,6 +225,15 @@ describe('isWorldSnapshot', () => {
     expect(isWorldSnapshot({ ...validWorldSnapshot, size: { width: 0, height: 15 } })).toBe(false);
   });
 
+  it('rejects unknown terrain / entity kind values inside a snapshot (exact-union regression guard)', () => {
+    expect(isWorldSnapshot({ ...validWorldSnapshot, tiles: [{ ...validTileState, terrain: 'lava' }] })).toBe(
+      false,
+    );
+    expect(isWorldSnapshot({ ...validWorldSnapshot, entities: [{ ...validEntityState, kind: 'npc' }] })).toBe(
+      false,
+    );
+  });
+
   it('rejects entities that are not an array or that contain a malformed entity', () => {
     expect(isWorldSnapshot({ ...validWorldSnapshot, entities: null })).toBe(false);
     expect(isWorldSnapshot({ ...validWorldSnapshot, entities: {} })).toBe(false);
@@ -211,7 +246,7 @@ describe('isWorldSnapshot', () => {
   it('rejects tiles that are not an array or that contain a malformed tile', () => {
     expect(isWorldSnapshot({ ...validWorldSnapshot, tiles: null })).toBe(false);
     expect(isWorldSnapshot({ ...validWorldSnapshot, tiles: {} })).toBe(false);
-    expect(isWorldSnapshot({ ...validWorldSnapshot, tiles: [{ ...validTileState, terrain: 'water' }] })).toBe(
+    expect(isWorldSnapshot({ ...validWorldSnapshot, tiles: [{ ...validTileState, terrain: 'lava' }] })).toBe(
       false,
     );
     expect(isWorldSnapshot({ ...validWorldSnapshot, tiles: ['grass'] })).toBe(false);

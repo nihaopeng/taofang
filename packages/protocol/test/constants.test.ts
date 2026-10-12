@@ -19,7 +19,7 @@ describe('protocol constants', () => {
     expect(COMMAND_PATH).toBe('/api/command');
   });
 
-  it('exposes the phase-5 world/tile protocol version', () => {
-    expect(PROTOCOL_VERSION).toBe(4);
+  it('exposes the phase-6 protocol version (water / tree vocabulary additions)', () => {
+    expect(PROTOCOL_VERSION).toBe(5);
   });
 });

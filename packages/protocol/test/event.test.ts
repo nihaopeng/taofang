@@ -217,3 +217,27 @@ describe('parseGameEvent', () => {
     );
   });
 });
+
+/**
+ * Type-level exactness guard: `GameEvent` must stay exactly three members. The
+ * literal tuple and the `Exact` comparison fail `tsc` if a member is added or
+ * removed, so "no new event" is enforced by the compiler, not just asserted in
+ * prose.
+ */
+const gameEventTypes = [
+  'entity.spawned',
+  'entity.removed',
+  'transform.changed',
+] as const;
+type ListedGameEventType = (typeof gameEventTypes)[number];
+type Exact<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+
+/** Exported so `noUnusedLocals` cannot swallow the compile-time exactness proof. */
+export const gameEventTypesAreExact: Exact<GameEvent['type'], ListedGameEventType> = true;
+
+describe('GameEvent exact shape', () => {
+  it('is exactly three members and has no catch-all', () => {
+    expect(gameEventTypesAreExact).toBe(true);
+    expect(gameEventTypes).toHaveLength(3);
+  });
+});

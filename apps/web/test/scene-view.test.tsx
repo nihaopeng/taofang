@@ -68,6 +68,8 @@ interface RecordingRuntime {
   mountCalls: number;
   disposeCalls: number;
   options: { worldSize: { width: number; height: number } } | null;
+  /** Every `setFollowTarget` argument the component passed, in order. */
+  followTargets: (string | null)[];
 }
 
 /** A `RenderRuntime` that records frames instead of touching WebGL. */
@@ -77,6 +79,7 @@ function createRecordingRuntime(): RecordingRuntime {
     mountCalls: 0,
     disposeCalls: 0,
     options: null,
+    followTargets: [],
     factory: undefined as unknown as RecordingRuntime['factory'],
     runtime: undefined as unknown as RenderRuntime,
   };
@@ -91,11 +94,25 @@ function createRecordingRuntime(): RecordingRuntime {
       recorder.frames.push(frame);
     },
     update: () => {},
+    setFollowTarget: (nodeId) => {
+      recorder.followTargets.push(nodeId);
+    },
     inspect: (): RenderInspection => ({
       mounted,
       lights: 0,
       ground: false,
-      camera: { left: 0, right: 0, top: 0, bottom: 0 },
+      background: null,
+      groups: 0,
+      shadow: null,
+      camera: {
+        left: 0,
+        right: 0,
+        top: 0,
+        bottom: 0,
+        position: { x: 0, y: 0, z: 0 },
+        forward: { x: 0, y: 0, z: -1 },
+        up: { x: 0, y: 1, z: 0 },
+      },
       nodes: [],
       buckets: [],
     }),
@@ -254,6 +271,41 @@ describe('SceneView wiring', () => {
       const sawTarget = recorder.frames.some((frame) => frameHasType(frame, 'transform.setTarget'));
       expect(sawTarget).toBe(true);
     });
+  });
+
+  it('wires the camera follow target from controlledActorId', async () => {
+    const recorder = createRecordingRuntime();
+    setWorldFetch(async () => fakeResponse(VALID_WORLD_RESPONSE));
+
+    // Before the world is ready there is no runtime, so nothing is followed.
+    render(<SceneView createRuntime={recorder.factory} />);
+    expect(recorder.followTargets).toEqual([]);
+
+    await act(async () => {
+      await loadWorld();
+    });
+
+    await waitFor(() => {
+      expect(recorder.mountCalls).toBe(1);
+    });
+    // The bridge owns node id namespacing; the UI only passes the id through.
+    expect(recorder.followTargets.at(-1)).toBe('entity:entity-a');
+  });
+
+  it('sets a null follow target when the caller controls no actor', async () => {
+    const recorder = createRecordingRuntime();
+    const noActorSnapshot = { ...VALID_SNAPSHOT, controlledActorId: null };
+    setWorldFetch(async () => fakeResponse({ world: noActorSnapshot }));
+    await act(async () => {
+      await loadWorld();
+    });
+
+    render(<SceneView createRuntime={recorder.factory} />);
+
+    await waitFor(() => {
+      expect(recorder.mountCalls).toBe(1);
+    });
+    expect(recorder.followTargets.at(-1)).toBeNull();
   });
 
   it('disposes the runtime on unmount', async () => {
