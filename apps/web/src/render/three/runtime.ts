@@ -221,6 +221,19 @@ export interface RenderInspection {
   lights: number;
   /** Whether the runtime's ground plane is still in the scene. */
   ground: boolean;
+  /**
+   * World-space geometry of the single ground backdrop as plain data, or `null`
+   * after `dispose`. `sizeX`/`sizeZ` are its full extents along world X/Z and
+   * `center` its world position (below the terrain plates). It is sized from the
+   * frustum's projected footprint with an overshoot (see
+   * {@link backdropHalfExtents}). Tests can prove the floor silhouette never
+   * reaches the viewport edge at any yaw or zoom.
+   */
+  backdrop: {
+    sizeX: number;
+    sizeZ: number;
+    center: { x: number; y: number; z: number };
+  } | null;
   /** The scene clear colour as a hex number, or `null` when unset. */
   background: number | null;
   /** Number of prefab groups still parented under `WorldRoot` (0 after `dispose`). */
@@ -495,6 +508,14 @@ export const RENDER_CAMERA = {
   distance: 40,
   /** Extra world units of vertical half-extent so tall props are not clipped. */
   verticalHeadroom: 1,
+  /**
+   * Framing margin: the tight bounds-fit frustum is multiplied by this factor on
+   * both axes. It keeps the world's silhouette off the viewport edge at every
+   * yaw (the fit-driving world corner lands at `|ndc| = 1 / framingMargin`, i.e.
+   * ~0.833 at 1.2, a ~16.7% screen gap). This is a FRAMING decision — how much
+   * air surrounds the world — not a seam fix, and it changes no geometry.
+   */
+  framingMargin: 1.2,
   /** Zoom constraint: smallest magnification (most zoomed out). */
   minZoom: 0.25,
   /** Zoom constraint: largest magnification (most zoomed in). */
@@ -525,6 +546,18 @@ const FALLBACK_COLOUR = 0xe8d5a8;
  * would be the WebGL default opaque black.
  */
 const SCENE_BACKGROUND_COLOUR = 0x1a140e;
+
+/** How far below the world's ground plane the single backdrop mesh sits. */
+const BACKDROP_DROP = 0.3;
+
+/**
+ * How far past the frustum's projected footprint the backdrop is grown. The
+ * floor must read as unbounded, so its silhouette is pushed well off-screen
+ * rather than sized exactly to the visible footprint (which would put the
+ * left/right extremes exactly on the viewport edge at some yaws and clip them
+ * into an inverted-trapezoid look).
+ */
+const BACKDROP_OVERSHOOT = 2;
 
 /**
  * Pixel size used to size the drawing buffer before the canvas has a layout
@@ -716,6 +749,8 @@ function yawFromRotation(rotation: Quaternion): number {
  * camera's own right/up axes, so the fit is correct for yaw too: rotating the
  * rig widens the projected footprint (up to the box diagonal) and the whole
  * world stays visible. A small vertical headroom keeps tall props off the clip
+ * edge, and the symmetric {@link RENDER_CAMERA.framingMargin} then pushes both
+ * axes a little past the tight fit so no silhouette ever touches the viewport
  * edge. The single uniform half-height satisfies both the projected footprint
  * and the canvas aspect, so `halfWidth / halfHeight` always equals the aspect
  * and world-to-screen scale stays uniform (nothing is stretched). Finally the
@@ -760,13 +795,80 @@ export function orthographicBounds(options: {
   const aspect = options.aspect > 0 ? options.aspect : 1;
   const zoom = options.zoom > 0 ? options.zoom : 1;
   const vertical = extentUp + RENDER_CAMERA.verticalHeadroom;
-  const halfHeight = Math.max(vertical, extentRight / aspect) / zoom;
+  // Tight, aspect-preserving bounds fit, then a symmetric framing margin on both
+  // axes so the world silhouette keeps clear of the viewport edge at every yaw.
+  // Dividing by `zoom` keeps a larger zoom closer.
+  const halfHeight =
+    (Math.max(vertical, extentRight / aspect) / zoom) * RENDER_CAMERA.framingMargin;
   const halfWidthFinal = halfHeight * aspect;
   return {
     left: -halfWidthFinal,
     right: halfWidthFinal,
     top: halfHeight,
     bottom: -halfHeight,
+  };
+}
+
+/**
+ * Half-extents (world units on X and Z) of the single ground backdrop that make
+ * the frustum's projected footprint land well inside it, so the floor reads as
+ * unbounded instead of showing a clipped silhouette.
+ *
+ * A yawed orthographic camera viewing a horizontal plane turns the viewport
+ * rectangle into a parallelogram, which is expected. This derives that
+ * parallelogram from the same camera basis {@link orthographicBounds} uses: for
+ * a viewport corner `(u, v)` and backdrop height `H`, the world offset from the
+ * rig focus is
+ *
+ * ```text
+ * x = Δy·cot(pitch)·sin(yaw) + u·cos(yaw) − v·sin(yaw)/sin(pitch)
+ * z = Δy·cot(pitch)·cos(yaw) − u·sin(yaw) − v·cos(yaw)/sin(pitch)
+ * ```
+ *
+ * with `Δy = H − focusY`. Each axis is linear in `u`/`v`, so the maximum over
+ * the four corners is exact for the state (no sampling). The footprint is then
+ * multiplied by `overshoot` (> 1) so the silhouette sits off-screen, and the
+ * world half-extents are added so the backdrop still covers the viewport when
+ * the rig follows a node anywhere inside the world.
+ */
+export function backdropHalfExtents(options: {
+  bounds: RuntimeWorldBounds;
+  aspect: number;
+  pitchDegrees: number;
+  yawDegrees: number;
+  zoom: number;
+  backdropY: number;
+  overshoot?: number;
+}): { halfX: number; halfZ: number } {
+  const pitch = options.pitchDegrees * DEGREES_TO_RADIANS;
+  const sinPitch = Math.sin(pitch);
+  const cotPitch = Math.cos(pitch) / sinPitch;
+  const yaw = options.yawDegrees * DEGREES_TO_RADIANS;
+  const sinYaw = Math.sin(yaw);
+  const cosYaw = Math.cos(yaw);
+
+  const frustum = orthographicBounds({
+    bounds: options.bounds,
+    aspect: options.aspect,
+    pitchDegrees: options.pitchDegrees,
+    yawDegrees: options.yawDegrees,
+    zoom: options.zoom,
+  });
+  const halfWidth = (frustum.right - frustum.left) / 2;
+  const halfHeight = (frustum.top - frustum.bottom) / 2;
+
+  const deltaY = options.backdropY - options.bounds.min.y;
+  const baseX = Math.abs(deltaY * cotPitch * sinYaw);
+  const baseZ = Math.abs(deltaY * cotPitch * cosYaw);
+  const cornerX = halfWidth * Math.abs(cosYaw) + (halfHeight / sinPitch) * Math.abs(sinYaw);
+  const cornerZ = halfWidth * Math.abs(sinYaw) + (halfHeight / sinPitch) * Math.abs(cosYaw);
+
+  const overshoot = options.overshoot ?? 1;
+  const halfWorldX = (options.bounds.max.x - options.bounds.min.x) / 2;
+  const halfWorldZ = (options.bounds.max.z - options.bounds.min.z) / 2;
+  return {
+    halfX: halfWorldX + (baseX + cornerX) * overshoot,
+    halfZ: halfWorldZ + (baseZ + cornerZ) * overshoot,
   };
 }
 
@@ -1352,18 +1454,44 @@ export function createThreeRuntime(options: {
     camera.top = frustum.top;
     camera.bottom = frustum.bottom;
     camera.updateProjectionMatrix();
+    sizeBackdrop();
+  }
+
+  // Single ground backdrop. The geometry stays a unit plane so reframing only
+  // rescales ONE mesh instead of rebuilding/disposing geometry every frame. It
+  // lies in the XZ plane just below the terrain plates and receives shadows.
+  const groundGeometry = new PlaneGeometry(1, 1);
+  const groundMaterial = new MeshStandardMaterial({ color: 0x241c14 });
+  let ground: Mesh | null = new Mesh(groundGeometry, groundMaterial);
+  ground.rotation.x = -Math.PI / 2;
+  ground.position.set(worldCenterX, groundY - BACKDROP_DROP, worldCenterZ);
+  ground.receiveShadow = true;
+  scene.add(ground);
+
+  /**
+   * Grow the single backdrop so the current frustum's projected footprint lands
+   * well inside it (see {@link backdropHalfExtents}). Called from `reframe`, so
+   * every yaw / zoom / aspect change re-covers before the next render. The
+   * overshoot pushes the silhouette off-screen and is what makes the floor read
+   * as unbounded rather than as a clipped trapezoid.
+   */
+  function sizeBackdrop(): void {
+    if (ground === null) {
+      return;
+    }
+    const extents = backdropHalfExtents({
+      bounds,
+      aspect: cameraAspect,
+      pitchDegrees,
+      yawDegrees,
+      zoom,
+      backdropY: ground.position.y,
+      overshoot: BACKDROP_OVERSHOOT,
+    });
+    ground.scale.set(extents.halfX * 2, extents.halfZ * 2, 1);
   }
 
   applyCameraTransform();
-
-  const groundGeometry = new PlaneGeometry(worldWidth, worldDepth);
-  const groundMaterial = new MeshStandardMaterial({ color: 0x241c14 });
-  let ground: Mesh | null = new Mesh(groundGeometry, groundMaterial);
-  // Ground lies in the XZ plane, slightly below the terrain plates.
-  ground.rotation.x = -Math.PI / 2;
-  ground.position.set(worldCenterX, groundY - 0.3, worldCenterZ);
-  ground.receiveShadow = true;
-  scene.add(ground);
 
   const lightsGroup = new Group();
   lightsGroup.name = 'Lights';
@@ -1851,6 +1979,21 @@ export function createThreeRuntime(options: {
       mounted,
       lights: lights.length,
       ground: ground !== null,
+      backdrop:
+        ground === null
+          ? null
+          : {
+              // The backdrop is a unit `PlaneGeometry` scaled on local X/Y, so
+              // the full world extent is the geometry size times the real mesh
+              // scale, read back off the mesh that lives below the terrain.
+              sizeX: groundGeometry.parameters.width * ground.scale.x,
+              sizeZ: groundGeometry.parameters.height * ground.scale.y,
+              center: {
+                x: ground.position.x,
+                y: ground.position.y,
+                z: ground.position.z,
+              },
+            },
       background: scene.background instanceof Color ? scene.background.getHex() : null,
       groups: Object.values(groups).filter((group) => group.parent === worldRoot).length,
       shadow:

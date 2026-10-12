@@ -179,6 +179,7 @@ function createRecordingRuntime(): RecordingRuntime {
       mounted,
       lights: 0,
       ground: false,
+      backdrop: null,
       background: null,
       groups: 0,
       shadow: null,

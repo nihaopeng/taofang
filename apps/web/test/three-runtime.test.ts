@@ -127,6 +127,42 @@ function viewDepth(
   );
 }
 
+function cross(a: Vec3, b: Vec3): Vec3 {
+  return {
+    x: a.y * b.z - a.z * b.y,
+    y: a.z * b.x - a.x * b.z,
+    z: a.x * b.y - a.y * b.x,
+  };
+}
+
+function dot(a: Vec3, b: Vec3): number {
+  return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+function subtract(a: Vec3, b: Vec3): Vec3 {
+  return { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z };
+}
+
+/** Camera right axis in world space (forward × up), rebuilt from plain inspect data. */
+function cameraRight(camera: RenderInspection['camera']): Vec3 {
+  return cross(camera.forward, camera.up);
+}
+
+/** Project a world point to NDC through the orthographic rig's real inspect data. */
+function projectToNdc(
+  point: Vec3,
+  camera: RenderInspection['camera'],
+): { x: number; y: number } {
+  const right = cameraRight(camera);
+  const relative = subtract(point, camera.position);
+  const halfWidth = (camera.right - camera.left) / 2;
+  const halfHeight = (camera.top - camera.bottom) / 2;
+  return {
+    x: dot(relative, right) / halfWidth,
+    y: dot(relative, camera.up) / halfHeight,
+  };
+}
+
 describe('three runtime command execution', () => {
   it('handles all seven primitives in a single frame without throwing', () => {
     const runtime = makeRuntime();
@@ -700,8 +736,10 @@ describe('three runtime lifecycle', () => {
     const runtime = makeRuntime();
     const { camera } = runtime.inspect();
 
-    // The 12-deep ground foreshortens to (12/2)*sin(58) plus 1 unit of headroom.
-    const expectedTop = (12 / 2) * Math.sin((58 * Math.PI) / 180) + 1;
+    // The 12-deep ground foreshortens to (12/2)*sin(58) plus 1 unit of vertical
+    // headroom, then the symmetric framing margin scales both axes.
+    const expectedTop =
+      ((12 / 2) * Math.sin((58 * Math.PI) / 180) + 1) * RENDER_CAMERA.framingMargin;
     expect(camera.top).toBeCloseTo(expectedTop, 6);
     expect(camera.bottom).toBeCloseTo(-expectedTop, 6);
     // Square aspect: halfWidth equals halfHeight.
@@ -731,9 +769,10 @@ describe('three runtime lifecycle', () => {
   });
 
   it('grows the vertical extent to fit a world wider than the canvas aspect, keeping scale uniform', () => {
-    // A portrait canvas (aspect 0.5): the aspect-derived half-width (1.25) would
-    // crop the 12-wide world, so the single uniform scale grows the vertical
-    // bound until halfWidth * matches the full world width.
+    // A portrait canvas (aspect 0.5): the aspect-derived half-width would crop
+    // the 12-wide world, so the single uniform scale grows the vertical bound
+    // until halfWidth matches the full world width. The framing margin then
+    // scales both axes together.
     const bounds = orthographicBounds({
       bounds: BOUNDS,
       aspect: 0.5,
@@ -741,9 +780,10 @@ describe('three runtime lifecycle', () => {
       yawDegrees: 0,
       zoom: 1,
     });
-    expect(bounds.right).toBeCloseTo(6, 6);
-    expect(bounds.left).toBeCloseTo(-6, 6);
-    expect(bounds.top).toBeCloseTo(12, 6);
+    const framing = RENDER_CAMERA.framingMargin;
+    expect(bounds.right).toBeCloseTo(6 * framing, 6);
+    expect(bounds.left).toBeCloseTo(-6 * framing, 6);
+    expect(bounds.top).toBeCloseTo(12 * framing, 6);
     expect(bounds.right / bounds.top).toBeCloseTo(0.5, 6);
   });
 
@@ -1025,6 +1065,133 @@ describe('three runtime rotation stability (phase 9)', () => {
     }
 
     runtime.dispose();
+  });
+});
+
+describe('three runtime unbounded backdrop and framing margin (phase 10)', () => {
+  const MIN_ZOOM = RENDER_CAMERA.minZoom;
+  const FRAMING_NDC = 1 / RENDER_CAMERA.framingMargin;
+
+  /** 12x12 grass tiles whose combined footprint is exactly the world bounds. */
+  function tileWorldFrame(): NodeCreateCommand[] {
+    const frame: NodeCreateCommand[] = [];
+    for (let cellZ = 0; cellZ < 12; cellZ += 1) {
+      for (let cellX = 0; cellX < 12; cellX += 1) {
+        frame.push(
+          createCommand(`tile:${cellX},${cellZ}` as NodeId, 'base', appearanceGrass, {
+            x: cellX - 6 + 0.5,
+            y: 0,
+            z: cellZ - 6 + 0.5,
+          }),
+        );
+      }
+    }
+    return frame;
+  }
+
+  it('keeps the world silhouette off the viewport edge at every yaw, at default and minimum zoom', () => {
+    // The framing margin is a real gap, not decoration. The tight bounds fit
+    // puts the fit-driving corner at |ndc| = 1 / framingMargin; removing the
+    // margin (framingMargin = 1) makes this guard and the sweep below fail.
+    expect(FRAMING_NDC).toBeLessThanOrEqual(0.95);
+
+    const runtime = makeRuntime();
+    runtime.apply(tileWorldFrame());
+
+    for (const zoom of [1, MIN_ZOOM]) {
+      runtime.setZoom(zoom);
+      for (let yaw = 0; yaw < 360; yaw += 15) {
+        runtime.setCameraOrientation({ yawDegrees: yaw });
+        const camera = runtime.inspect().camera;
+        let maxNdc = 0;
+        for (const node of runtime.inspect().nodes) {
+          for (const signX of [-1, 1]) {
+            for (const signZ of [-1, 1]) {
+              const corner: Vec3 = {
+                x: node.world.x + (signX * node.footprintX) / 2,
+                y: node.world.y,
+                z: node.world.z + (signZ * node.footprintZ) / 2,
+              };
+              const ndc = projectToNdc(corner, camera);
+              maxNdc = Math.max(maxNdc, Math.abs(ndc.x), Math.abs(ndc.y));
+            }
+          }
+        }
+        // At zoom 1 the fit is tight, so this is the exact margin bound; at the
+        // most zoomed-out state the world is far smaller on screen.
+        expect(maxNdc).toBeLessThanOrEqual(FRAMING_NDC + 1e-9);
+      }
+    }
+
+    runtime.dispose();
+  });
+
+  it('sizes the single backdrop so the min-zoom frustum footprint always lands well inside it', () => {
+    const runtime = makeRuntime();
+    runtime.setZoom(MIN_ZOOM);
+
+    for (let yaw = 0; yaw < 360; yaw += 15) {
+      runtime.setCameraOrientation({ yawDegrees: yaw });
+      const camera = runtime.inspect().camera;
+      const backdrop = runtime.inspect().backdrop;
+      expect(backdrop).not.toBeNull();
+      if (backdrop === null) {
+        continue;
+      }
+      const right = cameraRight(camera);
+      const halfWidth = (camera.right - camera.left) / 2;
+      const halfHeight = (camera.top - camera.bottom) / 2;
+      const backdropHalfX = backdrop.sizeX / 2;
+      const backdropHalfZ = backdrop.sizeZ / 2;
+
+      for (const u of [-halfWidth, halfWidth]) {
+        for (const v of [-halfHeight, halfHeight]) {
+          // Orthographic ray through the frustum corner: origin on the camera
+          // plane at (u, v), direction = camera forward.
+          const origin: Vec3 = {
+            x: camera.position.x + u * right.x + v * camera.up.x,
+            y: camera.position.y + u * right.y + v * camera.up.y,
+            z: camera.position.z + u * right.z + v * camera.up.z,
+          };
+          const t = (backdrop.center.y - origin.y) / camera.forward.y;
+          expect(t).toBeGreaterThan(0);
+          const hit: Vec3 = {
+            x: origin.x + t * camera.forward.x,
+            y: origin.y + t * camera.forward.y,
+            z: origin.z + t * camera.forward.z,
+          };
+          const offsetX = Math.abs(hit.x - backdrop.center.x);
+          const offsetZ = Math.abs(hit.z - backdrop.center.z);
+          // Strictly inside, so the silhouette is off-screen...
+          expect(offsetX).toBeLessThanOrEqual(backdropHalfX);
+          expect(offsetZ).toBeLessThanOrEqual(backdropHalfZ);
+          // ...and well inside: the edge keeps >20% of its half-extent as gap.
+          expect(offsetX).toBeLessThanOrEqual(backdropHalfX * 0.8);
+          expect(offsetZ).toBeLessThanOrEqual(backdropHalfZ * 0.8);
+        }
+      }
+    }
+
+    runtime.dispose();
+  });
+
+  it('uses one backdrop mesh, below the terrain, released on dispose', () => {
+    const runtime = makeRuntime();
+    const backdrop = runtime.inspect().backdrop;
+    expect(backdrop).not.toBeNull();
+    if (backdrop === null) {
+      return;
+    }
+    // Far larger than a bounds-sized floor (the exact-fit floor was what showed
+    // a clipped inverted trapezoid) and below the terrain plates.
+    expect(backdrop.sizeX).toBeGreaterThan((BOUNDS.max.x - BOUNDS.min.x) * 3);
+    expect(backdrop.sizeZ).toBeGreaterThan((BOUNDS.max.z - BOUNDS.min.z) * 3);
+    expect(backdrop.center.x).toBeCloseTo(0, 6);
+    expect(backdrop.center.z).toBeCloseTo(0, 6);
+    expect(backdrop.center.y).toBeLessThan(BOUNDS.min.y);
+
+    runtime.dispose();
+    expect(runtime.inspect().backdrop).toBeNull();
   });
 });
 
