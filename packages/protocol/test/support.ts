@@ -1,4 +1,21 @@
-import { ProtocolParseError } from '../src/index.ts';
+import { ProtocolParseError, parseActorId, parseEntityId, parseWorldId } from '../src/index.ts';
+import type {
+  CellCoord,
+  EntityRemovedEvent,
+  EntitySpawnedEvent,
+  EntityState,
+  GameEventBatch,
+  GridSpec,
+  MoveIntentCommand,
+  Quat,
+  TileState,
+  Transform,
+  TransformChangedEvent,
+  Vec3,
+  WorldBounds,
+  WorldSnapshot,
+  WorldStreamMessage,
+} from '../src/index.ts';
 
 /** Run `fn`, asserting it throws `ProtocolParseError`, and return the error. */
 export function captureParseError(fn: () => unknown): ProtocolParseError {
@@ -17,64 +34,102 @@ export function captureParseError(fn: () => unknown): ProtocolParseError {
 export const validGameInfo = {
   gameName: 'Starvalley',
   serverVersion: '0.1.0',
-  protocolVersion: 5,
+  protocolVersion: 6,
   serverTime: '2025-01-02T03:04:05.000Z',
 };
 
-export const validTransform = { x: 3, y: 4 };
+export const validVec3: Vec3 = { x: 3, y: 1.5, z: 4 };
 
-export const validTileState = {
-  transform: validTransform,
+/** The identity rotation. A valid `Quat` need not be normalised, but this one is. */
+export const validQuat: Quat = { x: 0, y: 0, z: 0, w: 1 };
+
+export const validTransform: Transform = { position: validVec3, rotation: validQuat };
+
+export const validCellCoord: CellCoord = { x: 2, z: 3 };
+
+export const validTileState: TileState = {
+  cell: validCellCoord,
   terrain: 'grass',
 };
 
-export const validEntityState = {
-  entityId: 'entity-1',
-  actorId: 'actor-1',
+export const validEntityState: EntityState = {
+  entityId: parseEntityId('entity-1'),
+  actorId: parseActorId('actor-1'),
   kind: 'character',
   transform: validTransform,
   visible: true,
 };
 
-export const validWorldSnapshot = {
-  worldId: 'world-1',
-  size: { width: 20, height: 15 },
+export const validWorldBounds: WorldBounds = {
+  min: { x: 0, y: 0, z: 0 },
+  max: { x: 20, y: 1, z: 15 },
+};
+
+export const validGridSpec: GridSpec = {
+  origin: { x: 0, y: 0, z: 0 },
+  width: 20,
+  depth: 15,
+  cellSize: 1,
+};
+
+export const validWorldSnapshot: WorldSnapshot = {
+  worldId: parseWorldId('world-1'),
+  bounds: validWorldBounds,
+  grid: validGridSpec,
   tiles: [validTileState],
   entities: [validEntityState],
-  controlledActorId: 'actor-1',
+  controlledActorId: parseActorId('actor-1'),
   serverTime: '2025-01-02T03:04:05.000Z',
 };
 
 /**
- * The phase-4 snapshot shape: no `worldId`, no `tiles`. Used to prove the
- * incompatible 3 -> 4 change is actually enforced by the exact-key guards.
+ * The phase-6 snapshot shape: a 2D integer `Transform`, `size: WorldSize`, and
+ * `TileState.transform`. Used to prove the 6 -> 7 break (a real 3D transform, a
+ * `WorldBounds`/`GridSpec`, and a position-free `TileState`) is enforced by the
+ * exact-key guards.
  */
-export const phase4WorldSnapshot = {
+export const phase6WorldSnapshot = {
+  worldId: 'world-1',
   size: { width: 20, height: 15 },
+  tiles: [{ transform: { x: 2, y: 3 }, terrain: 'grass' }],
   entities: [validEntityState],
   controlledActorId: 'actor-1',
   serverTime: '2025-01-02T03:04:05.000Z',
 };
 
-export const validActorMoveCommand = { type: 'actor.move', direction: 'north' };
+export const validMoveIntentCommand: MoveIntentCommand = {
+  type: 'actor.moveIntent',
+  movement: { x: 1, z: 0 },
+};
 
-export const validEntitySpawnedEvent = {
+export const validEntitySpawnedEvent: EntitySpawnedEvent = {
   type: 'entity.spawned',
   entity: validEntityState,
 };
 
-export const validEntityRemovedEvent = {
+export const validEntityRemovedEvent: EntityRemovedEvent = {
   type: 'entity.removed',
-  entityId: 'entity-1',
+  entityId: parseEntityId('entity-1'),
 };
 
-export const validTransformChangedEvent = {
+export const validTransformChangedEvent: TransformChangedEvent = {
   type: 'transform.changed',
-  entityId: 'entity-1',
+  entityId: parseEntityId('entity-1'),
   transform: validTransform,
 };
 
-export const validSubmitCommandResponse = {
+export const validGameEventBatch: GameEventBatch = {
   events: [validTransformChangedEvent],
   serverTime: validWorldSnapshot.serverTime,
+};
+
+/** The leading stream frame: the full snapshot, sent first on every connection. */
+export const validSnapshotStreamMessage: Extract<WorldStreamMessage, { type: 'snapshot' }> = {
+  type: 'snapshot',
+  snapshot: validWorldSnapshot,
+};
+
+export const validEventsStreamMessage: Extract<WorldStreamMessage, { type: 'events' }> = {
+  type: 'events',
+  batch: validGameEventBatch,
 };

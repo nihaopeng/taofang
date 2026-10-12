@@ -2,15 +2,16 @@ import {
   COMMAND_PATH,
   GAME_INFO_PATH,
   HEALTH_PATH,
+  STREAM_PATH,
   WORLD_PATH,
   parseGameCommand,
 } from '@starvalley/protocol';
 import type {
   ActorId,
+  GameEventBatch,
   GetGameInfoResponse,
   GetWorldResponse,
   HealthStatus,
-  SubmitCommandResponse,
 } from '@starvalley/protocol';
 import type { GameInfoManager, WorldManager } from '@starvalley/manager';
 
@@ -36,7 +37,7 @@ export interface RouteContext {
 /** A serialized, Protocol-compliant success payload. */
 export interface RouteResponse {
   readonly status: number;
-  readonly body: GetWorldResponse | SubmitCommandResponse | GetGameInfoResponse | HealthStatus;
+  readonly body: GameEventBatch | GetWorldResponse | GetGameInfoResponse | HealthStatus;
 }
 
 /** A declarative route entry: method + path + thin handler. */
@@ -77,21 +78,26 @@ export const ROUTES: readonly RouteDefinition[] = [
     handle: ({ world, actorId, body }) => {
       // Router validates the command envelope (including the `type`
       // discriminant) and forwards it verbatim. It never switches on
-      // `command.type` and never applies movement/world rules: `events` is the
-      // Manager's authoritative delta, and an empty array is a refusal.
+      // `command.type` and never applies movement/world rules: the returned
+      // batch is the Manager's authoritative delta, and an empty `events`
+      // array is a refusal.
       const command = parseGameCommand(body);
-      const result = world.submitCommand({ actorId, command });
-      const responseBody: SubmitCommandResponse = {
-        events: result.events,
-        serverTime: result.serverTime,
-      };
-      return { status: 200, body: responseBody };
+      const batch: GameEventBatch = world.submitIntent({ actorId, command });
+      return { status: 200, body: batch };
     },
   },
 ];
 
+/**
+ * Methods served by the Server-Sent Events stream. `STREAM_PATH` is handled
+ * directly by the transport listener (headers, flush, heartbeat, disconnect)
+ * rather than by a JSON `RouteDefinition`, so it is advertised here but absent
+ * from `ROUTES`.
+ */
+const STREAM_METHODS: readonly string[] = ['GET'];
+
 export function isKnownPath(path: string): boolean {
-  return ROUTES.some((route) => route.path === path);
+  return path === STREAM_PATH || ROUTES.some((route) => route.path === path);
 }
 
 /**
@@ -117,6 +123,10 @@ export function findRoute(path: string, method: string): RouteDefinition | undef
  * even though only the GET handler is registered. POST does not imply HEAD.
  */
 export function allowedMethods(path: string): string[] {
+  if (path === STREAM_PATH) {
+    // A one-way event stream has no HEAD representation to advertise.
+    return [...STREAM_METHODS];
+  }
   const methods = ROUTES.filter((route) => route.path === path).map((route) => route.method);
   if (methods.includes('GET')) {
     methods.push('HEAD');

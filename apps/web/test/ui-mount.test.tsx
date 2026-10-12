@@ -37,6 +37,14 @@ vi.mock('../src/render/three/runtime.ts', () => ({
     apply: () => {},
     update: () => {},
     setFollowTarget: () => {},
+    getCameraState: () => ({
+      pitchDegrees: 58,
+      yawDegrees: 0,
+      zoom: 1,
+      focus: { x: 0, y: 0, z: 0 },
+    }),
+    setCameraOrientation: () => {},
+    setZoom: () => {},
     inspect: () => ({
       mounted: false,
       lights: 0,
@@ -49,6 +57,10 @@ vi.mock('../src/render/three/runtime.ts', () => ({
         right: 0,
         top: 0,
         bottom: 0,
+        pitchDegrees: 58,
+        yawDegrees: 0,
+        zoom: 1,
+        focus: { x: 0, y: 0, z: 0 },
         position: { x: 0, y: 0, z: 0 },
         forward: { x: 0, y: 0, z: -1 },
         up: { x: 0, y: 1, z: 0 },
@@ -78,8 +90,9 @@ const VALID_RESPONSE = { gameInfo: VALID_GAME_INFO };
 const VALID_WORLD_RESPONSE = {
   world: {
     worldId: 'world-1',
-    size: { width: 10, height: 8 },
-    tiles: [{ transform: { x: 0, y: 0 }, terrain: 'grass' }],
+    bounds: { min: { x: -6, y: 0, z: -6 }, max: { x: 6, y: 8, z: 6 } },
+    grid: { origin: { x: -5, y: 0, z: -5 }, width: 10, depth: 10, cellSize: 1 },
+    tiles: [{ cell: { x: 0, z: 0 }, terrain: 'grass' }],
     entities: [],
     controlledActorId: null,
     serverTime: VALID_GAME_INFO.serverTime,

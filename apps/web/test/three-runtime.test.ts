@@ -4,8 +4,13 @@
  * These use real Three.js objects but **never call `mount`**, so no WebGL context
  * is required and the suite runs in the default node environment. The scene
  * composition (scene, groups, camera rig, lights, ground) exists from
- * construction, so `apply`, `update`, `setFollowTarget`, and `inspect` cover the
- * whole surface without a GPU.
+ * construction, so `apply`, `update`, `setFollowTarget`, `getCameraState`,
+ * `setCameraOrientation`, `setZoom`, and `inspect` cover the whole surface
+ * without a GPU.
+ *
+ * Phase 7: nodes are placed directly at their authoritative world transforms —
+ * these tests assert world positions and the applied quaternion numerically, and
+ * assert the camera rig's follow/pitch/yaw/zoom through plain inspection data.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -14,8 +19,11 @@ import type {
   AppearanceId,
   NodeCreateCommand,
   NodeId,
+  Quat,
   RenderFrame,
   RenderLayer,
+  RenderTransform,
+  Vec3,
 } from '@starvalley/render-protocol';
 
 import { BRIDGE_APPEARANCES } from '../src/render/bridge.ts';
@@ -36,10 +44,27 @@ const appearancePath = 'appearance.terrain.path' as AppearanceId;
 const appearanceWater = 'appearance.terrain.water' as AppearanceId;
 const appearanceBlocked = 'appearance.terrain.blocked' as AppearanceId;
 
-const WORLD_SIZE = { width: 10, height: 10 } as const;
+/** Default 12x12 ground, 8 units tall, centred on the world origin. */
+const BOUNDS = { min: { x: -6, y: 0, z: -6 }, max: { x: 6, y: 8, z: 6 } } as const;
 
-function makeRuntime(worldSize: { width: number; height: number } = WORLD_SIZE): RenderRuntime {
-  return createThreeRuntime({ worldSize });
+const IDENTITY: Quat = { x: 0, y: 0, z: 0, w: 1 };
+const UNIT_SCALE: Vec3 = { x: 1, y: 1, z: 1 };
+
+/** Quaternion for a yaw about +Y (the actor heading convention). */
+function yawQuat(degrees: number): Quat {
+  const half = (degrees * Math.PI) / 360;
+  return { x: 0, y: Math.sin(half), z: 0, w: Math.cos(half) };
+}
+
+function transform(
+  position: Vec3 = { x: 0, y: 0, z: 0 },
+  rotation: Quat = IDENTITY,
+): RenderTransform {
+  return { position, rotation, scale: { ...UNIT_SCALE } };
+}
+
+function makeRuntime(bounds: { min: Vec3; max: Vec3 } = BOUNDS): RenderRuntime {
+  return createThreeRuntime({ bounds });
 }
 
 /** `node.create` with the layer supplied explicitly and sensible defaults. */
@@ -47,11 +72,18 @@ function createCommand(
   nodeId: NodeId,
   layer: RenderLayer,
   appearance: AppearanceId = appearanceCharacter,
-  x = 0,
-  y = 0,
+  position: Vec3 = { x: 0, y: 0, z: 0 },
+  rotation: Quat = IDENTITY,
   visible = true,
 ): NodeCreateCommand {
-  return { type: 'node.create', layer, nodeId, appearance, transform: { x, y }, visible };
+  return {
+    type: 'node.create',
+    layer,
+    nodeId,
+    appearance,
+    transform: transform(position, rotation),
+    visible,
+  };
 }
 
 function findNode(runtime: RenderRuntime, nodeId: NodeId): RenderInspection['nodes'][number] {
@@ -66,18 +98,30 @@ function bucketCount(runtime: RenderRuntime, key: string): number {
   return runtime.inspect().buckets.find((bucket) => bucket.key === key)?.count ?? 0;
 }
 
+/** Camera-space depth: projection of a world position onto the camera forward axis. */
+function viewDepth(
+  node: RenderInspection['nodes'][number],
+  camera: RenderInspection['camera'],
+): number {
+  return (
+    (node.world.x - camera.position.x) * camera.forward.x +
+    (node.world.y - camera.position.y) * camera.forward.y +
+    (node.world.z - camera.position.z) * camera.forward.z
+  );
+}
+
 describe('three runtime command execution', () => {
   it('handles all seven primitives in a single frame without throwing', () => {
     const runtime = makeRuntime();
     const frame: RenderFrame = [
-      createCommand(nodeA, 'object', appearanceCharacter, 0, 0),
-      createCommand(nodeB, 'object', appearanceCharacter, 1, 1),
-      { type: 'transform.set', nodeId: nodeA, transform: { x: 1, y: 1 } },
+      createCommand(nodeA, 'object', appearanceCharacter, { x: 0, y: 0, z: 0 }),
+      createCommand(nodeB, 'object', appearanceCharacter, { x: 1, y: 0, z: 1 }),
+      { type: 'transform.set', nodeId: nodeA, transform: transform({ x: 1, y: 0, z: 1 }) },
       {
         type: 'transform.setTarget',
         nodeId: nodeA,
-        transform: { x: 2, y: 2 },
-        durationMs: 150,
+        transform: transform({ x: 2, y: 0, z: 2 }, yawQuat(90)),
+        durationMs: 50,
       },
       { type: 'appearance.set', nodeId: nodeA, appearance: appearanceTree },
       { type: 'visibility.set', nodeId: nodeB, visible: false },
@@ -121,9 +165,9 @@ describe('three runtime command execution', () => {
 
   it('reflects animation.play in inspect() and changes on a later command', () => {
     const runtime = makeRuntime();
-    runtime.apply([createCommand(nodeA, 'object', appearanceCharacter, 0, 0)]);
+    runtime.apply([createCommand(nodeA, 'object', appearanceCharacter)]);
 
-    // A fresh node is at rest: the bridge only emits walk/idle transitions.
+    // A fresh node is at rest: the bridge only emits walk transitions.
     expect(findNode(runtime, nodeA).animation).toBe('idle');
 
     runtime.apply([
@@ -161,107 +205,129 @@ describe('three runtime command execution', () => {
   });
 });
 
-describe('three runtime coordinate mapping', () => {
-  it('maps tile (x, y) to scene (x, 0, y) and inverts it from the real Object3D', () => {
+describe('three runtime world-space placement', () => {
+  it('places a node exactly at its authoritative world position (no tile mapping, no inversion)', () => {
     const runtime = makeRuntime();
-    runtime.apply([createCommand(nodeA, 'object', appearanceCharacter, 3, 4)]);
+    runtime.apply([
+      createCommand(nodeA, 'object', appearanceCharacter, { x: 3, y: 1.5, z: -4 }),
+    ]);
 
-    // Tile -> scene is scene.z = tile.y. inspect() inverts that from the actual
-    // object, so changing the mapping (e.g. dropping the mapping) fails here.
+    // Every axis is reported verbatim; a leftover tile->scene mapping or an
+    // axis flip would change one of these literals.
     const node = findNode(runtime, nodeA);
-    expect(node.x).toBe(3);
-    expect(node.y).toBe(4);
-    expect(node.depth).toBe(4);
+    expect(node.world).toEqual({ x: 3, y: 1.5, z: -4 });
 
     runtime.dispose();
   });
 
-  it('reads an interpolated position back off the object, not off bookkeeping', () => {
+  it('applies the authoritative quaternion directly and reports its yaw', () => {
     const runtime = makeRuntime();
-    runtime.apply([createCommand(nodeA, 'object', appearanceCharacter, 0, 0)]);
     runtime.apply([
-      { type: 'transform.setTarget', nodeId: nodeA, transform: { x: 10, y: 20 }, durationMs: 100 },
+      createCommand(nodeA, 'object', appearanceCharacter, { x: 0, y: 0, z: 0 }, yawQuat(90)),
     ]);
 
-    runtime.update(1000);
-    runtime.update(1050);
-
     const node = findNode(runtime, nodeA);
-    expect(node.x).toBeCloseTo(5);
-    expect(node.y).toBeCloseTo(10);
+    expect(node.rotation.x).toBeCloseTo(0, 9);
+    expect(node.rotation.y).toBeCloseTo(Math.SQRT1_2, 9);
+    expect(node.rotation.w).toBeCloseTo(Math.SQRT1_2, 9);
+    // yaw 0 faces +Z; a 90-degree turn about +Y reads back numerically.
+    expect(node.yaw).toBeCloseTo(Math.PI / 2, 9);
 
     runtime.dispose();
   });
 
-  it('derives presentation-only facing from the visual movement delta', () => {
+  it('separates the base and object layers by render order, never by position', () => {
     const runtime = makeRuntime();
-    runtime.apply([createCommand(nodeA, 'object', appearanceCharacter, 0, 0)]);
-    expect(findNode(runtime, nodeA).yaw).toBe(0);
-
-    // Move east (+x): local +z front should rotate toward +π/2.
     runtime.apply([
-      { type: 'transform.setTarget', nodeId: nodeA, transform: { x: 8, y: 0 }, durationMs: 100 },
+      createCommand('tile:5,5' as NodeId, 'base', appearanceGrass, { x: 5, y: 0, z: 5 }),
+      createCommand('entity:actor' as NodeId, 'object', appearanceCharacter, { x: 5, y: 0, z: 5 }),
     ]);
-    runtime.update(0);
-    runtime.update(100);
 
-    expect(findNode(runtime, nodeA).yaw).toBeGreaterThan(0);
-    expect(findNode(runtime, nodeA).yaw).toBeLessThanOrEqual(Math.PI / 2 + 1e-6);
+    const base = findNode(runtime, 'tile:5,5' as NodeId);
+    const object = findNode(runtime, 'entity:actor' as NodeId);
+    // Same world position: occlusion is the depth buffer's job.
+    expect(base.world).toEqual(object.world);
+    // Draw order is the documented coarse rule.
+    expect(base.renderOrder).toBeLessThan(object.renderOrder);
 
     runtime.dispose();
   });
 });
 
 describe('three runtime transforms', () => {
-  it('applies transform.set instantly', () => {
+  it('applies transform.set instantly (position and rotation)', () => {
     const runtime = makeRuntime();
-    runtime.apply([createCommand(nodeA, 'object', appearanceCharacter, 0, 0)]);
+    runtime.apply([createCommand(nodeA, 'object', appearanceCharacter)]);
 
-    runtime.apply([{ type: 'transform.set', nodeId: nodeA, transform: { x: 5, y: 6 } }]);
+    runtime.apply([
+      {
+        type: 'transform.set',
+        nodeId: nodeA,
+        transform: transform({ x: 5, y: 6, z: 7 }, yawQuat(180)),
+      },
+    ]);
 
-    expect(findNode(runtime, nodeA)).toMatchObject({ x: 5, y: 6 });
+    const node = findNode(runtime, nodeA);
+    expect(node.world).toEqual({ x: 5, y: 6, z: 7 });
+    expect(Math.abs(node.yaw)).toBeCloseTo(Math.PI, 9);
     runtime.dispose();
   });
 
-  it('interpolates a transform.setTarget toward the target and reaches it', () => {
+  it('interpolates transform.setTarget position AND rotation and reaches both', () => {
     const runtime = makeRuntime();
-    runtime.apply([createCommand(nodeA, 'object', appearanceCharacter, 0, 0)]);
+    runtime.apply([createCommand(nodeA, 'object', appearanceCharacter)]);
     runtime.apply([
-      { type: 'transform.setTarget', nodeId: nodeA, transform: { x: 10, y: 20 }, durationMs: 100 },
+      {
+        type: 'transform.setTarget',
+        nodeId: nodeA,
+        transform: transform({ x: 10, y: 4, z: 20 }, yawQuat(90)),
+        durationMs: 100,
+      },
     ]);
 
     // The first update establishes the interpolation start; no clock is read in apply.
     runtime.update(1000);
-    expect(findNode(runtime, nodeA)).toMatchObject({ x: 0, y: 0 });
+    expect(findNode(runtime, nodeA).world).toEqual({ x: 0, y: 0, z: 0 });
 
     runtime.update(1050);
-    expect(findNode(runtime, nodeA).x).toBeCloseTo(5);
-    expect(findNode(runtime, nodeA).y).toBeCloseTo(10);
+    const mid = findNode(runtime, nodeA);
+    expect(mid.world.x).toBeCloseTo(5);
+    expect(mid.world.y).toBeCloseTo(2);
+    expect(mid.world.z).toBeCloseTo(10);
+    expect(mid.yaw).toBeCloseTo(Math.PI / 4, 6);
 
     runtime.update(1100);
-    expect(findNode(runtime, nodeA).x).toBeCloseTo(10);
-    expect(findNode(runtime, nodeA).y).toBeCloseTo(20);
+    const done = findNode(runtime, nodeA);
+    expect(done.world).toEqual({ x: 10, y: 4, z: 20 });
+    expect(done.yaw).toBeCloseTo(Math.PI / 2, 9);
 
     // Once it reaches the authoritative target it stays there.
     runtime.update(2000);
-    expect(findNode(runtime, nodeA)).toMatchObject({ x: 10, y: 20 });
+    expect(findNode(runtime, nodeA).world).toEqual({ x: 10, y: 4, z: 20 });
 
     runtime.dispose();
   });
 
   it('cancels interpolation when a transform.set snaps mid-flight', () => {
     const runtime = makeRuntime();
-    runtime.apply([createCommand(nodeA, 'object', appearanceCharacter, 0, 0)]);
+    runtime.apply([createCommand(nodeA, 'object', appearanceCharacter)]);
     runtime.apply([
-      { type: 'transform.setTarget', nodeId: nodeA, transform: { x: 10, y: 0 }, durationMs: 100 },
+      {
+        type: 'transform.setTarget',
+        nodeId: nodeA,
+        transform: transform({ x: 10, y: 0, z: 0 }),
+        durationMs: 100,
+      },
     ]);
     runtime.update(0);
     runtime.update(50);
 
-    runtime.apply([{ type: 'transform.set', nodeId: nodeA, transform: { x: 99, y: 99 } }]);
+    runtime.apply([
+      { type: 'transform.set', nodeId: nodeA, transform: transform({ x: 99, y: 1, z: 99 }) },
+    ]);
     runtime.update(200);
 
-    expect(findNode(runtime, nodeA)).toMatchObject({ x: 99, y: 99 });
+    expect(findNode(runtime, nodeA).world).toEqual({ x: 99, y: 1, z: 99 });
     runtime.dispose();
   });
 });
@@ -269,9 +335,14 @@ describe('three runtime transforms', () => {
 describe('three runtime animation completion', () => {
   it('returns to the prefab default animation and to rest when a move interpolation completes', () => {
     const runtime = makeRuntime();
-    runtime.apply([createCommand(nodeA, 'object', appearanceCharacter, 0, 0)]);
+    runtime.apply([createCommand(nodeA, 'object', appearanceCharacter)]);
     runtime.apply([
-      { type: 'transform.setTarget', nodeId: nodeA, transform: { x: 10, y: 0 }, durationMs: 100 },
+      {
+        type: 'transform.setTarget',
+        nodeId: nodeA,
+        transform: transform({ x: 10, y: 0, z: 0 }),
+        durationMs: 100,
+      },
     ]);
     runtime.apply([
       { type: 'animation.play', nodeId: nodeA, animation: 'walk' as never, loop: true },
@@ -288,13 +359,11 @@ describe('three runtime animation completion', () => {
 
     // Advance past the interpolation duration. The runtime owns the end of the
     // move, so it resets to the prefab default. Removing that reset leaves the
-    // node on `walk` and the nowMs-driven bob running forever — the reported
-    // artefact — so the very next assertion fails.
+    // node on `walk` and the nowMs-driven bob running forever.
     runtime.update(100);
     expect(findNode(runtime, nodeA).animation).toBe('idle');
 
-    // Let the placeholder motion settle: no residual bob/roll at rest, and no
-    // oscillation as the clock keeps advancing.
+    // Let the placeholder motion settle: no residual bob/roll at rest.
     for (let t = 120; t <= 2000; t += 20) {
       runtime.update(t);
     }
@@ -307,13 +376,15 @@ describe('three runtime animation completion', () => {
 
   it('ends a walk on an instant transform.set as well as on interpolation completion', () => {
     const runtime = makeRuntime();
-    runtime.apply([createCommand(nodeA, 'object', appearanceCharacter, 0, 0)]);
+    runtime.apply([createCommand(nodeA, 'object', appearanceCharacter)]);
     runtime.apply([
       { type: 'animation.play', nodeId: nodeA, animation: 'walk' as never, loop: true },
     ]);
     expect(findNode(runtime, nodeA).animation).toBe('walk');
 
-    runtime.apply([{ type: 'transform.set', nodeId: nodeA, transform: { x: 9, y: 9 } }]);
+    runtime.apply([
+      { type: 'transform.set', nodeId: nodeA, transform: transform({ x: 9, y: 0, z: 9 }) },
+    ]);
 
     expect(findNode(runtime, nodeA).animation).toBe('idle');
     runtime.dispose();
@@ -321,145 +392,203 @@ describe('three runtime animation completion', () => {
 });
 
 describe('three runtime depth and occlusion', () => {
-  /** The real 10x10 map shape: terrain everywhere, two trees, the actor. */
+  /** A 12x12 ground of plates plus two trees and the actor, all in world space. */
   function makeWorldFrame(): RenderFrame {
     const frame: NodeCreateCommand[] = [];
-    for (let y = 0; y < 10; y += 1) {
-      for (let x = 0; x < 10; x += 1) {
+    for (let cellZ = 0; cellZ < 12; cellZ += 1) {
+      for (let cellX = 0; cellX < 12; cellX += 1) {
         let appearance = appearanceGrass;
-        if (x === 3 && y === 3) {
+        if (cellX === 3 && cellZ === 3) {
           appearance = appearanceWater;
-        } else if (x === 2 && y === 8) {
+        } else if (cellX === 2 && cellZ === 8) {
           appearance = appearanceBlocked;
-        } else if (y === 1 || y === 6) {
+        } else if (cellZ === 1 || cellZ === 6) {
           appearance = appearancePath;
         }
-        frame.push(createCommand(`tile:${x},${y}` as NodeId, 'base', appearance, x, y));
+        frame.push(
+          createCommand(
+            `tile:${cellX},${cellZ}` as NodeId,
+            'base',
+            appearance,
+            { x: cellX - 6, y: 0, z: cellZ - 6 },
+          ),
+        );
       }
     }
-    frame.push(createCommand('entity:tree-1' as NodeId, 'object', appearanceTree, 6, 4));
-    frame.push(createCommand('entity:tree-2' as NodeId, 'object', appearanceTree, 4, 7));
-    frame.push(createCommand('entity:actor' as NodeId, 'object', appearanceCharacter, 5, 5));
+    frame.push(
+      createCommand('entity:tree-1' as NodeId, 'object', appearanceTree, { x: 0, y: 0, z: -2 }),
+    );
+    frame.push(
+      createCommand('entity:tree-2' as NodeId, 'object', appearanceTree, { x: -2, y: 0, z: 1 }),
+    );
+    frame.push(
+      createCommand('entity:actor' as NodeId, 'object', appearanceCharacter, { x: -1, y: 0, z: -1 }),
+    );
     return frame;
   }
 
-  it('applies the 10x10 map + entities frame and groups 100 terrain / 2 trees / 1 actor', () => {
+  it('applies the 12x12 map + entities frame and groups 144 terrain / 2 trees / 1 actor', () => {
     const runtime = makeRuntime();
     runtime.apply(makeWorldFrame());
 
     const inspection = runtime.inspect();
-    expect(inspection.nodes).toHaveLength(103);
+    expect(inspection.nodes).toHaveLength(147);
     const countGroup = (group: string): number =>
       inspection.nodes.filter((node) => node.group === group).length;
-    expect(countGroup('Terrain')).toBe(100);
+    expect(countGroup('Terrain')).toBe(144);
     expect(countGroup('WorldObjects')).toBe(2);
     expect(countGroup('Actors')).toBe(1);
 
     runtime.dispose();
   });
 
-  it('resolves occlusion along the real camera view axis: an actor north of a tree is behind it, south is in front', () => {
+  it('resolves occlusion along the real camera view axis from real world positions', () => {
     const runtime = makeRuntime();
     runtime.apply(makeWorldFrame());
 
     const tree = findNode(runtime, 'entity:tree-1' as NodeId);
     const { camera } = runtime.inspect();
-    // Camera-space depth: projection of the world position onto the camera's own
-    // forward axis. A LARGER value is farther from the camera. This is computed
-    // from the real forward vector, so a change to pitch or yaw breaks it (raw
-    // scene `z` could not).
-    const viewDepth = (node: RenderInspection['nodes'][number]): number =>
-      (node.world.x - camera.position.x) * camera.forward.x +
-      (node.world.y - camera.position.y) * camera.forward.y +
-      (node.world.z - camera.position.z) * camera.forward.z;
 
-    // North of the tree -> smaller tile y -> farther along the view axis, so the
-    // tree occludes the actor.
+    // North of the tree (smaller z) -> farther along the view axis, so the tree
+    // occludes the actor.
     runtime.apply([
-      { type: 'transform.set', nodeId: 'entity:actor' as NodeId, transform: { x: 6, y: 3 } },
+      { type: 'transform.set', nodeId: 'entity:actor' as NodeId, transform: transform({ x: 0, y: 0, z: -3 }) },
     ]);
     const north = findNode(runtime, 'entity:actor' as NodeId);
-    expect(viewDepth(north)).toBeGreaterThan(viewDepth(tree));
+    expect(viewDepth(north, camera)).toBeGreaterThan(viewDepth(tree, camera));
 
-    // South of the tree -> larger tile y -> nearer the camera.
+    // South of the tree (larger z) -> nearer the camera.
     runtime.apply([
-      { type: 'transform.set', nodeId: 'entity:actor' as NodeId, transform: { x: 6, y: 5 } },
+      { type: 'transform.set', nodeId: 'entity:actor' as NodeId, transform: transform({ x: 0, y: 0, z: -1 }) },
     ]);
     const south = findNode(runtime, 'entity:actor' as NodeId);
-    expect(viewDepth(south)).toBeLessThan(viewDepth(tree));
-
-    runtime.dispose();
-  });
-
-  it('offsets the base layer behind the object layer at the same tile (depth, not pixels)', () => {
-    const runtime = makeRuntime();
-    runtime.apply([
-      createCommand('tile:5,5' as NodeId, 'base', appearanceGrass, 5, 5),
-      createCommand('entity:actor' as NodeId, 'object', appearanceCharacter, 5, 5),
-    ]);
-
-    const base = findNode(runtime, 'tile:5,5' as NodeId);
-    const object = findNode(runtime, 'entity:actor' as NodeId);
-    // Same tile row, but the base layer carries a depth offset away from the camera.
-    expect(base.y).toBeCloseTo(5);
-    expect(object.y).toBeCloseTo(5);
-    expect(base.depth).toBeLessThan(object.depth);
+    expect(viewDepth(south, camera)).toBeLessThan(viewDepth(tree, camera));
 
     runtime.dispose();
   });
 });
 
-describe('three runtime camera follow', () => {
-  it('moves the camera toward the followed node and stops when the target is null', () => {
+describe('three runtime camera rig', () => {
+  it('exposes the default stance as plain data', () => {
     const runtime = makeRuntime();
-    runtime.apply([createCommand('entity:actor' as NodeId, 'object', appearanceCharacter, 5, 5)]);
+    const state = runtime.getCameraState();
+    expect(state.pitchDegrees).toBe(RENDER_CAMERA.pitchDegrees);
+    expect(state.yawDegrees).toBe(0);
+    expect(state.zoom).toBe(1);
+    expect(state.focus).toEqual({ x: 0, y: 0, z: 0 });
 
-    const before = runtime.inspect().camera.position;
-    // The camera rig starts at the world centre (4.5, 4.5); the camera itself
-    // sits `distance * cos(pitch)` above it on +z.
-    const zOffset = RENDER_CAMERA.distance * Math.cos((RENDER_CAMERA.pitchDegrees * Math.PI) / 180);
-    expect(before.x).toBeCloseTo(4.5);
-    expect(before.z).toBeCloseTo(4.5 + zOffset);
+    runtime.dispose();
+  });
+
+  it('follows the controlled node with smoothing and stops when the target is null', () => {
+    const runtime = makeRuntime();
+    runtime.apply([
+      createCommand('entity:actor' as NodeId, 'object', appearanceCharacter, { x: 5, y: 0, z: 5 }),
+    ]);
+
+    const before = runtime.inspect().camera.focus;
+    expect(before).toEqual({ x: 0, y: 0, z: 0 });
 
     runtime.setFollowTarget('entity:actor' as NodeId);
     runtime.update(0);
     runtime.update(200);
-    const moving = runtime.inspect().camera.position;
-    expect(moving.x).toBeGreaterThan(before.x);
+    const moving = runtime.inspect().camera.focus;
+    expect(moving.x).toBeGreaterThan(0);
     expect(moving.x).toBeLessThanOrEqual(5);
 
     for (let t = 400; t <= 3000; t += 100) {
       runtime.update(t);
     }
-    expect(runtime.inspect().camera.position.x).toBeCloseTo(5);
+    expect(runtime.inspect().camera.focus.x).toBeCloseTo(5);
+    expect(runtime.inspect().camera.focus.z).toBeCloseTo(5);
 
-    // A null target stops the follow without moving the camera.
+    // A null target stops the follow without moving the camera focus.
     runtime.setFollowTarget(null);
-    const frozen = runtime.inspect().camera.position;
+    const frozen = runtime.inspect().camera.focus;
     runtime.update(3100);
     runtime.update(4000);
-    expect(runtime.inspect().camera.position).toEqual(frozen);
+    expect(runtime.inspect().camera.focus).toEqual(frozen);
 
     runtime.dispose();
   });
 
-  it('follows a node after it is snapped to a new tile', () => {
+  it('follows a node after it is snapped to a new world position', () => {
     const runtime = makeRuntime();
-    runtime.apply([createCommand('entity:actor' as NodeId, 'object', appearanceCharacter, 5, 5)]);
+    runtime.apply([
+      createCommand('entity:actor' as NodeId, 'object', appearanceCharacter, { x: 0, y: 0, z: 0 }),
+    ]);
     runtime.setFollowTarget('entity:actor' as NodeId);
     runtime.update(0);
     for (let t = 100; t <= 1000; t += 100) {
       runtime.update(t);
     }
-    expect(runtime.inspect().camera.position.x).toBeCloseTo(5);
+    expect(runtime.inspect().camera.focus.x).toBeCloseTo(0);
 
     runtime.apply([
-      { type: 'transform.set', nodeId: 'entity:actor' as NodeId, transform: { x: 8, y: 5 } },
+      { type: 'transform.set', nodeId: 'entity:actor' as NodeId, transform: transform({ x: 8, y: 0, z: 0 }) },
     ]);
     for (let t = 1100; t <= 3000; t += 100) {
       runtime.update(t);
     }
-    expect(runtime.inspect().camera.position.x).toBeCloseTo(8);
+    expect(runtime.inspect().camera.focus.x).toBeCloseTo(8);
+
+    runtime.dispose();
+  });
+
+  it('clamps pitch into the constrained range', () => {
+    const runtime = makeRuntime();
+
+    runtime.setCameraOrientation({ pitchDegrees: 5 });
+    expect(runtime.getCameraState().pitchDegrees).toBe(RENDER_CAMERA.minPitchDegrees);
+
+    runtime.setCameraOrientation({ pitchDegrees: 120 });
+    expect(runtime.getCameraState().pitchDegrees).toBe(RENDER_CAMERA.maxPitchDegrees);
+
+    runtime.setCameraOrientation({ pitchDegrees: 45 });
+    expect(runtime.getCameraState().pitchDegrees).toBe(45);
+    expect(runtime.inspect().camera.pitchDegrees).toBe(45);
+
+    runtime.dispose();
+  });
+
+  it('yaws the view without changing world coordinates, and normalises yaw', () => {
+    const runtime = makeRuntime();
+    runtime.apply([
+      createCommand(nodeA, 'object', appearanceCharacter, { x: 3, y: 0, z: -4 }),
+    ]);
+    const before = findNode(runtime, nodeA);
+    const forwardAtZero = runtime.inspect().camera.forward;
+
+    runtime.setCameraOrientation({ yawDegrees: 90 });
+    const after = findNode(runtime, nodeA);
+    const forwardAtNinety = runtime.inspect().camera.forward;
+
+    // The node did not move: yaw rotates the rig, not the world.
+    expect(after.world).toEqual(before.world);
+    expect(forwardAtNinety).not.toEqual(forwardAtZero);
+    expect(forwardAtNinety.x).toBeCloseTo(-Math.cos((58 * Math.PI) / 180), 6);
+    expect(forwardAtNinety.z).toBeCloseTo(0, 6);
+
+    runtime.setCameraOrientation({ yawDegrees: -90 });
+    expect(runtime.getCameraState().yawDegrees).toBe(270);
+
+    runtime.dispose();
+  });
+
+  it('changes the frustum extent with zoom, clamped to the rig limits', () => {
+    const runtime = makeRuntime();
+    const base = runtime.inspect().camera;
+
+    runtime.setZoom(2);
+    const zoomedIn = runtime.inspect().camera;
+    expect(zoomedIn.top).toBeCloseTo(base.top / 2, 9);
+    expect(zoomedIn.zoom).toBe(2);
+
+    runtime.setZoom(100);
+    expect(runtime.getCameraState().zoom).toBe(RENDER_CAMERA.maxZoom);
+
+    runtime.setZoom(0);
+    expect(runtime.getCameraState().zoom).toBe(RENDER_CAMERA.minZoom);
 
     runtime.dispose();
   });
@@ -477,15 +606,11 @@ describe('three runtime shadows', () => {
     const inspection = runtime.inspect();
     expect(inspection.lights).toBe(2);
 
-    // Asserted from inspection data (flags/map size), never by rendering pixels.
     expect(inspection.shadow).not.toBeNull();
     expect(inspection.shadow?.sunCasts).toBe(true);
     expect(inspection.shadow?.mapWidth).toBe(1024);
     expect(inspection.shadow?.mapHeight).toBe(1024);
 
-    // These flags are measured by traversing the created visual, not copied from
-    // the prefab record. Deleting `receiveShadow = true` in `createPlate` or the
-    // tree's `castShadow = true` now changes them and fails this test.
     const grass = findNode(runtime, 'tile:0,0' as NodeId);
     expect(grass.receivesShadow).toBe(true);
     expect(grass.castsShadow).toBe(false);
@@ -501,7 +626,6 @@ describe('three runtime shadows', () => {
 describe('three runtime lifecycle', () => {
   it('removes the scene background on dispose so a remount cannot inherit it', () => {
     const runtime = makeRuntime();
-    // Same family as the canvas/page background in ui/styles.css.
     expect(runtime.inspect().background).toBe(0x1a140e);
 
     runtime.dispose();
@@ -526,8 +650,6 @@ describe('three runtime lifecycle', () => {
 
     runtime.dispose();
 
-    // dispose() must remove *everything* the runtime created, otherwise a
-    // StrictMode remount stacks a second pair of lights (doubled lighting).
     const after = runtime.inspect();
     expect(after.lights).toBe(0);
     expect(after.ground).toBe(false);
@@ -544,28 +666,31 @@ describe('three runtime lifecycle', () => {
   });
 
   it('frames the world with the tilted-orthographic projection and a literal top bound', () => {
-    const worldSize = { width: 10, height: 10 } as const;
-    const runtime = makeRuntime(worldSize);
+    const runtime = makeRuntime();
     const { camera } = runtime.inspect();
 
-    // LITERAL: halfHeight = (10 / 2) * sin(58 deg) + 1 = 5.24024...  Pinning the
-    // literal (rather than only re-calling `orthographicBounds`) catches a change
-    // to the pitch or the headroom.
-    expect(camera.top).toBeCloseTo(5.2402, 3);
-    expect(camera.bottom).toBeCloseTo(-5.2402, 3);
-    // Square default canvas aspect: halfWidth equals halfHeight.
-    expect(camera.left).toBeCloseTo(-5.2402, 3);
-    expect(camera.right).toBeCloseTo(5.2402, 3);
+    // The 12-deep ground foreshortens to (12/2)*sin(58) plus 1 unit of headroom.
+    const expectedTop = (12 / 2) * Math.sin((58 * Math.PI) / 180) + 1;
+    expect(camera.top).toBeCloseTo(expectedTop, 6);
+    expect(camera.bottom).toBeCloseTo(-expectedTop, 6);
+    // Square aspect: halfWidth equals halfHeight.
+    expect(camera.left).toBeCloseTo(-expectedTop, 6);
+    expect(camera.right).toBeCloseTo(expectedTop, 6);
 
-    // Frozen stance: front-facing (no yaw), pitched down by exactly 58 degrees.
-    // A pitch or yaw change moves this literal forward vector.
+    // Frozen default stance: yaw 0, pitched down by exactly 58 degrees.
     expect(camera.forward.x).toBeCloseTo(0, 6);
     expect(camera.forward.y).toBeCloseTo(-Math.sin((58 * Math.PI) / 180), 6);
     expect(camera.forward.z).toBeCloseTo(-Math.cos((58 * Math.PI) / 180), 6);
     expect(camera.up.y).toBeGreaterThan(0);
 
     // Cross-check the projection helper for the same arguments.
-    const expected = orthographicBounds({ worldSize, aspect: 1 });
+    const expected = orthographicBounds({
+      bounds: BOUNDS,
+      aspect: 1,
+      pitchDegrees: 58,
+      yawDegrees: 0,
+      zoom: 1,
+    });
     expect(camera.left).toBeCloseTo(expected.left);
     expect(camera.right).toBeCloseTo(expected.right);
     expect(camera.top).toBeCloseTo(expected.top);
@@ -575,15 +700,19 @@ describe('three runtime lifecycle', () => {
   });
 
   it('grows the vertical extent to fit a world wider than the canvas aspect, keeping scale uniform', () => {
-    const worldSize = { width: 10, height: 10 } as const;
-    // A portrait canvas (aspect 0.5): the aspect-derived half-width (2.62) would
-    // crop the 10-wide world, so the single uniform scale grows the vertical
+    // A portrait canvas (aspect 0.5): the aspect-derived half-width (1.25) would
+    // crop the 12-wide world, so the single uniform scale grows the vertical
     // bound until halfWidth * matches the full world width.
-    const bounds = orthographicBounds({ worldSize, aspect: 0.5 });
-    expect(bounds.right).toBeCloseTo(5, 6);
-    expect(bounds.left).toBeCloseTo(-5, 6);
-    expect(bounds.top).toBeCloseTo(10, 6);
-    // Uniform scale: the frustum aspect still equals the canvas aspect.
+    const bounds = orthographicBounds({
+      bounds: BOUNDS,
+      aspect: 0.5,
+      pitchDegrees: 58,
+      yawDegrees: 0,
+      zoom: 1,
+    });
+    expect(bounds.right).toBeCloseTo(6, 6);
+    expect(bounds.left).toBeCloseTo(-6, 6);
+    expect(bounds.top).toBeCloseTo(12, 6);
     expect(bounds.right / bounds.top).toBeCloseTo(0.5, 6);
   });
 
@@ -601,12 +730,19 @@ describe('three runtime buckets', () => {
   it('groups nodes into (layer, appearance) buckets and updates them on appearance.set/node.destroy', () => {
     const runtime = makeRuntime();
     const frame: NodeCreateCommand[] = [];
-    for (let y = 0; y < 10; y += 1) {
-      for (let x = 0; x < 10; x += 1) {
-        frame.push(createCommand(`tile:${x},${y}` as NodeId, 'base', appearanceGrass, x, y));
+    for (let cellZ = 0; cellZ < 10; cellZ += 1) {
+      for (let cellX = 0; cellX < 10; cellX += 1) {
+        frame.push(
+          createCommand(
+            `tile:${cellX},${cellZ}` as NodeId,
+            'base',
+            appearanceGrass,
+            { x: cellX, y: 0, z: cellZ },
+          ),
+        );
       }
     }
-    frame.push(createCommand('entity:actor' as NodeId, 'object', appearanceCharacter, 1, 1));
+    frame.push(createCommand('entity:actor' as NodeId, 'object', appearanceCharacter, { x: 1, y: 0, z: 1 }));
     runtime.apply(frame);
 
     expect(bucketCount(runtime, 'base:appearance.terrain.grass')).toBe(100);
@@ -635,7 +771,7 @@ describe('three runtime buckets', () => {
 
   it('re-buckets and re-parents when appearance.set changes the prefab group', () => {
     const runtime = makeRuntime();
-    runtime.apply([createCommand('entity:x' as NodeId, 'object', appearanceCharacter, 0, 0)]);
+    runtime.apply([createCommand('entity:x' as NodeId, 'object', appearanceCharacter)]);
     expect(findNode(runtime, 'entity:x' as NodeId).group).toBe('Actors');
 
     runtime.apply([
@@ -654,15 +790,12 @@ describe('three runtime terrain shape cue', () => {
   it('gives path an opaque geometric cue beyond colour: a raised inlay taller than grass', () => {
     const runtime = makeRuntime();
     runtime.apply([
-      createCommand('tile:0,0' as NodeId, 'base', appearanceGrass, 0, 0),
-      createCommand('tile:1,0' as NodeId, 'base', appearancePath, 1, 0),
+      createCommand('tile:0,0' as NodeId, 'base', appearanceGrass, { x: 0, y: 0, z: 0 }),
+      createCommand('tile:1,0' as NodeId, 'base', appearancePath, { x: 1, y: 0, z: 0 }),
     ]);
 
     const grass = findNode(runtime, 'tile:0,0' as NodeId);
     const path = findNode(runtime, 'tile:1,0' as NodeId);
-    // Measured from the real geometry, not from a colour or a metadata flag. A
-    // colour-only path would have `visualTopY` at or below grass (its base is
-    // recessed), so this fails if the raised inlay is removed.
     expect(grass.visualTopY).toBeCloseTo(0, 6);
     expect(path.visualTopY).toBeGreaterThan(grass.visualTopY);
 

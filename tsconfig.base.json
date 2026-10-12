@@ -19,6 +19,7 @@
     "forceConsistentCasingInFileNames": true,
     "types": [],
     "paths": {
+      "@starvalley/math": ["./packages/math/src/index.ts"],
       "@starvalley/protocol": ["./packages/protocol/src/index.ts"],
       "@starvalley/render-protocol": ["./packages/render-protocol/src/index.ts"],
       "@starvalley/manager": ["./packages/manager/src/index.ts"],

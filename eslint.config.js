@@ -73,6 +73,8 @@ export default tseslint.config(
                 'express',
                 'ws',
                 '@starvalley/*',
+                // The neutral math package is the ONE sibling this contract may import.
+                '!@starvalley/math',
               ],
               message:
                 'protocol must stay framework-neutral and free of runtime dependencies (AGENTS.md: Protocol).',
@@ -293,6 +295,25 @@ export default tseslint.config(
     },
   },
   {
+    // Neutral math primitives: shared by the game contract and the render ISA, so they
+    // must stay free of anything engine-, framework- or semantics-specific.
+    files: ['packages/math/src/**/*.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['node:*', 'react', 'react-dom', 'three', 'three/*', 'vite', '@starvalley/*'],
+              message:
+                'the math package is a neutral primitive library: no engine, no framework, no game/render semantics, no sibling package imports.',
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
     // The render ISA itself: an instruction set, so it must stay framework-free.
     files: ['packages/render-protocol/src/**/*.ts'],
     rules: {
@@ -301,7 +322,17 @@ export default tseslint.config(
         {
           patterns: [
             {
-              group: ['node:*', 'react', 'react-dom', 'three', 'three/*', 'vite', '@starvalley/*'],
+              group: [
+                'node:*',
+                'react',
+                'react-dom',
+                'three',
+                'three/*',
+                'vite',
+                '@starvalley/*',
+                // Shared neutral math primitives are the only allowed sibling import.
+                '!@starvalley/math',
+              ],
               message:
                 'the render ISA is executed by many possible runtimes: it must stay framework-free and dependency-free (no Three.js, no React, no Node, no game protocol).',
             },

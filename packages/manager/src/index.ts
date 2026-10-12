@@ -11,13 +11,14 @@ export type { CreateGameInfoManagerDeps, GameInfoManager } from './game-info-man
 
 export {
   BLOCKING_BY_ENTITY_KIND,
+  DEFAULT_ACTOR_RADIUS,
+  DEFAULT_ACTOR_SPEED,
   DEFAULT_WORLD_MAP,
+  TICK_RATE_HZ,
   UnknownActorError,
   WALKABILITY_BY_TERRAIN,
+  cellCentre,
+  cellOf,
   createWorldManager,
 } from './world-manager.ts';
-export type {
-  CreateWorldManagerDeps,
-  SubmitCommandResult,
-  WorldManager,
-} from './world-manager.ts';
+export type { CreateWorldManagerDeps, WorldManager } from './world-manager.ts';

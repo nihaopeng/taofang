@@ -1,32 +1,34 @@
 /**
- * Organizer unit tests for the Phase-5 world feature (tiles + entities).
+ * Organizer unit tests for the Phase-7 continuous-3D world feature.
  *
- * Focuses on the client-application contract: request lifecycle, protocol
- * validation, authoritative-event reconciliation, static-terrain handling,
- * no-optimism, and deterministic command serialization. Transport mechanics are
- * injected through `setWorldFetch`.
+ * Focuses on the client-application contract: the snapshot request lifecycle,
+ * canonical Protocol validation, derivation of tile world positions from the
+ * grid, realtime stream adoption/retry, authoritative-event reconciliation,
+ * derived (never predicted) movement, and deterministic intent serialization.
+ * Both transports are injected: `setWorldFetch` for HTTP and
+ * `setWorldEventSource` for the SSE stream. Nothing here touches a real network.
  *
- * The client is event-driven: a command returns a `{ events, serverTime }` delta
- * and the store applies those events to its entity list. Tiles are static, so no
- * event carries terrain: they only ever change through a fresh snapshot. The move
- * body is exactly `{ type: 'actor.move', direction }`; no actor/player id and no
- * destination coordinate is ever sent.
+ * The client is authoritative-only: a snapshot and a stream `events` frame are the
+ * only things that move an entity; `setMovementIntent` sends a direction and
+ * changes no client position. There is no prediction and no interpolation.
  */
 
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { COMMAND_PATH } from '@starvalley/protocol';
+import { COMMAND_PATH, STREAM_PATH } from '@starvalley/protocol';
 import type { GameEvent } from '@starvalley/protocol';
 
 import {
   getWorldState,
   loadWorld,
-  moveActor,
+  resetWorldEventSource,
   resetWorldFetch,
   resetWorldState,
   setGameInfoFetch,
+  setMovementIntent,
+  setWorldEventSource,
   setWorldFetch,
   subscribeWorld,
   useWorld,
@@ -37,72 +39,111 @@ import type { WorldState } from '../src/organizer/index.ts';
 import { applyEvents } from '../src/organizer/world-store.ts';
 
 const SERVER_TIME = '2025-01-02T03:04:05.000Z';
+const WORLD_ID = 'world-main';
+
+// A non-trivial grid origin/cellSize proves the frozen derivation is used and
+// that nothing hardcodes 1-unit cells or a world-origin-bound grid.
+const GRID = {
+  origin: { x: 10, y: 0.5, z: -4 },
+  width: 3,
+  depth: 2,
+  cellSize: 2,
+};
+
+const BOUNDS = {
+  min: { x: 8, y: 0, z: -6 },
+  max: { x: 16, y: 4, z: 1 },
+};
 
 const ENTITY_A = {
   entityId: 'entity-a',
   actorId: 'actor-1',
   kind: 'character',
-  transform: { x: 3, y: 4 },
+  transform: {
+    position: { x: 3, y: 0, z: 4 },
+    rotation: { x: 0, y: 0.5, z: 0, w: 0.866 },
+  },
   visible: true,
 };
 
 const ENTITY_B = {
   entityId: 'entity-b',
   actorId: null,
-  kind: 'character',
-  transform: { x: 1, y: 2 },
+  kind: 'tree',
+  transform: {
+    position: { x: 1, y: 0, z: 2 },
+    rotation: { x: 0, y: 0, z: 0, w: 1 },
+  },
   visible: true,
 };
 
 const ENTITY_C = {
   entityId: 'entity-c',
   actorId: null,
-  kind: 'character',
-  transform: { x: 7, y: 7 },
-  visible: true,
+  kind: 'tree',
+  transform: {
+    position: { x: 7, y: 0, z: 7 },
+    rotation: { x: 0, y: 0, z: 0, w: 1 },
+  },
+  visible: false,
 };
+
+// Deliberately scrambled wire order: the deterministic mapper must re-sort by
+// `cellZ` then `cellX` so the snapshot's tile array does not depend on iteration
+// order. The derived positions use `origin + (cell + 0.5) * cellSize`.
+const TILE_PATH = { cell: { x: 1, z: 0 }, terrain: 'path' };
+const TILE_BLOCKED = { cell: { x: 0, z: 1 }, terrain: 'blocked' };
+const TILE_GRASS = { cell: { x: 0, z: 0 }, terrain: 'grass' };
+
+const TILE_GRASS_VM = {
+  cellX: 0,
+  cellZ: 0,
+  position: { x: 11, y: 0.5, z: -3 },
+  terrain: 'grass',
+};
+const TILE_PATH_VM = {
+  cellX: 1,
+  cellZ: 0,
+  position: { x: 13, y: 0.5, z: -3 },
+  terrain: 'path',
+};
+const TILE_BLOCKED_VM = {
+  cellX: 0,
+  cellZ: 1,
+  position: { x: 11, y: 0.5, z: -1 },
+  terrain: 'blocked',
+};
+const ORDERED_TILES = [TILE_GRASS_VM, TILE_PATH_VM, TILE_BLOCKED_VM];
 
 const ENTITY_A_VM = {
   entityId: 'entity-a',
   actorId: 'actor-1',
   kind: 'character',
-  x: 3,
-  y: 4,
+  position: { x: 3, y: 0, z: 4 },
+  rotation: { x: 0, y: 0.5, z: 0, w: 0.866 },
   visible: true,
 };
 
 const ENTITY_B_VM = {
   entityId: 'entity-b',
   actorId: null,
-  kind: 'character',
-  x: 1,
-  y: 2,
+  kind: 'tree',
+  position: { x: 1, y: 0, z: 2 },
+  rotation: { x: 0, y: 0, z: 0, w: 1 },
   visible: true,
 };
 
-// Deliberately scrambled wire order: the deterministic mapper must re-sort by
-// `y` then `x` so the snapshot's tile array does not depend on iteration order.
-const TILE_PATH = { transform: { x: 1, y: 0 }, terrain: 'path' };
-const TILE_BLOCKED = { transform: { x: 0, y: 1 }, terrain: 'blocked' };
-const TILE_GRASS = { transform: { x: 0, y: 0 }, terrain: 'grass' };
-
-const TILE_GRASS_VM = { x: 0, y: 0, terrain: 'grass' };
-const TILE_PATH_VM = { x: 1, y: 0, terrain: 'path' };
-const TILE_BLOCKED_VM = { x: 0, y: 1, terrain: 'blocked' };
-const ORDERED_TILES = [TILE_GRASS_VM, TILE_PATH_VM, TILE_BLOCKED_VM];
-
-const WORLD_ID = 'world-main';
-
-const VALID_SNAPSHOT = {
+const SNAPSHOT = {
   worldId: WORLD_ID,
-  size: { width: 10, height: 8 },
+  bounds: BOUNDS,
+  grid: GRID,
   tiles: [TILE_PATH, TILE_BLOCKED, TILE_GRASS],
   entities: [ENTITY_A, ENTITY_B],
   controlledActorId: 'actor-1',
   serverTime: SERVER_TIME,
 };
 
-const VALID_WORLD_RESPONSE = { world: VALID_SNAPSHOT };
+const WORLD_RESPONSE = { world: SNAPSHOT };
 
 interface FakeResponseInit {
   ok?: boolean;
@@ -134,18 +175,22 @@ function createDeferred<T>(): {
   return { promise, resolve, reject };
 }
 
-/** Build a valid `SubmitCommandResponse` body from a list of events. */
+/** Build a valid `GameEventBatch` body from a list of events. */
 function commandResponse(events: unknown[]): unknown {
   return { events, serverTime: SERVER_TIME };
 }
 
-/** Build a valid `WorldSnapshot` with the given entities. */
-function snapshotWith(entities: unknown[]): unknown {
-  return { world: { ...VALID_SNAPSHOT, entities } };
+/** Build a valid `WorldSnapshot` envelope with field overrides. */
+function snapshotWith(overrides: Record<string, unknown>): unknown {
+  return { world: { ...SNAPSHOT, ...overrides } };
 }
 
-function transformChanged(entityId: string, x: number, y: number): unknown {
-  return { type: 'transform.changed', entityId, transform: { x, y } };
+function transformChanged(
+  entityId: string,
+  position: { x: number; y: number; z: number },
+  rotation: { x: number; y: number; z: number; w: number } = { x: 0, y: 0, z: 0, w: 1 },
+): unknown {
+  return { type: 'transform.changed', entityId, transform: { position, rotation } };
 }
 
 function entitySpawned(entity: unknown): unknown {
@@ -156,6 +201,54 @@ function entityRemoved(entityId: string): unknown {
   return { type: 'entity.removed', entityId };
 }
 
+/** A `WorldStreamMessage` carrying an `events` batch. */
+function eventsFrame(events: unknown[]): unknown {
+  return { type: 'events', batch: commandResponse(events) };
+}
+
+/** A `WorldStreamMessage` carrying a full snapshot. */
+function snapshotFrame(snapshot: unknown): unknown {
+  return { type: 'snapshot', snapshot };
+}
+
+/** Test double for `EventSource`, driven synchronously by the test. */
+class FakeEventSource {
+  onopen: ((event: unknown) => void) | null = null;
+  onerror: ((event: unknown) => void) | null = null;
+  closeCalls = 0;
+  private readonly messageListeners: Array<(event: { data: string }) => void> = [];
+
+  constructor(readonly url: string) {}
+
+  addEventListener(type: 'message', listener: (event: { data: string }) => void): void {
+    if (type === 'message') {
+      this.messageListeners.push(listener);
+    }
+  }
+
+  close(): void {
+    this.closeCalls += 1;
+  }
+
+  open(): void {
+    this.onopen?.(undefined);
+  }
+
+  fail(): void {
+    this.onerror?.(undefined);
+  }
+
+  message(payload: unknown): void {
+    const data = typeof payload === 'string' ? payload : JSON.stringify(payload);
+    for (const listener of this.messageListeners) {
+      listener({ data });
+    }
+  }
+}
+
+/** Stream connections created since the last `beforeEach`. */
+let streamSources: FakeEventSource[] = [];
+
 /** Find an entity view model by id (throws if absent). */
 function entity(state: WorldState, entityId: string) {
   const found = state.entities.find((candidate) => candidate.entityId === entityId);
@@ -165,29 +258,38 @@ function entity(state: WorldState, entityId: string) {
   return found;
 }
 
-/** Load a valid world so move tests start from a `ready` state. */
+/** Load a valid world (with an injected stream) so feature tests start `ready`. */
 async function loadValidWorld(): Promise<void> {
-  setWorldFetch(async () => fakeResponse(VALID_WORLD_RESPONSE));
+  setWorldFetch(async () => fakeResponse(WORLD_RESPONSE));
   await loadWorld();
 }
 
 beforeEach(() => {
   resetWorldState();
   resetWorldFetch();
+  resetWorldEventSource();
+  streamSources = [];
+  setWorldEventSource((url) => {
+    const source = new FakeEventSource(url);
+    streamSources.push(source);
+    return source;
+  });
 });
 
 afterEach(() => {
-  // Ensure a deferred/stubbed fetch can never leak into the next test.
-  resetWorldFetch();
+  // Ensure a deferred/stubbed transport or a pending retry can never leak.
   resetWorldState();
+  resetWorldFetch();
+  resetWorldEventSource();
+  vi.useRealTimers();
 });
 
-describe('loadWorld', () => {
-  it('maps worldId/tiles/entities and controlledActorId into ready state with no error', async () => {
+describe('loadWorld snapshot mapping', () => {
+  it('maps worldId/bounds/grid/tiles/entities/controlledActorId into ready state', async () => {
     let calls = 0;
     setWorldFetch(async () => {
       calls += 1;
-      return fakeResponse(VALID_WORLD_RESPONSE);
+      return fakeResponse(WORLD_RESPONSE);
     });
 
     await expect(loadWorld()).resolves.toBeUndefined();
@@ -197,42 +299,47 @@ describe('loadWorld', () => {
     expect(state.status).toBe('ready');
     expect(state.error).toBeNull();
     expect(state.worldId).toBe(WORLD_ID);
-    expect(state.world).toEqual({ width: 10, height: 8 });
-    // One `TileViewModel` per tile, `terrain` preserved verbatim as an opaque string.
+    expect(state.bounds).toEqual(BOUNDS);
+    expect(state.grid).toEqual(GRID);
     expect(state.tiles).toEqual(ORDERED_TILES);
     expect(state.entities).toEqual([ENTITY_A_VM, ENTITY_B_VM]);
     expect(state.controlledActorId).toBe('actor-1');
   });
 
-  it('orders tiles deterministically by y then x regardless of wire order', async () => {
-    // The fixture crosses the wire as [path(1,0), blocked(0,1), grass(0,0)] and must
-    // come out row-major: grass(0,0), path(1,0), blocked(0,1).
-    setWorldFetch(async () => fakeResponse(VALID_WORLD_RESPONSE));
+  it('derives each tile world position with origin + (cell + 0.5) * cellSize', async () => {
+    await loadValidWorld();
 
-    await loadWorld();
+    const tiles = getWorldState().tiles;
+    const at = (cellX: number, cellZ: number) =>
+      tiles.find((tile) => tile.cellX === cellX && tile.cellZ === cellZ);
 
-    expect(getWorldState().tiles).toEqual([
-      { x: 0, y: 0, terrain: 'grass' },
-      { x: 1, y: 0, terrain: 'path' },
-      { x: 0, y: 1, terrain: 'blocked' },
+    expect(at(0, 0)?.position).toEqual({ x: 11, y: 0.5, z: -3 });
+    expect(at(1, 0)?.position).toEqual({ x: 13, y: 0.5, z: -3 });
+    expect(at(0, 1)?.position).toEqual({ x: 11, y: 0.5, z: -1 });
+  });
+
+  it('orders tiles deterministically by cellZ then cellX regardless of wire order', async () => {
+    await loadValidWorld();
+
+    expect(getWorldState().tiles.map((tile) => [tile.cellX, tile.cellZ])).toEqual([
+      [0, 0],
+      [1, 0],
+      [0, 1],
     ]);
   });
 
-  it('orders entities deterministically by entityId regardless of wire order', async () => {
-    setWorldFetch(async () => fakeResponse(snapshotWith([ENTITY_B, ENTITY_A])));
+  it('maps full 3D entity position and rotation and orders by entityId', async () => {
+    setWorldFetch(async () => fakeResponse(snapshotWith({ entities: [ENTITY_B, ENTITY_A] })));
 
     await loadWorld();
 
-    expect(getWorldState().entities.map((entity) => entity.entityId)).toEqual([
-      'entity-a',
-      'entity-b',
-    ]);
+    expect(getWorldState().entities).toEqual([ENTITY_A_VM, ENTITY_B_VM]);
+    expect(entity(getWorldState(), 'entity-a').rotation).toEqual({ x: 0, y: 0.5, z: 0, w: 0.866 });
+    expect(entity(getWorldState(), 'entity-a').position).toEqual({ x: 3, y: 0, z: 4 });
   });
 
   it('maps an uncontrolled actor as controlledActorId === null', async () => {
-    setWorldFetch(async () =>
-      fakeResponse({ world: { ...VALID_SNAPSHOT, controlledActorId: null } }),
-    );
+    setWorldFetch(async () => fakeResponse(snapshotWith({ controlledActorId: null })));
 
     await loadWorld();
 
@@ -250,7 +357,8 @@ describe('loadWorld', () => {
     const state = getWorldState();
     expect(state.status).toBe('error');
     expect(state.worldId).toBeNull();
-    expect(state.world).toBeNull();
+    expect(state.bounds).toBeNull();
+    expect(state.grid).toBeNull();
     expect(state.tiles).toEqual([]);
     expect(state.entities).toEqual([]);
     expect(state.controlledActorId).toBeNull();
@@ -271,49 +379,34 @@ describe('loadWorld', () => {
 
     const state = getWorldState();
     expect(state.status).toBe('error');
-    expect(state.worldId).toBeNull();
-    expect(state.world).toBeNull();
     expect(state.tiles).toEqual([]);
     expect(state.entities).toEqual([]);
-    expect(state.controlledActorId).toBeNull();
     expect(state.error).toContain('503');
   });
 
-  it('rejects an old snapshot with an `actor` key instead of `entities` and keeps no partial data', async () => {
-    // Phase-3 shape: `{ world: { size, actor, serverTime } }`. It is structurally
-    // invalid for the current `WorldSnapshot`, so the guard must reject it rather
-    // than silently reading a missing `entities` field.
+  it('rejects a snapshot whose tile carries a transform (grid holds no position)', async () => {
+    // The phase-7 regression guard: a `transform` on a tile must fail validation
+    // rather than be silently ignored.
     setWorldFetch(async () =>
-      fakeResponse({
-        world: {
-          size: { width: 10, height: 8 },
-          actor: { actorId: 'actor-1', name: 'Alex', position: { x: 3, y: 4 } },
-          serverTime: SERVER_TIME,
-        },
-      }),
+      fakeResponse(snapshotWith({ tiles: [{ cell: { x: 0, z: 0 }, terrain: 'grass', transform: { x: 0, y: 0 } }] })),
     );
 
     await loadWorld();
 
     const state = getWorldState();
     expect(state.status).toBe('error');
-    expect(state.worldId).toBeNull();
-    expect(state.world).toBeNull();
     expect(state.tiles).toEqual([]);
-    expect(state.entities).toEqual([]);
-    expect(state.controlledActorId).toBeNull();
     expect(state.error).toBeTruthy();
   });
 
-  it('rejects a phase-4-shaped snapshot missing `worldId`/`tiles` with no partial data', async () => {
-    // Phase-4 shape: `{ world: { size, entities, controlledActorId, serverTime } }`.
-    // `worldId` and `tiles` are required and keyed exactly, so this is a contract
-    // failure: the store must not adopt the entities when the snapshot is not whole.
+  it('rejects a phase-6-shaped snapshot (size + tiles with transform) with no partial data', async () => {
     setWorldFetch(async () =>
       fakeResponse({
         world: {
+          worldId: WORLD_ID,
           size: { width: 10, height: 8 },
-          entities: [ENTITY_A, ENTITY_B],
+          tiles: [{ transform: { x: 0, y: 0 }, terrain: 'grass' }],
+          entities: [ENTITY_A],
           controlledActorId: 'actor-1',
           serverTime: SERVER_TIME,
         },
@@ -324,24 +417,16 @@ describe('loadWorld', () => {
 
     const state = getWorldState();
     expect(state.status).toBe('error');
-    expect(state.worldId).toBeNull();
-    expect(state.world).toBeNull();
     expect(state.tiles).toEqual([]);
     expect(state.entities).toEqual([]);
-    expect(state.controlledActorId).toBeNull();
     expect(state.error).toBeTruthy();
   });
 
   it('rejects a snapshot carrying an unknown extra tile key (no partial data)', async () => {
-    // Tiles are keyed exactly and walkability is NOT on the wire; a stray
-    // `walkable` field must fail validation rather than be silently ignored.
     setWorldFetch(async () =>
-      fakeResponse({
-        world: {
-          ...VALID_SNAPSHOT,
-          tiles: [{ ...TILE_GRASS, walkable: true }],
-        },
-      }),
+      fakeResponse(
+        snapshotWith({ tiles: [{ cell: { x: 0, z: 0 }, terrain: 'grass', walkable: true }] }),
+      ),
     );
 
     await loadWorld();
@@ -349,28 +434,6 @@ describe('loadWorld', () => {
     const state = getWorldState();
     expect(state.status).toBe('error');
     expect(state.tiles).toEqual([]);
-    expect(state.entities).toEqual([]);
-    expect(state.error).toBeTruthy();
-  });
-
-  it('rejects a renamed payload carrying `player` instead of `entities`', async () => {
-    setWorldFetch(async () =>
-      fakeResponse({
-        world: {
-          size: { width: 10, height: 8 },
-          player: { id: 'player-1', name: 'Alex', position: { x: 3, y: 4 } },
-          serverTime: SERVER_TIME,
-        },
-      }),
-    );
-
-    await loadWorld();
-
-    const state = getWorldState();
-    expect(state.status).toBe('error');
-    expect(state.worldId).toBeNull();
-    expect(state.tiles).toEqual([]);
-    expect(state.entities).toEqual([]);
     expect(state.error).toBeTruthy();
   });
 
@@ -406,64 +469,234 @@ describe('loadWorld', () => {
     expect(calls).toBe(1);
     expect(first).toBe(second);
 
-    deferred.resolve(fakeResponse(VALID_WORLD_RESPONSE));
+    deferred.resolve(fakeResponse(WORLD_RESPONSE));
     await Promise.all([first, second]);
 
     expect(calls).toBe(1);
     expect(getWorldState().status).toBe('ready');
   });
 
-  it('notifies subscribers synchronously across the lifecycle', async () => {
+  it('notifies subscribers synchronously across loading -> ready -> connecting', async () => {
     const deferred = createDeferred<Response>();
     setWorldFetch(() => deferred.promise);
 
     const seen: string[] = [];
     const unsubscribe = subscribeWorld((next) => {
-      seen.push(next.status);
+      seen.push(`${next.status}/${next.streamStatus}`);
     });
 
     const settled = loadWorld();
-    expect(seen).toEqual(['loading']);
+    expect(seen).toEqual(['loading/idle']);
 
-    deferred.resolve(fakeResponse(VALID_WORLD_RESPONSE));
+    deferred.resolve(fakeResponse(WORLD_RESPONSE));
     await settled;
-    expect(seen).toEqual(['loading', 'ready']);
+    // The stream is opened immediately after the snapshot settles, so the
+    // snapshot `ready` is followed by a `connecting` stream transition.
+    expect(seen).toEqual(['loading/idle', 'ready/idle', 'ready/connecting']);
+    expect(getWorldState().streamStatus).toBe('connecting');
 
     unsubscribe();
   });
+
+  it('keeps the world fetch hook independent from the game-info hook', async () => {
+    setGameInfoFetch(async () => {
+      throw new Error('game-info transport must not be used for the world');
+    });
+
+    await loadValidWorld();
+
+    expect(getWorldState().status).toBe('ready');
+  });
 });
 
-describe('moveActor', () => {
-  it('applies a transform.changed event to exactly that entity', async () => {
+describe('realtime stream lifecycle', () => {
+  it('opens exactly one stream on STREAM_PATH after the snapshot', async () => {
     await loadValidWorld();
-    setWorldFetch(async () => fakeResponse(commandResponse([transformChanged('entity-a', 4, 4)])));
 
-    await moveActor('east');
+    expect(streamSources).toHaveLength(1);
+    expect(streamSources[0].url).toBe(STREAM_PATH);
+    expect(getWorldState().streamStatus).toBe('connecting');
+  });
+
+  it('transitions connecting -> live when the stream opens', async () => {
+    await loadValidWorld();
+
+    streamSources[0].open();
+
+    expect(getWorldState().streamStatus).toBe('live');
+  });
+
+  it('is idempotent while the stream is live: no refetch and no second connection', async () => {
+    let calls = 0;
+    setWorldFetch(async () => {
+      calls += 1;
+      return fakeResponse(WORLD_RESPONSE);
+    });
+
+    await loadWorld();
+    streamSources[0].open();
+
+    await loadWorld();
+    await loadWorld();
+
+    expect(calls).toBe(1);
+    expect(streamSources).toHaveLength(1);
+  });
+
+  it('replaces client state wholesale when a snapshot frame arrives', async () => {
+    await loadValidWorld();
+    streamSources[0].open();
+
+    const nextSnapshot = {
+      worldId: 'world-next',
+      bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 1, y: 1, z: 1 } },
+      grid: { origin: { x: 0, y: 0, z: 0 }, width: 1, depth: 1, cellSize: 1 },
+      tiles: [{ cell: { x: 0, z: 0 }, terrain: 'water' }],
+      entities: [ENTITY_C],
+      controlledActorId: null,
+      serverTime: SERVER_TIME,
+    };
+
+    streamSources[0].message(snapshotFrame(nextSnapshot));
 
     const state = getWorldState();
-    expect(state.status).toBe('ready');
-    expect(state.error).toBeNull();
-    expect(entity(state, 'entity-a')).toMatchObject({ x: 4, y: 4 });
-    // The other entity is untouched.
-    expect(entity(state, 'entity-b')).toMatchObject({ x: 1, y: 2 });
+    expect(state.worldId).toBe('world-next');
+    expect(state.controlledActorId).toBeNull();
+    expect(state.tiles).toEqual([
+      { cellX: 0, cellZ: 0, position: { x: 0.5, y: 0, z: 0.5 }, terrain: 'water' },
+    ]);
+    expect(state.entities.map((candidate) => candidate.entityId)).toEqual(['entity-c']);
+    expect(state.streamStatus).toBe('live');
   });
 
-  it('keeps static tiles/worldId reference-identical across a move event', async () => {
-    // No event carries terrain: only a fresh snapshot may replace `tiles`.
+  it('an events frame updates only entities and keeps tiles/grid/bounds reference-identical', async () => {
     await loadValidWorld();
     const before = getWorldState();
-    setWorldFetch(async () => fakeResponse(commandResponse([transformChanged('entity-a', 4, 4)])));
 
-    await moveActor('east');
+    streamSources[0].message(eventsFrame([transformChanged('entity-a', { x: 5, y: 0, z: 6 })]));
 
     const after = getWorldState();
+    expect(after).not.toBe(before);
     expect(after.entities).not.toBe(before.entities);
     expect(after.tiles).toBe(before.tiles);
-    expect(after.worldId).toBe(before.worldId);
+    expect(after.grid).toBe(before.grid);
+    expect(after.bounds).toBe(before.bounds);
+    expect(entity(after, 'entity-a').position).toEqual({ x: 5, y: 0, z: 6 });
+    expect(entity(after, 'entity-b').position).toEqual({ x: 1, y: 0, z: 2 });
   });
 
-  it('sends a body of exactly `{ type, direction }` to COMMAND_PATH with no actor or destination', async () => {
+  it('applies spawn and remove events from the stream', async () => {
     await loadValidWorld();
+
+    streamSources[0].message(eventsFrame([entitySpawned(ENTITY_C), entityRemoved('entity-b')]));
+
+    const state = getWorldState();
+    expect(state.entities.map((candidate) => candidate.entityId)).toEqual([
+      'entity-a',
+      'entity-c',
+    ]);
+  });
+
+  it('ignores a transform.changed frame for an unknown entity (creates nothing)', async () => {
+    await loadValidWorld();
+    const before = getWorldState();
+
+    streamSources[0].message(eventsFrame([transformChanged('entity-missing', { x: 9, y: 0, z: 9 })]));
+
+    expect(getWorldState()).toBe(before);
+  });
+
+  it('ignores malformed frames without corrupting state', async () => {
+    await loadValidWorld();
+    streamSources[0].open();
+    const before = getWorldState();
+
+    streamSources[0].message('not json');
+    streamSources[0].message({ type: 'nonsense' });
+    streamSources[0].message({ type: 'snapshot', snapshot: { worldId: 'x' } });
+    streamSources[0].message({ type: 'events', batch: { events: 'nope', serverTime: SERVER_TIME } });
+    streamSources[0].message({ type: 'events', batch: { events: [], serverTime: 'not-a-date' } });
+
+    expect(getWorldState()).toBe(before);
+    expect(getWorldState().streamStatus).toBe('live');
+  });
+
+  it('retries with bounded backoff and then stays in error (no reconnect storm)', async () => {
+    vi.useFakeTimers();
+    await loadValidWorld();
+    expect(streamSources).toHaveLength(1);
+    expect(getWorldState().streamStatus).toBe('connecting');
+
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      streamSources[streamSources.length - 1].fail();
+      expect(getWorldState().streamStatus).toBe('error');
+      await vi.advanceTimersByTimeAsync(60_000);
+    }
+
+    // 1 initial connection + 3 bounded reconnects; the 4th failure exhausts the
+    // budget and leaves the stream in `error`.
+    expect(streamSources).toHaveLength(4);
+    expect(getWorldState().streamStatus).toBe('error');
+
+    // A long wait must not produce an unbounded reconnect storm.
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    expect(streamSources).toHaveLength(4);
+  });
+
+  it('a successful reopen resets the attempt budget and returns to live', async () => {
+    vi.useFakeTimers();
+    await loadValidWorld();
+
+    streamSources[0].fail();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(streamSources).toHaveLength(2);
+
+    streamSources[1].open();
+    expect(getWorldState().streamStatus).toBe('live');
+
+    streamSources[1].fail();
+    await vi.advanceTimersByTimeAsync(60_000);
+    // The counter restarted, so a fresh reconnect is still scheduled.
+    expect(streamSources).toHaveLength(3);
+  });
+
+  it('resetWorldState closes the stream and returns to idle', async () => {
+    await loadValidWorld();
+    streamSources[0].open();
+    expect(getWorldState().streamStatus).toBe('live');
+
+    resetWorldState();
+
+    expect(streamSources[0].closeCalls).toBe(1);
+    const state = getWorldState();
+    expect(state.status).toBe('idle');
+    expect(state.streamStatus).toBe('idle');
+    expect(state.worldId).toBeNull();
+    expect(state.bounds).toBeNull();
+    expect(state.grid).toBeNull();
+    expect(state.tiles).toEqual([]);
+    expect(state.entities).toEqual([]);
+    expect(state.controlledActorId).toBeNull();
+    expect(state.error).toBeNull();
+  });
+
+  it('resetWorldState cancels a pending reconnect', async () => {
+    vi.useFakeTimers();
+    await loadValidWorld();
+
+    streamSources[0].fail(); // schedules a reconnect
+    resetWorldState();
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(streamSources).toHaveLength(1);
+    expect(getWorldState().streamStatus).toBe('idle');
+  });
+});
+
+describe('setMovementIntent', () => {
+  it('posts exactly { type, movement } to COMMAND_PATH with no actor or position', async () => {
+    await loadValidWorld();
+
     const requests: Array<{
       url: string;
       method: string | undefined;
@@ -475,147 +708,125 @@ describe('moveActor', () => {
         method: init?.method,
         body: JSON.parse(init?.body as string) as Record<string, unknown>,
       });
-      return fakeResponse(commandResponse([transformChanged('entity-a', 4, 4)]));
+      return fakeResponse(commandResponse([]));
     });
 
-    await moveActor('east');
+    await setMovementIntent({ x: 0.5, z: -0.25 });
 
-    // Transport contract lives here, not in the UI tests: the Organizer builds
-    // the primitive command itself and posts it to the canonical Protocol path.
-    // The actor is resolved server-side from transport context, so the body must
-    // NOT carry an actor/player id. The destination is computed by the Manager,
-    // so the body must NOT carry a target coordinate either — a client cannot
-    // submit a final position and thereby bypass collision.
     expect(requests).toHaveLength(1);
     expect(requests[0].url).toBe(COMMAND_PATH);
     expect(requests[0].method).toBe('POST');
-    expect(requests[0].body).toEqual({ type: 'actor.move', direction: 'east' });
-    expect(Object.keys(requests[0].body)).toEqual(['type', 'direction']);
+    expect(requests[0].body).toEqual({
+      type: 'actor.moveIntent',
+      movement: { x: 0.5, z: -0.25 },
+    });
+    expect(Object.keys(requests[0].body)).toEqual(['type', 'movement']);
+    expect(Object.keys(requests[0].body.movement as object)).toEqual(['x', 'z']);
     expect('actorId' in requests[0].body).toBe(false);
     expect('playerId' in requests[0].body).toBe(false);
     expect('x' in requests[0].body).toBe(false);
-    expect('y' in requests[0].body).toBe(false);
+    expect('z' in requests[0].body).toBe(false);
     expect('position' in requests[0].body).toBe(false);
-    expect('to' in requests[0].body).toBe(false);
   });
 
-  it('does not move optimistically while the request is in flight', async () => {
+  it('does not move anything locally while the intent is in flight', async () => {
     await loadValidWorld();
     const deferred = createDeferred<Response>();
     setWorldFetch(() => deferred.promise);
 
-    const pending = moveActor('east');
+    const pending = setMovementIntent({ x: 1, z: 0 });
 
-    // Position must still be the old authoritative one before the response.
-    expect(entity(getWorldState(), 'entity-a')).toMatchObject({ x: 3, y: 4 });
+    expect(entity(getWorldState(), 'entity-a').position).toEqual({ x: 3, y: 0, z: 4 });
     expect(getWorldState().status).toBe('ready');
 
-    deferred.resolve(fakeResponse(commandResponse([transformChanged('entity-a', 4, 4)])));
+    deferred.resolve(fakeResponse(commandResponse([])));
     await pending;
 
-    expect(entity(getWorldState(), 'entity-a')).toMatchObject({ x: 4, y: 4 });
+    // Even after settling, an empty ack changes nothing.
+    expect(entity(getWorldState(), 'entity-a').position).toEqual({ x: 3, y: 0, z: 4 });
+    expect(getWorldState().status).toBe('ready');
   });
 
-  it('treats an empty events array (blocked step) as a no-op with no error and no state change', async () => {
-    // A blocked step is expressed as a refusal: the server returns 200 with an
-    // empty `events` array. That is NOT an error, and it must leave the whole
-    // snapshot untouched — tiles, entities and worldId stay reference-identical.
-    await loadValidWorld();
-    setWorldFetch(async () => fakeResponse(commandResponse([])));
-
-    const before = getWorldState();
-    await moveActor('west');
-    const after = getWorldState();
-
-    expect(after).toBe(before);
-    expect(after.tiles).toBe(before.tiles);
-    expect(after.entities).toBe(before.entities);
-    expect(after.worldId).toBe(before.worldId);
-    expect(after.status).toBe('ready');
-    expect(after.error).toBeNull();
-    expect(entity(after, 'entity-a')).toMatchObject({ x: 3, y: 4 });
-  });
-
-  it('applies an entity.spawned event to the entity list', async () => {
-    await loadValidWorld();
-    setWorldFetch(async () => fakeResponse(commandResponse([entitySpawned(ENTITY_C)])));
-
-    await moveActor('east');
-
-    const state = getWorldState();
-    expect(entity(state, 'entity-c')).toMatchObject({
-      entityId: 'entity-c',
-      actorId: null,
-      kind: 'character',
-      x: 7,
-      y: 7,
-      visible: true,
-    });
-    expect(state.entities.map((candidate) => candidate.entityId)).toEqual([
-      'entity-a',
-      'entity-b',
-      'entity-c',
-    ]);
-  });
-
-  it('applies an entity.removed event to the entity list', async () => {
-    await loadValidWorld();
-    setWorldFetch(async () => fakeResponse(commandResponse([entityRemoved('entity-b')])));
-
-    await moveActor('east');
-
-    const state = getWorldState();
-    expect(state.entities.map((candidate) => candidate.entityId)).toEqual(['entity-a']);
-  });
-
-  it('ignores a transform.changed event for an unknown entity (creates nothing)', async () => {
+  it('adopts authoritative events from the command ack', async () => {
     await loadValidWorld();
     setWorldFetch(async () =>
-      fakeResponse(commandResponse([transformChanged('entity-missing', 9, 9)])),
+      fakeResponse(commandResponse([transformChanged('entity-a', { x: 4, y: 0, z: 4 })])),
     );
 
-    const before = getWorldState();
-    await moveActor('east');
+    await setMovementIntent({ x: 1, z: 0 });
 
-    // Nothing observable changed, so the snapshot is reference-stable.
-    expect(getWorldState()).toBe(before);
-    expect(getWorldState().entities.map((candidate) => candidate.entityId)).toEqual([
-      'entity-a',
-      'entity-b',
-    ]);
+    expect(entity(getWorldState(), 'entity-a').position).toEqual({ x: 4, y: 0, z: 4 });
   });
 
-  it('ignores an unknown event type at runtime without throwing or changing state', async () => {
-    // The transport's Protocol guard rejects an unknown event `type` before it
-    // reaches the applier, so this exercises the applier's `default` branch
-    // directly. The object is cast through `unknown` only here, in the test:
-    // production code must never fabricate a union member.
+  it('treats an empty events array (a refused intent) as a no-op with no error', async () => {
     await loadValidWorld();
-
-    const unknownEvent = {
-      type: 'entity.teleported',
-      entityId: 'entity-a',
-      transform: { x: 9, y: 9 },
-    } as unknown as GameEvent;
-
     const before = getWorldState();
+    setWorldFetch(async () => fakeResponse(commandResponse([])));
 
-    // The applier's `default` branch contains `const exhaustive: never = event;`.
-    // That `never` assignment is what makes adding a fourth `GameEvent` member a
-    // COMPILE error at this applier until it is handled. At runtime an unknown
-    // event is tolerated instead of thrown: no throw, and no observable change,
-    // so the snapshot stays reference-stable.
-    expect(() => {
-      applyEvents([unknownEvent]);
-    }).not.toThrow();
+    await setMovementIntent({ x: 0, z: 0 });
 
-    const after = getWorldState();
-    expect(after).toBe(before);
-    expect(after.error).toBeNull();
-    expect(entity(after, 'entity-a')).toMatchObject({ x: 3, y: 4 });
+    expect(getWorldState()).toBe(before);
+    expect(getWorldState().status).toBe('ready');
+    expect(getWorldState().error).toBeNull();
   });
 
-  it('serializes moves with a single in-flight slot and latest wins', async () => {
+  it('is a safe no-op before any world is loaded', async () => {
+    let calls = 0;
+    setWorldFetch(async () => {
+      calls += 1;
+      return fakeResponse(commandResponse([]));
+    });
+
+    await expect(setMovementIntent({ x: 1, z: 0 })).resolves.toBeUndefined();
+
+    expect(calls).toBe(0);
+    expect(getWorldState().status).toBe('idle');
+  });
+
+  it('never rejects on a network failure and surfaces a user message', async () => {
+    await loadValidWorld();
+    setWorldFetch(async () => {
+      throw new TypeError('Failed to fetch');
+    });
+
+    await expect(setMovementIntent({ x: 1, z: 0 })).resolves.toBeUndefined();
+
+    const state = getWorldState();
+    expect(state.status).toBe('error');
+    expect(state.error).toBeTruthy();
+    expect(state.error).not.toContain('TypeError');
+    // The last authoritative state is preserved on a command failure.
+    expect(entity(state, 'entity-a').position).toEqual({ x: 3, y: 0, z: 4 });
+  });
+
+  it('maps a 404 command response to a user-presentable actor-not-found error', async () => {
+    await loadValidWorld();
+    setWorldFetch(async () =>
+      fakeResponse(
+        { error: { code: 'NOT_FOUND', message: 'unknown actor' } },
+        { ok: false, status: 404 },
+      ),
+    );
+
+    await expect(setMovementIntent({ x: 1, z: 0 })).resolves.toBeUndefined();
+
+    const state = getWorldState();
+    expect(state.status).toBe('error');
+    expect(state.error?.toLowerCase()).toContain('actor');
+    expect(state.error).not.toContain('404');
+  });
+
+  it('maps a malformed command response to a contract error', async () => {
+    await loadValidWorld();
+    setWorldFetch(async () => fakeResponse({ result: { moved: true } }));
+
+    await setMovementIntent({ x: 1, z: 0 });
+
+    expect(getWorldState().status).toBe('error');
+    expect(getWorldState().error).toBeTruthy();
+  });
+
+  it('serializes intents with a single in-flight slot and latest wins', async () => {
     await loadValidWorld();
 
     const bodies: Array<Record<string, unknown>> = [];
@@ -628,164 +839,71 @@ describe('moveActor', () => {
       return deferred.promise;
     });
 
-    const first = moveActor('east');
-    const second = moveActor('south');
-    const third = moveActor('west');
+    const first = setMovementIntent({ x: 1, z: 0 });
+    const second = setMovementIntent({ x: 0, z: 1 });
+    const third = setMovementIntent({ x: -1, z: 0 });
 
-    // Only the first request is in flight; `south` was superseded by `west`.
     expect(calls).toBe(1);
-    expect(bodies).toEqual([{ type: 'actor.move', direction: 'east' }]);
+    expect(bodies).toEqual([{ type: 'actor.moveIntent', movement: { x: 1, z: 0 } }]);
 
-    deferreds[0].resolve(fakeResponse(commandResponse([transformChanged('entity-a', 4, 4)])));
+    deferreds[0].resolve(fakeResponse(commandResponse([])));
     await first;
 
     // Once the first settles, exactly one more request is sent, with the latest
-    // queued direction.
+    // queued movement only.
     expect(calls).toBe(2);
     expect(bodies).toEqual([
-      { type: 'actor.move', direction: 'east' },
-      { type: 'actor.move', direction: 'west' },
+      { type: 'actor.moveIntent', movement: { x: 1, z: 0 } },
+      { type: 'actor.moveIntent', movement: { x: -1, z: 0 } },
     ]);
-    expect(entity(getWorldState(), 'entity-a')).toMatchObject({ x: 4, y: 4 });
 
-    deferreds[1].resolve(fakeResponse(commandResponse([transformChanged('entity-a', 3, 4)])));
+    deferreds[1].resolve(fakeResponse(commandResponse([])));
     await Promise.all([second, third]);
-
-    expect(calls).toBe(2);
-    expect(entity(getWorldState(), 'entity-a')).toMatchObject({ x: 3, y: 4 });
   });
 
-  it('settles every move promise when a reset supersedes an in-flight loop', async () => {
-    // Regression: a superseded loop used to read and clear the shared queue
-    // before checking its generation, then break and discard the waiters it had
-    // just taken. A caller queued to the newer loop never settled and its
-    // direction was silently lost. Losing the race must never hang a caller.
+  it('settles every intent promise when a reset supersedes an in-flight loop', async () => {
     await loadValidWorld();
+    const deferred = createDeferred<Response>();
+    setWorldFetch(() => deferred.promise);
 
-    const deferreds = [
-      createDeferred<Response>(),
-      createDeferred<Response>(),
-      createDeferred<Response>(),
-    ];
-    const bodies: Array<Record<string, unknown>> = [];
-    let calls = 0;
-    const captureMove = (_url: string, init?: RequestInit): Promise<Response> => {
-      bodies.push(JSON.parse(init?.body as string) as Record<string, unknown>);
-      const deferred = deferreds[calls];
-      calls += 1;
-      return deferred.promise;
-    };
+    const inFlight = setMovementIntent({ x: 1, z: 0 });
+    const queued = setMovementIntent({ x: 0, z: 1 });
 
-    // Loop 1: `east` in flight.
-    setWorldFetch(captureMove);
-    const a = moveActor('east');
-    expect(calls).toBe(1);
-
-    // Reset supersedes loop 1 while its request is still in flight, then load a
-    // fresh snapshot so a new loop can own the move slot.
     resetWorldState();
-    setWorldFetch(async () => fakeResponse(VALID_WORLD_RESPONSE));
-    await loadWorld();
 
-    // Loop 2: `north` in flight; `west` queued behind it.
-    setWorldFetch(captureMove);
-    const c = moveActor('north');
-    const d = moveActor('west');
-    expect(calls).toBe(2);
-    expect(bodies.map((body) => body.direction)).toEqual(['east', 'north']);
-
-    // Settle loop 1's stale response. It must not consume loop 2's queue.
-    deferreds[0].resolve(fakeResponse(commandResponse([transformChanged('entity-a', 4, 4)])));
-    await a;
-
-    // Loop 2's current request settles and it must still dispatch the queued
-    // `west` rather than have it dropped by the stale loop.
-    deferreds[1].resolve(fakeResponse(commandResponse([transformChanged('entity-a', 4, 5)])));
-    await c;
-    expect(bodies.map((body) => body.direction)).toEqual(['east', 'north', 'west']);
-
-    deferreds[2].resolve(fakeResponse(commandResponse([transformChanged('entity-a', 3, 5)])));
-    await expect(d).resolves.toBeUndefined();
+    deferred.resolve(fakeResponse(commandResponse([])));
+    await expect(Promise.all([inFlight, queued])).resolves.toEqual([undefined, undefined]);
+    expect(getWorldState().status).toBe('idle');
   });
+});
 
-  it('is a safe no-op before any world is loaded', async () => {
-    let calls = 0;
-    setWorldFetch(async () => {
-      calls += 1;
-      return fakeResponse(commandResponse([transformChanged('entity-a', 4, 4)]));
-    });
-
-    await expect(moveActor('east')).resolves.toBeUndefined();
-
-    expect(calls).toBe(0);
-    const state = getWorldState();
-    expect(state.status).toBe('idle');
-    expect(state.worldId).toBeNull();
-    expect(state.tiles).toEqual([]);
-    expect(state.entities).toEqual([]);
-    expect(state.controlledActorId).toBeNull();
-  });
-
-  it('maps a 404 command response to a user-presentable actor-not-found error', async () => {
+describe('event applier seam', () => {
+  it('ignores an unknown event type at runtime without throwing or changing state', async () => {
+    // The transport's Protocol guard rejects an unknown event `type` before it
+    // reaches the applier, so this exercises the applier's `default` branch
+    // directly. The object is cast through `unknown` only here, in the test:
+    // production code must never fabricate a union member.
     await loadValidWorld();
-    setWorldFetch(async () =>
-      fakeResponse(
-        { error: { code: 'NOT_FOUND', message: 'unknown actor' } },
-        { ok: false, status: 404 },
-      ),
-    );
 
-    await expect(moveActor('east')).resolves.toBeUndefined();
+    const unknownEvent = {
+      type: 'entity.teleported',
+      entityId: 'entity-a',
+      transform: {
+        position: { x: 9, y: 0, z: 9 },
+        rotation: { x: 0, y: 0, z: 0, w: 1 },
+      },
+    } as unknown as GameEvent;
 
-    const state = getWorldState();
-    expect(state.status).toBe('error');
-    expect(state.error).toBeTruthy();
-    expect(state.error).not.toContain('404');
-    expect(state.error?.toLowerCase()).toContain('actor');
-    // The last authoritative entities are preserved on a command failure.
-    expect(entity(state, 'entity-a')).toMatchObject({ x: 3, y: 4 });
-  });
+    const before = getWorldState();
 
-  it('maps a network failure during a move to an error state', async () => {
-    await loadValidWorld();
-    setWorldFetch(async () => {
-      throw new TypeError('Failed to fetch');
-    });
+    // The `never` assignment in the applier's `default` branch is a COMPILE
+    // error when a fourth `GameEvent` member is added until it is handled. At
+    // runtime an unknown event is tolerated: no throw, no observable change.
+    expect(() => {
+      applyEvents([unknownEvent]);
+    }).not.toThrow();
 
-    await moveActor('east');
-
-    const state = getWorldState();
-    expect(state.status).toBe('error');
-    expect(state.error).toBeTruthy();
-    expect(state.error).not.toContain('TypeError');
-  });
-
-  it('maps a malformed command payload to a contract error', async () => {
-    await loadValidWorld();
-    setWorldFetch(async () => fakeResponse({ result: { moved: true } }));
-
-    await moveActor('east');
-
-    const state = getWorldState();
-    expect(state.status).toBe('error');
-    expect(state.error).toBeTruthy();
-  });
-
-  it('maps a renamed event field (actorId instead of entityId) to a contract error', async () => {
-    await loadValidWorld();
-    setWorldFetch(async () =>
-      fakeResponse(
-        commandResponse([{ type: 'transform.changed', actorId: 'entity-a', transform: { x: 4, y: 4 } }]),
-      ),
-    );
-
-    await moveActor('east');
-
-    const state = getWorldState();
-    expect(state.status).toBe('error');
-    expect(state.error).toBeTruthy();
-    // The stale event must not be reconciled into the entity list.
-    expect(entity(state, 'entity-a')).toMatchObject({ x: 3, y: 4 });
+    expect(getWorldState()).toBe(before);
   });
 });
 
@@ -799,57 +917,21 @@ describe('world store identity and subscription', () => {
     unsubscribe();
   });
 
-  it('exposes `worldId`/`tiles`/`controlledActorId`/`entities` and has no legacy fields', () => {
+  it('exposes the frozen state shape and has no legacy fields', () => {
     const state: WorldState = getWorldState();
 
-    // Compile-level guarantee of the frozen Organizer contract: the phase-3
-    // `controlledActor` and phase-2 `player` fields were removed, so these
-    // accesses must not typecheck.
-    // @ts-expect-error WorldState has no `controlledActor` field after the primitive migration.
+    // @ts-expect-error WorldState has no `world` field after the 3D migration.
+    expect(state.world).toBeUndefined();
+    // @ts-expect-error WorldState has no `controlledActor` field.
     expect(state.controlledActor).toBeUndefined();
-    // @ts-expect-error WorldState has no `player` field.
-    expect(state.player).toBeUndefined();
-    expect(Object.prototype.hasOwnProperty.call(state, 'controlledActor')).toBe(false);
-    expect(Object.prototype.hasOwnProperty.call(state, 'player')).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(state, 'world')).toBe(false);
+    expect(state.streamStatus).toBe('idle');
     expect(state.worldId).toBeNull();
-    expect(state.tiles).toEqual([]);
-    expect(state.controlledActorId).toBeNull();
-    expect(state.entities).toEqual([]);
-  });
-
-  it('resetWorldState returns to idle and drains queued moves', async () => {
-    await loadValidWorld();
-
-    const deferred = createDeferred<Response>();
-    setWorldFetch(() => deferred.promise);
-
-    const inFlight = moveActor('east');
-    const queued = moveActor('south');
-
-    const seen: WorldState[] = [];
-    const unsubscribe = subscribeWorld((next) => {
-      seen.push(next);
-    });
-
-    resetWorldState();
-
-    const state = getWorldState();
-    expect(state.status).toBe('idle');
-    expect(state.worldId).toBeNull();
-    expect(state.world).toBeNull();
+    expect(state.bounds).toBeNull();
+    expect(state.grid).toBeNull();
     expect(state.tiles).toEqual([]);
     expect(state.entities).toEqual([]);
     expect(state.controlledActorId).toBeNull();
-    expect(seen).toHaveLength(1);
-
-    unsubscribe();
-    resetWorldState();
-    expect(seen).toHaveLength(1);
-
-    // The queued caller must not hang after the reset.
-    deferred.resolve(fakeResponse(commandResponse([transformChanged('entity-a', 4, 4)])));
-    await Promise.all([inFlight, queued]);
-    expect(getWorldState().status).toBe('idle');
   });
 
   it('unsubscribe stops notifications', async () => {
@@ -859,23 +941,9 @@ describe('world store identity and subscription', () => {
     });
     unsubscribe();
 
-    setWorldFetch(async () => fakeResponse(VALID_WORLD_RESPONSE));
-    await loadWorld();
+    await loadValidWorld();
 
     expect(seen).toEqual([]);
-  });
-});
-
-describe('resource isolation', () => {
-  it('keeps the world fetch hook independent from the game-info hook', async () => {
-    setGameInfoFetch(async () => {
-      throw new Error('game-info transport must not be used for the world');
-    });
-    setWorldFetch(async () => fakeResponse(VALID_WORLD_RESPONSE));
-
-    await loadWorld();
-
-    expect(getWorldState().status).toBe('ready');
   });
 });
 

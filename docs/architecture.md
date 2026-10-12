@@ -231,6 +231,196 @@ with the primitive contract (`submitCommand`, `EntityState`, `WorldState.entitie
 `controlledActorId`). See "Phase 4 frozen contract — primitive-driven architecture" above for the
 current surface; this section is kept only so the phase-3 history is not silently rewritten.
 
+## Phase 7 frozen contract — continuous 3D world; the grid is an interaction layer
+
+Corrects a modelling error from phases 4-6: `Transform` was a 2D integer tile coordinate, so the
+**Actor's motion coordinate system was the tile grid**, and a 2.5D `tile -> scene` mapping was
+invented inside the runtime and even leaked into the Render ISA (`RenderTransform { x, y }`).
+Both are reversed here.
+
+### Principles (not negotiable, and recorded so they are not re-broken)
+
+1. **The Game World is a real continuous 3D world.** `2.5D` is only a `CameraRig` presentation
+   constraint. It must never again appear in the Game World coordinate model, the Actor motion
+   model, or the Render ISA's dimensionality.
+2. **The gameplay grid/tile is a discrete interaction layer overlaid on that world** (farming,
+   placement, interaction, terrain metadata). It is **not** the Actor's motion coordinate system.
+3. **`Gameplay Grid != Collision System`.** Cells may *generate* colliders (an UNWALKABLE cell ->
+   a world-space static AABB; that includes `blocked` and `water`), but movement legality is
+decided by a **world-space** collision query against the Actor's collider, never by "is the
+   target cell walkable".
+4. `cellOf(position)` remains available for farming/placement/interaction/terrain lookup, and must
+   never be used as the Actor's stored position.
+
+### Axis and unit convention
+
+`+X = East`, `+Y = Up`, `+Z = South`. Default `1 gameplay cell = 1 world unit`, but **`cellSize`
+stays grid configuration and must not be hardcoded in algorithms**.
+
+### Game Protocol value objects
+
+```ts
+interface Vec3 { x: number; y: number; z: number }        // continuous, world units
+interface Quat { x: number; y: number; z: number; w: number }
+interface Transform { position: Vec3; rotation: Quat }    // canonical 3D transform
+
+interface WorldBounds { min: Vec3; max: Vec3 }            // the WORLD's bounds
+
+// the grid is a separate concept, and cell(0,0) is deliberately NOT bound to the world origin
+interface GridSpec { origin: Vec3; width: number; depth: number; cellSize: number }
+interface CellCoord { x: number; z: number }              // integer cell indices on the ground plane
+interface TileState { cell: CellCoord; terrain: TerrainKind }   // NO Transform: the grid holds no position
+```
+
+`Transform` is a general 3D transform: current gameplay may only produce a yaw rotation, but the
+canonical type must not degenerate to `rotationY`-only. **No visual `scale` in the Game
+Transform** unless it acquires gameplay semantics.
+
+Cell centre rule (frozen, so both sides agree without guessing):
+
+```
+cellCenter.x = grid.origin.x + (cell.x + 0.5) * grid.cellSize
+cellCenter.z = grid.origin.z + (cell.z + 0.5) * grid.cellSize
+cellCenter.y = grid.origin.y
+```
+
+`WorldSnapshot` becomes `{ worldId, bounds: WorldBounds, grid: GridSpec, tiles: TileState[],
+entities: EntityState[], controlledActorId, serverTime }`. `EntityState` keeps
+`transform: Transform` (now real 3D). `PROTOCOL_VERSION` 5 -> 6.
+
+### Command: movement intent, level-triggered
+
+```ts
+interface MoveIntentCommand {
+  type: 'actor.moveIntent';
+  movement: { x: number; z: number };   // desired horizontal direction, clamped to |v| <= 1
+}
+```
+
+- **No `actorId` in the body.** Main deliberately deviates from the proposed shape here: the actor
+  is resolved from transport context (the phase-3 invariant, verified by three reviews). Accepting
+  a client-named actor would reopen the unauthenticated-actor hole. The intent means "the actor I
+  control". `{ x: 0, z: 0 }` means stop.
+- **Level-triggered, not one-shot:** the Manager stores the latest intent per actor and applies it
+  every tick until superseded. The client therefore posts only on input CHANGE (key down/up,
+  joystick change), so a 20 Hz simulation does not need 20 Hz upstream traffic.
+- `movement` is a direction (magnitude <= 1 allows analog speed); the Manager multiplies by the
+  actor's speed. The client is never trusted with a position.
+
+### Events and the stream envelope
+
+The event vocabulary is UNCHANGED (`entity.spawned`, `entity.removed`, `transform.changed`) —
+continuous movement simply emits `transform.changed` once per tick for entities that moved.
+`SubmitCommandResponse` is generalised/renamed to:
+
+```ts
+interface GameEventBatch { events: GameEvent[]; serverTime: string }
+```
+
+Transport: `POST COMMAND_PATH` submits an intent and returns the immediate batch (ack);
+`GET STREAM_PATH = '/api/stream'` is a Server-Sent Events stream of
+
+```ts
+type WorldStreamMessage =
+  | { type: 'snapshot'; snapshot: WorldSnapshot }   // sent first on every connection
+  | { type: 'events'; batch: GameEventBatch };
+```
+
+The leading snapshot closes the connect race. SSE is chosen over WebSocket on purpose: zero new
+dependencies, and the needed direction (server -> client state) is one-way while intents already
+have a reliable request/response channel. A bidirectional socket is a later, explicit decision.
+
+### Simulation tick
+
+The Manager owns an authoritative fixed-step simulation of **20 Hz** (`TICK_RATE_HZ`, dt = 50 ms),
+and stays PURE and testable: `step(dtMs)` advances the world and returns a `GameEventBatch`; no
+timers live in the Manager. The composition root (`apps/server`) owns the interval and a tiny
+fan-out, and injects a `worldStream.subscribe(listener)` port into the Router, which only forwards.
+
+### World-space collision (no physics engine)
+
+```
+movement intent -> desired displacement (speed * |v| * dt) -> world-space collision query
+                -> collision resolution -> authoritative Transform (+ authoritative heading)
+```
+
+- Actor footprint: a circle in XZ (radius 0.35 world units by default), for the first version.
+- Static colliders, built ONCE at construction and never consulted as a grid at runtime:
+  one AABB per UNWALKABLE cell (driven by `WALKABILITY_BY_TERRAIN`, so `blocked` **and** `water`
+  cells collide), plus one AABB per blocking prop derived from its world position and a per-kind
+  half-extent table (`FOOTPRINT_BY_ENTITY_KIND`; `BLOCKING_BY_ENTITY_KIND` decides which kinds get
+  one).
+- `WorldBounds` participates in the SAME resolution pass rather than being applied as a cosmetic
+  post-clamp, so a world-edge stop slides like a wall and a clamped position can never be projected
+  into a collider.
+- Resolution: axis-separated (attempt the full displacement; if it intersects, try X-only then
+  Z-only) so the actor slides along walls instead of sticking. Deterministic and unit-testable.
+  Because the simulation is discrete-step, contact is approached to within one integrated step
+  rather than exactly; tests therefore assert the invariant (never penetrates, and stops within one
+  step of the surface) instead of a magic contact number.
+- Y is taken from the ground/surface (flat `y = 0` for now); no gravity, no jumping, no slopes.
+- Heading (rotation) is AUTHORITATIVE and follows the effective movement direction; when the intent
+  is zero the last heading is kept. This removes the phase-6 presentational facing derivation.
+
+### Render ISA
+
+```ts
+interface RenderTransform { position: Vec3; rotation: Quat; scale: Vec3 }
+```
+
+A real 3D render transform. The ISA still knows nothing about cells, tiles, terrain gameplay
+semantics or farming. **The runtime places nodes at their world positions directly — there is no
+tile -> scene mapping left.** `transform.setTarget` keeps its meaning (interpolate toward this
+transform) and the bridge passes a duration close to the tick period so 20 Hz authority renders
+smoothly at 60 fps. Client prediction/reconciliation is explicitly a LATER milestone.
+
+### Camera
+
+The `CameraRig` is the ONLY place 2.5D lives: follow the controlled actor, constrained pitch,
+free/stepped yaw, zoom, smoothing. The Game Protocol does not know the camera exists, and camera
+rotation must never change the world coordinate system. Because the camera can yaw, **input is
+camera-relative**: the UI converts WASD/joystick into a world-space movement vector using the rig's
+yaw, so a rotated camera keeps WASD intuitive. That mapping is UI-local.
+
+### Deleted in this phase
+
+One-tile `actor.move`, tile coordinates as the Actor's position, `WorldSize { width, height }` as the
+world's definition, `TileState.transform`, the runtime's `tile -> scene` mapping, and the
+presentational facing derivation.
+
+### Acceptance
+
+Continuous world-space movement in a real 3D world: hold input -> intent -> authored tick
+simulation -> world-space collision -> authoritative 3D transform -> Organizer -> Render ISA ->
+ThreeRuntime interpolation. The grid still exists, but **hiding the debug grid entirely must not
+affect movement at all**, and WASD must stay intuitive after rotating the camera.
+
+Out of scope for this milestone: client prediction + server reconciliation (next, separate),
+farming, inventory, NPCs, persistence, a physics engine.
+
+### Phase-7 known limitations (recorded after review)
+
+1. **No correlation metadata for reconciliation.** `GameEventBatch` / `TransformChangedEvent` carry
+   no tick or sequence number, and nothing carries a "last processed input sequence". Client
+   prediction + server reconciliation therefore cannot be implemented until that is designed — it is
+   the single largest piece of work left and a protocol decision, not a transport one. SSE (one-way)
+   + intent POST is sufficient for the no-prediction milestone because `EventSource` rebuilds state
+   from the leading `snapshot`, and intents already have a reliable ordered channel.
+2. **The movement intent is a single slot**, not per-actor. Correct today: the Manager is
+   constructed with exactly one actor and rejects any other. A real per-actor intent store is
+   required before a second actor exists.
+3. **Every tick fans out a frame even when the batch is empty** (~20 empty frames/s/client at rest,
+   ~3 KB/s). Harmless today (`applyEvents` early-returns) and the per-tick `serverTime` is arguably
+   useful, but it is an explicit decision to make before the stream is scaled.
+4. **The composition root (the 20 Hz interval, the fan-out, the shutdown path) has no automated
+   test.** The integration suite re-implements the tick loop to stay deterministic, so a regression
+   in `apps/server`'s wiring (wrong `dt`, missing fan-out) would not be caught by CI. It is verified
+   only by a live run.
+5. **`cellOf` has no production call site yet.** It is a deliberate reservation (like `PlayerId`),
+   exported and tested because farming/placement/interaction are defined in terms of "the cell of a
+   position", and it is the inverse of `cellCentre` which the client and the collider generator use
+   today. If the farming/placement slice does not consume it, delete it rather than carrying it.
+
 ## Phase 6 frozen contract — 2.5D rendering foundation (UI-led milestone)
 
 The lower layers are verified; the client is still a box tech demo. This milestone turns it into

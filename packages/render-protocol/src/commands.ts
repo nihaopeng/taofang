@@ -1,3 +1,5 @@
+import type { Quat, Vec3 } from '@starvalley/math';
+
 import type { AnimationId, AppearanceId, NodeId } from './ids.ts';
 
 /**
@@ -9,12 +11,18 @@ import type { AnimationId, AppearanceId, NodeId } from './ids.ts';
 export type RenderLayer = 'base' | 'object';
 
 /**
- * Integer coordinates for the render scene. This is a render-space value, not a
- * game tile coordinate; the bridge chooses the mapping.
+ * A real 3D render transform: continuous world-space `position`, a `rotation`
+ * quaternion, and a `scale`.
+ *
+ * The render ISA has no notion of cells, tiles, terrain, or farming: the runtime
+ * places nodes at their world positions directly. (The phase-6 2D `{ x, y }`
+ * transform, which leaked a tile -> scene mapping into the ISA, was deleted in
+ * phase 7 and must not return.)
  */
 export interface RenderTransform {
-  x: number;
-  y: number;
+  position: Vec3;
+  rotation: Quat;
+  scale: Vec3;
 }
 
 /** Create a node with an initial transform and visibility. */

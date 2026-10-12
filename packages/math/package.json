@@ -1,0 +1,13 @@
+{
+  "name": "@starvalley/math",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Neutral 3D math primitives (Vec3, Quat) shared by the Game Protocol and the Render ISA. No engine, no framework, no game or render semantics.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  }
+}

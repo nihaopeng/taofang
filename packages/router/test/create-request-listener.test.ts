@@ -6,45 +6,51 @@ import {
   COMMAND_PATH,
   GAME_INFO_PATH,
   HEALTH_PATH,
+  STREAM_PATH,
   WORLD_PATH,
   isGetGameInfoResponse,
   isHealthStatus,
   parseActorId,
+  parseEntityId,
+  parseGameEventBatch,
   parseGetGameInfoResponse,
   parseGetWorldResponse,
-  parseSubmitCommandResponse,
   parseWorldId,
+  parseWorldStreamMessage,
 } from '@starvalley/protocol';
 import type {
-  EntityState,
+  ActorId,
+  GameEventBatch,
   GameInfo,
   HealthStatus,
   ProtocolError,
   ProtocolErrorCode,
+  TileState,
   WorldSnapshot,
+  WorldStreamMessage,
 } from '@starvalley/protocol';
-import { createWorldManager } from '@starvalley/manager';
+import { UnknownActorError } from '@starvalley/manager';
 import type { GameInfoManager, WorldManager } from '@starvalley/manager';
 import { createRequestListener } from '../src/index.ts';
-import type { ResolveActorId } from '../src/index.ts';
+import type { ResolveActorId, WorldStreamPort } from '../src/index.ts';
 
 const ACTOR_ID = parseActorId('actor-1');
+const ENTITY_ID = parseEntityId('entity-1');
 const TEST_WORLD_ID = parseWorldId('test-world');
+const FIXED_TIME = '2024-01-01T00:00:00.000Z';
 
 const GAME_INFO: GameInfo = {
   gameName: 'Test Valley',
   serverVersion: '1.2.3',
-  protocolVersion: 3,
-  serverTime: '2024-01-01T00:00:00.000Z',
+  protocolVersion: 6,
+  serverTime: FIXED_TIME,
 };
 
 const HEALTH: HealthStatus = {
   status: 'ok',
   uptimeSeconds: 12.5,
-  serverTime: '2024-01-01T00:00:00.000Z',
+  serverTime: FIXED_TIME,
 };
-
-const FIXED_TIME = '2024-01-01T00:00:00.000Z';
 
 function createFakeManager(overrides: Partial<GameInfoManager> = {}): GameInfoManager {
   const manager: GameInfoManager = {
@@ -54,30 +60,122 @@ function createFakeManager(overrides: Partial<GameInfoManager> = {}): GameInfoMa
   return Object.assign(manager, overrides);
 }
 
+/** Nine all-grass cells for a 3x3 grid. */
+function grassTiles(width: number, depth: number): TileState[] {
+  const tiles: TileState[] = [];
+  for (let z = 0; z < depth; z += 1) {
+    for (let x = 0; x < width; x += 1) {
+      tiles.push({ cell: { x, z }, terrain: 'grass' });
+    }
+  }
+  return tiles;
+}
+
+/** A valid phase-7 WorldSnapshot: continuous bounds + separate interaction grid. */
+const SNAPSHOT: WorldSnapshot = {
+  worldId: TEST_WORLD_ID,
+  bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 3, y: 1, z: 3 } },
+  grid: { origin: { x: 0, y: 0, z: 0 }, width: 3, depth: 3, cellSize: 1 },
+  tiles: grassTiles(3, 3),
+  entities: [
+    {
+      entityId: ENTITY_ID,
+      actorId: ACTOR_ID,
+      kind: 'character',
+      transform: {
+        position: { x: 1, y: 0, z: 1 },
+        rotation: { x: 0, y: 0, z: 0, w: 1 },
+      },
+      visible: true,
+    },
+  ],
+  controlledActorId: ACTOR_ID,
+  serverTime: FIXED_TIME,
+};
+
+const COMMAND_BATCH: GameEventBatch = {
+  events: [
+    {
+      type: 'transform.changed',
+      entityId: ENTITY_ID,
+      transform: {
+        position: { x: 1, y: 0, z: 2 },
+        rotation: { x: 0, y: 0, z: 0, w: 1 },
+      },
+    },
+  ],
+  serverTime: FIXED_TIME,
+};
+
+const EMPTY_BATCH: GameEventBatch = { events: [], serverTime: FIXED_TIME };
+
 /**
- * Real Manager, tiny deterministic world. Centre of a 3x3 world is `{ x: 1, y: 1 }`,
- * which keeps edge behaviour easy to assert.
+ * Fake Manager: Router tests must assert transport mapping, not game rules.
+ * `getSnapshot` enforces the unknown-actor contract; `submitIntent`/`step` are
+ * overridable per test.
  */
-function createTestWorld(overrides: Partial<WorldManager> = {}): WorldManager {
-  const world = createWorldManager({
-    // A 3x3 all-walkable map: the centre { 1, 1 } is spawn, one east step to
-    // { 2, 1 } is legal, and the second leaves the map (a refusal).
-    map: ['ggg', 'ggg', 'ggg'],
-    worldId: TEST_WORLD_ID,
-    actorId: ACTOR_ID,
-    clock: () => new Date(FIXED_TIME),
-  });
+function createFakeWorld(overrides: Partial<WorldManager> = {}): WorldManager {
+  const world: WorldManager = {
+    getSnapshot: ({ actorId }) => {
+      if (actorId !== ACTOR_ID) {
+        throw new UnknownActorError(actorId);
+      }
+      return structuredClone(SNAPSHOT);
+    },
+    submitIntent: ({ actorId }) => {
+      if (actorId !== ACTOR_ID) {
+        throw new UnknownActorError(actorId);
+      }
+      return COMMAND_BATCH;
+    },
+    step: () => EMPTY_BATCH,
+  };
   return Object.assign(world, overrides);
+}
+
+/** Controllable `WorldStreamPort` capturing subscriptions for assertions. */
+interface StreamPortHarness {
+  readonly port: WorldStreamPort;
+  push(batch: GameEventBatch): void;
+  subscriberCount(): number;
+  unsubscribedCount(): number;
+}
+
+function createStreamPort(): StreamPortHarness {
+  const listeners = new Set<(batch: GameEventBatch) => void>();
+  let unsubscribed = 0;
+  return {
+    port: {
+      subscribe(listener) {
+        listeners.add(listener);
+        return () => {
+          if (listeners.delete(listener)) {
+            unsubscribed += 1;
+          }
+        };
+      },
+    },
+    push(batch) {
+      for (const listener of listeners) {
+        listener(batch);
+      }
+    },
+    subscriberCount: () => listeners.size,
+    unsubscribedCount: () => unsubscribed,
+  };
 }
 
 const openServers: Server[] = [];
 
 async function startServer(
   gameInfo: GameInfoManager = createFakeManager(),
-  world: WorldManager = createTestWorld(),
+  world: WorldManager = createFakeWorld(),
   resolveActorId: ResolveActorId = () => ACTOR_ID,
+  worldStream: WorldStreamPort = createStreamPort().port,
 ): Promise<string> {
-  const server = createServer(createRequestListener({ gameInfo, world, resolveActorId }));
+  const server = createServer(
+    createRequestListener({ gameInfo, world, worldStream, resolveActorId }),
+  );
   openServers.push(server);
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
@@ -95,6 +193,8 @@ function postCommand(baseUrl: string, body: string): Promise<Response> {
   });
 }
 
+const MOVE_INTENT = { type: 'actor.moveIntent', movement: { x: 0, z: 1 } } as const;
+
 /** GET `WORLD_PATH` and return the validated snapshot. */
 async function fetchWorld(baseUrl: string): Promise<WorldSnapshot> {
   const response = await fetch(`${baseUrl}${WORLD_PATH}`);
@@ -102,13 +202,6 @@ async function fetchWorld(baseUrl: string): Promise<WorldSnapshot> {
   expect(response.headers.get('content-type')).toBe('application/json; charset=utf-8');
   const parsed = parseGetWorldResponse(await response.json());
   return parsed.world;
-}
-
-/** The single entity the caller controls (`actorId` is the resolved actor). */
-function controlledEntity(world: WorldSnapshot): EntityState {
-  const entity = world.entities.find((candidate) => candidate.actorId === ACTOR_ID);
-  expect(entity).toBeDefined();
-  return entity as EntityState;
 }
 
 /**
@@ -132,6 +225,65 @@ async function expectProtocolError(
   expect(body.error.code).toBe(code);
   expect(typeof body.error.message).toBe('string');
   return body;
+}
+
+/** Incremental SSE reader: parses one `WorldStreamMessage` per `next()`. */
+interface SseConnection {
+  readonly response: Response;
+  next(): Promise<WorldStreamMessage>;
+  close(): Promise<void>;
+}
+
+async function openSse(url: string): Promise<SseConnection> {
+  const response = await fetch(url, { headers: { accept: 'text/event-stream' } });
+  const body = response.body;
+  if (body === null) {
+    throw new Error('stream response has no body');
+  }
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  return {
+    response,
+    async next(): Promise<WorldStreamMessage> {
+      for (;;) {
+        const boundary = buffer.indexOf('\n\n');
+        if (boundary !== -1) {
+          const frame = buffer.slice(0, boundary);
+          buffer = buffer.slice(boundary + 2);
+          const data = frame
+            .split('\n')
+            .filter((line) => line.startsWith('data:'))
+            .map((line) => line.slice(5).trim())
+            .join('\n');
+          if (data.length === 0) {
+            // Heartbeat / comment frame; keep reading.
+            continue;
+          }
+          return parseWorldStreamMessage(JSON.parse(data));
+        }
+        const { value, done } = await reader.read();
+        if (done) {
+          throw new Error('stream ended before the next frame');
+        }
+        buffer += decoder.decode(value, { stream: true });
+      }
+    },
+    async close(): Promise<void> {
+      await reader.cancel();
+    },
+  };
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
+  const started = Date.now();
+  while (!predicate()) {
+    if (Date.now() - started > timeoutMs) {
+      throw new Error('timed out waiting for condition');
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
 }
 
 afterEach(async () => {
@@ -243,18 +395,15 @@ describe('createRequestListener', () => {
     const secret = 'command-secret-message with stack detail';
     const baseUrl = await startServer(
       createFakeManager(),
-      createTestWorld({
-        submitCommand: () => {
+      createFakeWorld({
+        submitIntent: () => {
           throw new Error(secret);
         },
       }),
     );
 
     try {
-      const response = await postCommand(
-        baseUrl,
-        JSON.stringify({ type: 'actor.move', direction: 'east' }),
-      );
+      const response = await postCommand(baseUrl, JSON.stringify(MOVE_INTENT));
 
       expect(response.status).toBe(500);
       expect(response.headers.get('content-type')).toBe('application/json; charset=utf-8');
@@ -278,102 +427,46 @@ describe('createRequestListener', () => {
 
     const world = await fetchWorld(baseUrl);
 
-    // Guard against the historical `{ world: { world: { size } } }` nesting
-    // that `toEqual` on an unknown silently accepted (tsc could not catch it).
     expect(Object.keys(world).sort()).toEqual([
+      'bounds',
       'controlledActorId',
       'entities',
+      'grid',
       'serverTime',
-      'size',
       'tiles',
       'worldId',
     ]);
     expect(world.worldId).toBe(TEST_WORLD_ID);
-    expect(world.size).toEqual({ width: 3, height: 3 });
+    expect(world.grid).toEqual({ origin: { x: 0, y: 0, z: 0 }, width: 3, depth: 3, cellSize: 1 });
     expect(world.tiles).toHaveLength(9);
     expect(world.serverTime).toBe(FIXED_TIME);
     expect(world.controlledActorId).toBe(ACTOR_ID);
 
-    const controlled = controlledEntity(world);
-    expect(controlled.kind).toBe('character');
-    expect(controlled.visible).toBe(true);
-    expect(controlled.transform).toEqual({ x: 1, y: 1 });
+    const controlled = world.entities.find((entity) => entity.actorId === ACTOR_ID);
+    expect(controlled?.kind).toBe('character');
+    expect(controlled?.transform.position).toEqual({ x: 1, y: 0, z: 1 });
   });
 
-  it('advances the controlled actor one tile east and reports it as a single transform.changed event', async () => {
+  it('relays the Manager batch for a moveIntent command verbatim', async () => {
     const baseUrl = await startServer();
 
-    const response = await postCommand(
-      baseUrl,
-      JSON.stringify({ type: 'actor.move', direction: 'east' }),
-    );
+    const response = await postCommand(baseUrl, JSON.stringify(MOVE_INTENT));
 
     expect(response.status).toBe(200);
     expect(response.headers.get('content-type')).toBe('application/json; charset=utf-8');
 
-    const parsed = parseSubmitCommandResponse(await response.json());
-    expect(parsed.serverTime).toBe(FIXED_TIME);
-
-    const changed = parsed.events.filter((event) => event.type === 'transform.changed');
-    expect(changed).toHaveLength(1);
-    const event = changed[0];
-    if (event.type !== 'transform.changed') {
-      throw new Error('expected a transform.changed event');
-    }
-    expect(event.transform).toEqual({ x: 2, y: 1 });
-
-    // The authoritative snapshot agrees with the emitted delta.
-    const world = await fetchWorld(baseUrl);
-    expect(controlledEntity(world).transform).toEqual({ x: 2, y: 1 });
-  });
-
-  it('expresses a refused step as 200 with an empty events array, not an error', async () => {
-    const baseUrl = await startServer();
-
-    // Centre { 1, 1 } in a 3x3 world: one east step is legal, the second is not.
-    const first = await postCommand(
-      baseUrl,
-      JSON.stringify({ type: 'actor.move', direction: 'east' }),
-    );
-    expect(first.status).toBe(200);
-    const firstBody = parseSubmitCommandResponse(await first.json());
-    expect(firstBody.events).toHaveLength(1);
-
-    const second = await postCommand(
-      baseUrl,
-      JSON.stringify({ type: 'actor.move', direction: 'east' }),
-    );
-
-    // A refused command is not an error: still 200 with no observable delta.
-    expect(second.status).toBe(200);
-    expect(second.headers.get('content-type')).toBe('application/json; charset=utf-8');
-    const secondBody = parseSubmitCommandResponse(await second.json());
-    expect(secondBody.events).toEqual([]);
+    const batch = parseGameEventBatch(await response.json());
+    expect(batch).toEqual(COMMAND_BATCH);
   });
 
   it('is collision-agnostic: relays a Manager refusal as 200 with empty events and no error body', async () => {
     // Collision is a Manager runtime rule; the Router must not decide it or
     // reinterpret a refusal. A `WorldManager` that always refuses must surface
     // as a successful command whose delta is simply empty, never a ProtocolError.
-    const refusalSnapshot: WorldSnapshot = {
-      worldId: parseWorldId('refusal-world'),
-      size: { width: 1, height: 1 },
-      tiles: [{ transform: { x: 0, y: 0 }, terrain: 'grass' }],
-      entities: [],
-      controlledActorId: null,
-      serverTime: FIXED_TIME,
-    };
-    const refusingWorld: WorldManager = {
-      // Required by the interface; the command route never reads the snapshot.
-      getSnapshot: () => refusalSnapshot,
-      submitCommand: () => ({ events: [], serverTime: FIXED_TIME }),
-    };
+    const refusingWorld = createFakeWorld({ submitIntent: () => EMPTY_BATCH });
     const baseUrl = await startServer(createFakeManager(), refusingWorld);
 
-    const response = await postCommand(
-      baseUrl,
-      JSON.stringify({ type: 'actor.move', direction: 'east' }),
-    );
+    const response = await postCommand(baseUrl, JSON.stringify(MOVE_INTENT));
 
     expect(response.status).toBe(200);
     expect(response.headers.get('content-type')).toBe('application/json; charset=utf-8');
@@ -382,7 +475,7 @@ describe('createRequestListener', () => {
     expect(body).not.toHaveProperty('error');
     expect(body).toEqual({ events: [], serverTime: FIXED_TIME });
 
-    const parsed = parseSubmitCommandResponse(body);
+    const parsed = parseGameEventBatch(body);
     expect(parsed.events).toEqual([]);
     expect(parsed.serverTime).toBe(FIXED_TIME);
   });
@@ -392,21 +485,37 @@ describe('createRequestListener', () => {
 
     const response = await postCommand(
       baseUrl,
-      JSON.stringify({ type: 'actor.dance', direction: 'east' }),
+      JSON.stringify({ type: 'actor.dance', movement: { x: 0, z: 1 } }),
     );
 
     await expectProtocolError(response, 'BAD_REQUEST', 400);
   });
 
-  it('returns 404 NOT_FOUND when the resolved actor is unknown to the manager', async () => {
-    const baseUrl = await startServer(createFakeManager(), createTestWorld(), () =>
-      parseActorId('nobody'),
-    );
+  it('returns 400 BAD_REQUEST when the movement magnitude exceeds 1', async () => {
+    const baseUrl = await startServer();
 
     const response = await postCommand(
       baseUrl,
-      JSON.stringify({ type: 'actor.move', direction: 'north' }),
+      JSON.stringify({ type: 'actor.moveIntent', movement: { x: 1, z: 1 } }),
     );
+
+    await expectProtocolError(response, 'BAD_REQUEST', 400);
+  });
+
+  it('returns 400 BAD_REQUEST for a missing movement field', async () => {
+    const baseUrl = await startServer();
+
+    const response = await postCommand(baseUrl, JSON.stringify({ type: 'actor.moveIntent' }));
+
+    await expectProtocolError(response, 'BAD_REQUEST', 400);
+  });
+
+  it('returns 404 NOT_FOUND when the resolved actor is unknown to the manager', async () => {
+    const baseUrl = await startServer(createFakeManager(), createFakeWorld(), () =>
+      parseActorId('nobody'),
+    );
+
+    const response = await postCommand(baseUrl, JSON.stringify(MOVE_INTENT));
 
     const body = await expectProtocolError(response, 'NOT_FOUND', 404);
     expect(body.error.message).toContain('nobody');
@@ -417,7 +526,7 @@ describe('createRequestListener', () => {
 
     const response = await postCommand(
       baseUrl,
-      JSON.stringify({ type: 'actor.move', actorId: 'actor-1', direction: 'east' }),
+      JSON.stringify({ ...MOVE_INTENT, actorId: 'actor-1' }),
     );
 
     await expectProtocolError(response, 'BAD_REQUEST', 400);
@@ -428,7 +537,7 @@ describe('createRequestListener', () => {
 
     const response = await postCommand(
       baseUrl,
-      JSON.stringify({ type: 'actor.move', playerId: 'player-1', direction: 'east' }),
+      JSON.stringify({ ...MOVE_INTENT, playerId: 'player-1' }),
     );
 
     await expectProtocolError(response, 'BAD_REQUEST', 400);
@@ -438,12 +547,9 @@ describe('createRequestListener', () => {
     // The manager only knows `actor-1`; the resolver yields a different actor,
     // so the command is rejected even though the body cannot name one at all.
     const resolver = vi.fn((): ReturnType<ResolveActorId> => parseActorId('ghost'));
-    const baseUrl = await startServer(createFakeManager(), createTestWorld(), resolver);
+    const baseUrl = await startServer(createFakeManager(), createFakeWorld(), resolver);
 
-    const response = await postCommand(
-      baseUrl,
-      JSON.stringify({ type: 'actor.move', direction: 'east' }),
-    );
+    const response = await postCommand(baseUrl, JSON.stringify(MOVE_INTENT));
 
     const body = await expectProtocolError(response, 'NOT_FOUND', 404);
     expect(body.error.message).toContain('ghost');
@@ -452,12 +558,9 @@ describe('createRequestListener', () => {
 
   it('consults the resolver exactly once per command request', async () => {
     const resolver = vi.fn((): ReturnType<ResolveActorId> => ACTOR_ID);
-    const baseUrl = await startServer(createFakeManager(), createTestWorld(), resolver);
+    const baseUrl = await startServer(createFakeManager(), createFakeWorld(), resolver);
 
-    const response = await postCommand(
-      baseUrl,
-      JSON.stringify({ type: 'actor.move', direction: 'east' }),
-    );
+    const response = await postCommand(baseUrl, JSON.stringify(MOVE_INTENT));
 
     expect(response.status).toBe(200);
     expect(resolver).toHaveBeenCalledTimes(1);
@@ -465,7 +568,7 @@ describe('createRequestListener', () => {
 
   it('consults the resolver exactly once per world request', async () => {
     const resolver = vi.fn((): ReturnType<ResolveActorId> => ACTOR_ID);
-    const baseUrl = await startServer(createFakeManager(), createTestWorld(), resolver);
+    const baseUrl = await startServer(createFakeManager(), createFakeWorld(), resolver);
 
     const response = await fetch(`${baseUrl}${WORLD_PATH}`);
 
@@ -476,7 +579,7 @@ describe('createRequestListener', () => {
   it('maps a throwing resolver to an opaque 500 and leaks no reason', async () => {
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const secret = 'resolver-secret do not leak';
-    const baseUrl = await startServer(createFakeManager(), createTestWorld(), () => {
+    const baseUrl = await startServer(createFakeManager(), createFakeWorld(), () => {
       throw new Error(secret);
     });
 
@@ -497,7 +600,7 @@ describe('createRequestListener', () => {
   it('maps a rejecting resolver to an opaque 500 and leaks no reason', async () => {
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const secret = 'async-resolver-secret do not leak';
-    const baseUrl = await startServer(createFakeManager(), createTestWorld(), async () => {
+    const baseUrl = await startServer(createFakeManager(), createFakeWorld(), async () => {
       throw new Error(secret);
     });
 
@@ -515,31 +618,12 @@ describe('createRequestListener', () => {
     }
   });
 
-  it('returns 400 BAD_REQUEST for an invalid direction', async () => {
-    const baseUrl = await startServer();
-
-    const response = await postCommand(
-      baseUrl,
-      JSON.stringify({ type: 'actor.move', direction: 'north-west' }),
-    );
-
-    await expectProtocolError(response, 'BAD_REQUEST', 400);
-  });
-
-  it('returns 400 BAD_REQUEST for a missing field', async () => {
-    const baseUrl = await startServer();
-
-    const response = await postCommand(baseUrl, JSON.stringify({ type: 'actor.move' }));
-
-    await expectProtocolError(response, 'BAD_REQUEST', 400);
-  });
-
   it('returns 400 BAD_REQUEST for an extra field', async () => {
     const baseUrl = await startServer();
 
     const response = await postCommand(
       baseUrl,
-      JSON.stringify({ type: 'actor.move', direction: 'north', extra: true }),
+      JSON.stringify({ ...MOVE_INTENT, extra: true }),
     );
 
     await expectProtocolError(response, 'BAD_REQUEST', 400);
@@ -597,9 +681,198 @@ describe('createRequestListener', () => {
     const response = await fetch(`${baseUrl}/api/actor/move`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ type: 'actor.move', direction: 'east' }),
+      body: JSON.stringify(MOVE_INTENT),
     });
 
     await expectProtocolError(response, 'NOT_FOUND', 404);
+  });
+
+  it('serves GET STREAM_PATH with SSE headers and a leading snapshot frame', async () => {
+    expect(STREAM_PATH).toBe('/api/stream');
+    const baseUrl = await startServer();
+
+    const sse = await openSse(`${baseUrl}${STREAM_PATH}`);
+
+    expect(sse.response.status).toBe(200);
+    expect(sse.response.headers.get('content-type')).toBe('text/event-stream');
+    expect(sse.response.headers.get('cache-control')).toBe('no-cache');
+    expect(sse.response.headers.get('connection')).toBe('keep-alive');
+
+    const first = await sse.next();
+    expect(first.type).toBe('snapshot');
+    if (first.type !== 'snapshot') {
+      throw new Error('expected a snapshot frame first');
+    }
+    expect(first.snapshot.worldId).toBe(TEST_WORLD_ID);
+    expect(first.snapshot.controlledActorId).toBe(ACTOR_ID);
+
+    await sse.close();
+  });
+
+  it('relays a batch pushed through the worldStream port as an events frame', async () => {
+    const stream = createStreamPort();
+    const baseUrl = await startServer(
+      createFakeManager(),
+      createFakeWorld(),
+      () => ACTOR_ID,
+      stream.port,
+    );
+
+    const sse = await openSse(`${baseUrl}${STREAM_PATH}`);
+    const first = await sse.next();
+    expect(first.type).toBe('snapshot');
+    expect(stream.subscriberCount()).toBe(1);
+
+    stream.push(COMMAND_BATCH);
+
+    const message = await sse.next();
+    expect(message.type).toBe('events');
+    if (message.type !== 'events') {
+      throw new Error('expected an events frame');
+    }
+    expect(message.batch).toEqual(COMMAND_BATCH);
+    expect(parseWorldStreamMessage(message)).toEqual(message);
+
+    await sse.close();
+  });
+
+  it('unsubscribes and ends the route when the client disconnects', async () => {
+    const stream = createStreamPort();
+    const baseUrl = await startServer(
+      createFakeManager(),
+      createFakeWorld(),
+      () => ACTOR_ID,
+      stream.port,
+    );
+
+    const sse = await openSse(`${baseUrl}${STREAM_PATH}`);
+    await sse.next();
+    expect(stream.subscriberCount()).toBe(1);
+
+    await sse.close();
+
+    await waitFor(() => stream.subscriberCount() === 0);
+    expect(stream.unsubscribedCount()).toBe(1);
+  });
+
+  it('does not warn when an SSE client disconnects', async () => {
+    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const stream = createStreamPort();
+    const baseUrl = await startServer(
+      createFakeManager(),
+      createFakeWorld(),
+      () => ACTOR_ID,
+      stream.port,
+    );
+
+    try {
+      const controller = new AbortController();
+      const response = await fetch(`${baseUrl}${STREAM_PATH}`, {
+        headers: { accept: 'text/event-stream' },
+        signal: controller.signal,
+      });
+      expect(response.status).toBe(200);
+      const body = response.body;
+      if (body === null) {
+        throw new Error('stream response has no body');
+      }
+      const reader = body.getReader();
+      await reader.read();
+      expect(stream.subscriberCount()).toBe(1);
+
+      // Closing an event stream is the normal end of the stream, so aborting
+      // the client must not be reported as an exceptional client failure.
+      controller.abort();
+
+      await waitFor(() => stream.subscriberCount() === 0);
+      expect(stream.unsubscribedCount()).toBe(1);
+      expect(consoleWarn).not.toHaveBeenCalled();
+    } finally {
+      consoleWarn.mockRestore();
+    }
+  });
+
+  it('still warns when an ordinary request aborts before it is answered', async () => {
+    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    let resolverInvoked = false;
+    let releaseActor: (actorId: ActorId) => void = () => undefined;
+    const pendingActor = new Promise<ActorId>((resolve) => {
+      releaseActor = resolve;
+    });
+    const baseUrl = await startServer(createFakeManager(), createFakeWorld(), () => {
+      resolverInvoked = true;
+      return pendingActor;
+    });
+
+    try {
+      const controller = new AbortController();
+      const pendingResponse = fetch(`${baseUrl}${GAME_INFO_PATH}`, { signal: controller.signal }).catch(
+        () => undefined,
+      );
+      await waitFor(() => resolverInvoked);
+
+      // An ordinary JSON request abandoned before it is answered is a genuine
+      // client failure and must keep its warning.
+      controller.abort();
+
+      await waitFor(() => consoleWarn.mock.calls.length > 0);
+      expect(consoleWarn).toHaveBeenCalledWith('[router] client aborted the request');
+      releaseActor(ACTOR_ID);
+      await pendingResponse;
+    } finally {
+      consoleWarn.mockRestore();
+    }
+  });
+
+  it('fails the stream opaquely when actor resolution rejects', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const secret = 'stream-resolver-secret do not leak';
+    const baseUrl = await startServer(createFakeManager(), createFakeWorld(), async () => {
+      throw new Error(secret);
+    });
+
+    try {
+      const response = await fetch(`${baseUrl}${STREAM_PATH}`);
+
+      expect(response.status).toBe(500);
+      expect(response.headers.get('content-type')).toBe('application/json; charset=utf-8');
+      const raw = await response.text();
+      expect(raw).not.toContain(secret);
+      const body = JSON.parse(raw) as ProtocolError;
+      expect(body.error.code).toBe('INTERNAL_ERROR');
+      expect(consoleError).toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it('does not expose a stream subscription when actor resolution rejects', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const stream = createStreamPort();
+    const baseUrl = await startServer(
+      createFakeManager(),
+      createFakeWorld(),
+      () => {
+        throw new Error('no actor');
+      },
+      stream.port,
+    );
+
+    try {
+      const response = await fetch(`${baseUrl}${STREAM_PATH}`);
+      expect(response.status).toBe(500);
+      expect(stream.subscriberCount()).toBe(0);
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it('returns 405 with Allow: GET for POST on the stream path', async () => {
+    const baseUrl = await startServer();
+
+    const response = await fetch(`${baseUrl}${STREAM_PATH}`, { method: 'POST' });
+
+    expect(response.headers.get('allow')).toBe('GET');
+    await expectProtocolError(response, 'METHOD_NOT_ALLOWED', 405);
   });
 });

@@ -16,11 +16,13 @@ import type {
   AnimationId,
   AppearanceId,
   NodeId,
+  Quat,
   RenderCommand,
   RenderCommandType,
   RenderFrame,
   RenderLayer,
   RenderTransform,
+  Vec3,
 } from '../src/index.ts';
 
 const nodeA = 'node-a' as NodeId;
@@ -28,8 +30,18 @@ const nodeB = 'node-b' as NodeId;
 const appearanceFarmer = 'appearance.farmer' as AppearanceId;
 const appearanceTree = 'appearance.tree' as AppearanceId;
 const animationWalk = 'animation.walk' as AnimationId;
-const transformOrigin: RenderTransform = { x: 0, y: 0 };
-const transformTarget: RenderTransform = { x: 4, y: 7 };
+const identityRotation: Quat = { x: 0, y: 0, z: 0, w: 1 };
+const unitScale: Vec3 = { x: 1, y: 1, z: 1 };
+const transformOrigin: RenderTransform = {
+  position: { x: 0, y: 0, z: 0 },
+  rotation: identityRotation,
+  scale: unitScale,
+};
+const transformTarget: RenderTransform = {
+  position: { x: 4, y: 0, z: 7 },
+  rotation: { x: 0, y: 0.7071067811865476, z: 0, w: 0.7071067811865476 },
+  scale: unitScale,
+};
 const baseLayer: RenderLayer = 'base';
 
 /** One literal for every `RenderCommand` member (adding a member breaks this). */
@@ -133,6 +145,9 @@ export function label(command: RenderCommand): string {
 export const labels: readonly string[] = frame.map((command) => label(command));
 
 // --- Negative cases: each line must be a compile error. ---------------------
+
+// @ts-expect-error a 2D `{ x, y }` transform is no longer a RenderTransform (the ISA is real 3D)
+export const legacy2dTransform: RenderTransform = { x: 0, y: 0 };
 
 // @ts-expect-error a plain string is not a NodeId
 export const plainAsNode: NodeId = 'node-a';

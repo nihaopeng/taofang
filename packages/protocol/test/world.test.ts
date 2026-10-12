@@ -1,22 +1,29 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  isCellCoord,
   isGetWorldResponse,
+  isGridSpec,
   isTerrainKind,
   isTileState,
-  isWorldSize,
+  isWorldBounds,
   isWorldSnapshot,
+  parseCellCoord,
   parseGetWorldResponse,
+  parseGridSpec,
   parseTerrainKind,
   parseTileState,
-  parseWorldSize,
+  parseWorldBounds,
   parseWorldSnapshot,
 } from '../src/index.ts';
 import {
   captureParseError,
-  phase4WorldSnapshot,
+  phase6WorldSnapshot,
+  validCellCoord,
   validEntityState,
+  validGridSpec,
   validTileState,
+  validWorldBounds,
   validWorldSnapshot,
 } from './support.ts';
 
@@ -29,35 +36,130 @@ const nonObjects: Array<[string, unknown]> = [
   ['an array', []],
 ];
 
-describe('isWorldSize', () => {
-  it('accepts a well-formed WorldSize', () => {
-    expect(isWorldSize({ width: 20, height: 15 })).toBe(true);
-  });
-
-  it('rejects zero, negative, and non-integer dimensions', () => {
-    expect(isWorldSize({ width: 0, height: 15 })).toBe(false);
-    expect(isWorldSize({ width: 20, height: 0 })).toBe(false);
-    expect(isWorldSize({ width: -1, height: 15 })).toBe(false);
-    expect(isWorldSize({ width: 20, height: -4 })).toBe(false);
-    expect(isWorldSize({ width: 1.5, height: 15 })).toBe(false);
-    expect(isWorldSize({ width: 20, height: Number.NaN })).toBe(false);
-    expect(isWorldSize({ width: Number.POSITIVE_INFINITY, height: 15 })).toBe(false);
+describe('isWorldBounds', () => {
+  it('accepts a well-formed WorldBounds', () => {
+    expect(isWorldBounds(validWorldBounds)).toBe(true);
   });
 
   it.each(nonObjects)('rejects %s', (_label, value) => {
-    expect(isWorldSize(value)).toBe(false);
+    expect(isWorldBounds(value)).toBe(false);
   });
 
-  it.each(['width', 'height'])('rejects a missing %s', (key) => {
-    const value: Record<string, unknown> = { width: 20, height: 15 };
+  it.each(['min', 'max'])('rejects a missing %s', (key) => {
+    const value: Record<string, unknown> = { ...validWorldBounds };
     delete value[key];
-    expect(isWorldSize(value)).toBe(false);
+    expect(isWorldBounds(value)).toBe(false);
   });
 
   it('rejects unknown extra fields and wrong field types', () => {
-    expect(isWorldSize({ width: 20, height: 15, depth: 2 })).toBe(false);
-    expect(isWorldSize({ width: '20', height: 15 })).toBe(false);
-    expect(isWorldSize({ width: 20, height: null })).toBe(false);
+    expect(isWorldBounds({ ...validWorldBounds, center: { x: 0, y: 0, z: 0 } })).toBe(false);
+    expect(isWorldBounds({ ...validWorldBounds, min: null })).toBe(false);
+    expect(isWorldBounds({ ...validWorldBounds, min: { x: 0, y: 0 } })).toBe(false);
+    expect(isWorldBounds({ ...validWorldBounds, max: { x: 0, y: 0, z: '1' } })).toBe(false);
+  });
+});
+
+describe('parseWorldBounds', () => {
+  it('returns the value unchanged when valid', () => {
+    expect(parseWorldBounds(validWorldBounds)).toBe(validWorldBounds);
+  });
+
+  it('throws ProtocolParseError with a message when invalid', () => {
+    const error = captureParseError(() => parseWorldBounds({ min: null, max: null }));
+    expect(error.message).toBe('Invalid WorldBounds payload');
+    expect(error.code).toBe('BAD_REQUEST');
+  });
+});
+
+describe('isGridSpec', () => {
+  it('accepts a well-formed GridSpec (including a fractional cellSize)', () => {
+    expect(isGridSpec(validGridSpec)).toBe(true);
+    expect(isGridSpec({ ...validGridSpec, cellSize: 0.5 })).toBe(true);
+    expect(isGridSpec({ ...validGridSpec, width: 4.5, depth: 2.25 })).toBe(true);
+  });
+
+  it.each(nonObjects)('rejects %s', (_label, value) => {
+    expect(isGridSpec(value)).toBe(false);
+  });
+
+  it.each(['origin', 'width', 'depth', 'cellSize'])('rejects a missing %s', (key) => {
+    const value: Record<string, unknown> = { ...validGridSpec };
+    delete value[key];
+    expect(isGridSpec(value)).toBe(false);
+  });
+
+  it('rejects zero, negative, and non-finite dimensions', () => {
+    expect(isGridSpec({ ...validGridSpec, width: 0 })).toBe(false);
+    expect(isGridSpec({ ...validGridSpec, depth: 0 })).toBe(false);
+    expect(isGridSpec({ ...validGridSpec, cellSize: 0 })).toBe(false);
+    expect(isGridSpec({ ...validGridSpec, width: -1 })).toBe(false);
+    expect(isGridSpec({ ...validGridSpec, depth: -1 })).toBe(false);
+    expect(isGridSpec({ ...validGridSpec, cellSize: -0.5 })).toBe(false);
+    expect(isGridSpec({ ...validGridSpec, width: Number.NaN })).toBe(false);
+    expect(isGridSpec({ ...validGridSpec, depth: Number.POSITIVE_INFINITY })).toBe(false);
+    expect(isGridSpec({ ...validGridSpec, cellSize: '1' })).toBe(false);
+  });
+
+  it('rejects unknown extra fields and a malformed origin', () => {
+    expect(isGridSpec({ ...validGridSpec, height: 1 })).toBe(false);
+    expect(isGridSpec({ ...validGridSpec, origin: null })).toBe(false);
+    expect(isGridSpec({ ...validGridSpec, origin: { x: 0, y: 0 } })).toBe(false);
+  });
+});
+
+describe('parseGridSpec', () => {
+  it('returns the value unchanged when valid', () => {
+    expect(parseGridSpec(validGridSpec)).toBe(validGridSpec);
+  });
+
+  it('throws ProtocolParseError with a message when invalid', () => {
+    const error = captureParseError(() => parseGridSpec({ ...validGridSpec, cellSize: 0 }));
+    expect(error.message).toBe('Invalid GridSpec payload');
+    expect(error.code).toBe('BAD_REQUEST');
+  });
+});
+
+describe('isCellCoord', () => {
+  it('accepts finite integer coordinates of any sign', () => {
+    expect(isCellCoord(validCellCoord)).toBe(true);
+    expect(isCellCoord({ x: 0, z: 0 })).toBe(true);
+    expect(isCellCoord({ x: -4, z: 9 })).toBe(true);
+  });
+
+  it.each(nonObjects)('rejects %s', (_label, value) => {
+    expect(isCellCoord(value)).toBe(false);
+  });
+
+  it.each(['x', 'z'])('rejects a missing %s', (key) => {
+    const value: Record<string, unknown> = { ...validCellCoord };
+    delete value[key];
+    expect(isCellCoord(value)).toBe(false);
+  });
+
+  it('rejects a 2D `{ x, y }` shape and unknown extra fields', () => {
+    expect(isCellCoord({ x: 1, y: 2 })).toBe(false);
+    expect(isCellCoord({ ...validCellCoord, y: 9 })).toBe(false);
+  });
+
+  it('rejects non-integers, non-numbers, and non-finite values', () => {
+    expect(isCellCoord({ ...validCellCoord, x: 1.5 })).toBe(false);
+    expect(isCellCoord({ ...validCellCoord, z: 2.5 })).toBe(false);
+    expect(isCellCoord({ ...validCellCoord, x: '2' })).toBe(false);
+    expect(isCellCoord({ ...validCellCoord, z: null })).toBe(false);
+    expect(isCellCoord({ ...validCellCoord, x: Number.NaN })).toBe(false);
+    expect(isCellCoord({ ...validCellCoord, z: Number.POSITIVE_INFINITY })).toBe(false);
+  });
+});
+
+describe('parseCellCoord', () => {
+  it('returns the value unchanged when valid', () => {
+    expect(parseCellCoord(validCellCoord)).toBe(validCellCoord);
+  });
+
+  it('throws ProtocolParseError with a message when invalid', () => {
+    const error = captureParseError(() => parseCellCoord({ x: 1.5, z: 2 }));
+    expect(error.message).toBe('Invalid CellCoord payload');
+    expect(error.code).toBe('BAD_REQUEST');
   });
 });
 
@@ -100,19 +202,24 @@ describe('parseTerrainKind', () => {
 });
 
 describe('isTileState', () => {
-  it('accepts a well-formed TileState', () => {
+  it('accepts a well-formed TileState (cell + terrain, no position)', () => {
     expect(isTileState(validTileState)).toBe(true);
+    expect(isTileState({ ...validTileState, terrain: 'water' })).toBe(true);
   });
 
-  it("accepts a 'water' tile (the phase-6 ground kind)", () => {
-    expect(isTileState({ ...validTileState, terrain: 'water' })).toBe(true);
+  it('REJECTS a TileState carrying a `transform` key (the grid holds no position)', () => {
+    expect(isTileState({ cell: validCellCoord, terrain: 'grass', transform: { x: 1, y: 2 } })).toBe(
+      false,
+    );
+    // The phase-6 tile shape must not be accepted.
+    expect(isTileState({ transform: { x: 2, y: 3 }, terrain: 'grass' })).toBe(false);
   });
 
   it.each(nonObjects)('rejects %s', (_label, value) => {
     expect(isTileState(value)).toBe(false);
   });
 
-  it.each(['transform', 'terrain'])('rejects a missing %s', (key) => {
+  it.each(['cell', 'terrain'])('rejects a missing %s', (key) => {
     const value: Record<string, unknown> = { ...validTileState };
     delete value[key];
     expect(isTileState(value)).toBe(false);
@@ -124,9 +231,9 @@ describe('isTileState', () => {
   });
 
   it('rejects a wrong type for each field', () => {
-    expect(isTileState({ ...validTileState, transform: null })).toBe(false);
-    expect(isTileState({ ...validTileState, transform: { x: 1, y: 2, extra: 3 } })).toBe(false);
-    expect(isTileState({ ...validTileState, transform: { x: 1.5, y: 2 } })).toBe(false);
+    expect(isTileState({ ...validTileState, cell: null })).toBe(false);
+    expect(isTileState({ ...validTileState, cell: { x: 1, y: 2 } })).toBe(false);
+    expect(isTileState({ ...validTileState, cell: { x: 1.5, z: 2 } })).toBe(false);
     expect(isTileState({ ...validTileState, terrain: 'lava' })).toBe(false);
     expect(isTileState({ ...validTileState, terrain: 1 })).toBe(false);
     expect(isTileState({ ...validTileState, terrain: null })).toBe(false);
@@ -145,29 +252,15 @@ describe('parseTileState', () => {
   });
 });
 
-describe('parseWorldSize', () => {
-  it('returns the value unchanged when valid', () => {
-    const value = { width: 20, height: 15 };
-    expect(parseWorldSize(value)).toBe(value);
-  });
-
-  it('throws ProtocolParseError with a message when invalid', () => {
-    const error = captureParseError(() => parseWorldSize({ width: 0, height: 15 }));
-    expect(error.message).toBe('Invalid WorldSize payload');
-    expect(error.code).toBe('BAD_REQUEST');
-  });
-});
-
 describe('isWorldSnapshot', () => {
   it('accepts a well-formed WorldSnapshot', () => {
     expect(isWorldSnapshot(validWorldSnapshot)).toBe(true);
   });
 
-  it('still validates the phase-5 shape (the additions are additive)', () => {
-    expect(isWorldSnapshot(validWorldSnapshot)).toBe(true);
-    expect(
-      isWorldSnapshot({ ...validWorldSnapshot, tiles: [{ ...validTileState, terrain: 'grass' }] }),
-    ).toBe(true);
+  it('accepts empty tiles and entities lists, and a null controlledActorId', () => {
+    expect(isWorldSnapshot({ ...validWorldSnapshot, tiles: [] })).toBe(true);
+    expect(isWorldSnapshot({ ...validWorldSnapshot, entities: [] })).toBe(true);
+    expect(isWorldSnapshot({ ...validWorldSnapshot, controlledActorId: null })).toBe(true);
   });
 
   it("accepts a snapshot containing a 'water' tile and a 'tree' entity (phase-6 vocabulary)", () => {
@@ -180,24 +273,11 @@ describe('isWorldSnapshot', () => {
     ).toBe(true);
   });
 
-  it('accepts an empty entities list (a world with nothing in it yet)', () => {
-    expect(isWorldSnapshot({ ...validWorldSnapshot, entities: [] })).toBe(true);
-  });
-
-  it('accepts an empty tiles list and a null controlledActorId', () => {
-    expect(isWorldSnapshot({ ...validWorldSnapshot, tiles: [] })).toBe(true);
-    expect(isWorldSnapshot({ ...validWorldSnapshot, controlledActorId: null })).toBe(true);
-  });
-
-  it('accepts a worldId that is any non-empty string', () => {
-    expect(isWorldSnapshot({ ...validWorldSnapshot, worldId: 'overworld' })).toBe(true);
-  });
-
   it.each(nonObjects)('rejects %s', (_label, value) => {
     expect(isWorldSnapshot(value)).toBe(false);
   });
 
-  it.each(['worldId', 'size', 'tiles', 'entities', 'controlledActorId', 'serverTime'])(
+  it.each(['worldId', 'bounds', 'grid', 'tiles', 'entities', 'controlledActorId', 'serverTime'])(
     'rejects a missing %s',
     (key) => {
       const value: Record<string, unknown> = { ...validWorldSnapshot };
@@ -206,8 +286,15 @@ describe('isWorldSnapshot', () => {
     },
   );
 
-  it('rejects unknown extra fields', () => {
+  it('rejects unknown extra fields, including the legacy `size`', () => {
     expect(isWorldSnapshot({ ...validWorldSnapshot, extra: 1 })).toBe(false);
+    expect(isWorldSnapshot({ ...validWorldSnapshot, size: { width: 20, height: 15 } })).toBe(false);
+  });
+
+  it('rejects the phase-6 snapshot shape (WorldSize + 2D transform tile) — the 6 -> 7 break', () => {
+    expect(isWorldSnapshot(phase6WorldSnapshot)).toBe(false);
+    expect(isWorldSnapshot({ ...phase6WorldSnapshot, bounds: validWorldBounds })).toBe(false);
+    expect(isWorldSnapshot({ ...phase6WorldSnapshot, grid: validGridSpec })).toBe(false);
   });
 
   it('rejects a malformed worldId', () => {
@@ -216,40 +303,39 @@ describe('isWorldSnapshot', () => {
     expect(isWorldSnapshot({ ...validWorldSnapshot, worldId: null })).toBe(false);
   });
 
-  it('rejects a malformed size', () => {
-    expect(isWorldSnapshot({ ...validWorldSnapshot, size: null })).toBe(false);
-    expect(isWorldSnapshot({ ...validWorldSnapshot, size: {} })).toBe(false);
-    expect(
-      isWorldSnapshot({ ...validWorldSnapshot, size: { width: 20, height: 15, extra: 1 } }),
-    ).toBe(false);
-    expect(isWorldSnapshot({ ...validWorldSnapshot, size: { width: 0, height: 15 } })).toBe(false);
+  it('rejects a malformed bounds or grid', () => {
+    expect(isWorldSnapshot({ ...validWorldSnapshot, bounds: null })).toBe(false);
+    expect(isWorldSnapshot({ ...validWorldSnapshot, bounds: { min: validWorldBounds.min } })).toBe(
+      false,
+    );
+    expect(isWorldSnapshot({ ...validWorldSnapshot, grid: null })).toBe(false);
+    expect(isWorldSnapshot({ ...validWorldSnapshot, grid: { ...validGridSpec, cellSize: 0 } })).toBe(
+      false,
+    );
   });
 
   it('rejects unknown terrain / entity kind values inside a snapshot (exact-union regression guard)', () => {
-    expect(isWorldSnapshot({ ...validWorldSnapshot, tiles: [{ ...validTileState, terrain: 'lava' }] })).toBe(
-      false,
-    );
-    expect(isWorldSnapshot({ ...validWorldSnapshot, entities: [{ ...validEntityState, kind: 'npc' }] })).toBe(
-      false,
-    );
+    expect(
+      isWorldSnapshot({ ...validWorldSnapshot, tiles: [{ ...validTileState, terrain: 'lava' }] }),
+    ).toBe(false);
+    expect(
+      isWorldSnapshot({ ...validWorldSnapshot, entities: [{ ...validEntityState, kind: 'npc' }] }),
+    ).toBe(false);
   });
 
-  it('rejects entities that are not an array or that contain a malformed entity', () => {
+  it('rejects entities/tiles that are not arrays or that contain a malformed item', () => {
     expect(isWorldSnapshot({ ...validWorldSnapshot, entities: null })).toBe(false);
     expect(isWorldSnapshot({ ...validWorldSnapshot, entities: {} })).toBe(false);
-    expect(isWorldSnapshot({ ...validWorldSnapshot, entities: [{ ...validEntityState, kind: 'npc' }] })).toBe(
-      false,
-    );
     expect(isWorldSnapshot({ ...validWorldSnapshot, entities: ['entity-1'] })).toBe(false);
-  });
-
-  it('rejects tiles that are not an array or that contain a malformed tile', () => {
     expect(isWorldSnapshot({ ...validWorldSnapshot, tiles: null })).toBe(false);
     expect(isWorldSnapshot({ ...validWorldSnapshot, tiles: {} })).toBe(false);
-    expect(isWorldSnapshot({ ...validWorldSnapshot, tiles: [{ ...validTileState, terrain: 'lava' }] })).toBe(
-      false,
-    );
     expect(isWorldSnapshot({ ...validWorldSnapshot, tiles: ['grass'] })).toBe(false);
+    expect(
+      isWorldSnapshot({
+        ...validWorldSnapshot,
+        tiles: [{ cell: validCellCoord, terrain: 'grass', transform: { x: 1, y: 2 } }],
+      }),
+    ).toBe(false);
   });
 
   it('rejects a malformed controlledActorId', () => {
@@ -262,31 +348,6 @@ describe('isWorldSnapshot', () => {
     expect(isWorldSnapshot({ ...validWorldSnapshot, serverTime: 'yesterday' })).toBe(false);
     expect(isWorldSnapshot({ ...validWorldSnapshot, serverTime: 123 })).toBe(false);
   });
-
-  it('rejects the phase-3 single-actor shape (requires entities + controlledActorId)', () => {
-    expect(
-      isWorldSnapshot({
-        size: { width: 20, height: 15 },
-        actor: validEntityState,
-        serverTime: validWorldSnapshot.serverTime,
-      }),
-    ).toBe(false);
-    expect(
-      isWorldSnapshot({
-        size: { width: 20, height: 15 },
-        entities: [validEntityState],
-        actor: validEntityState,
-        controlledActorId: 'actor-1',
-        serverTime: validWorldSnapshot.serverTime,
-      }),
-    ).toBe(false);
-  });
-
-  it('rejects the phase-4 snapshot shape (no worldId, no tiles) — the 3 -> 4 break', () => {
-    expect(isWorldSnapshot(phase4WorldSnapshot)).toBe(false);
-    expect(isWorldSnapshot({ ...phase4WorldSnapshot, worldId: 'world-1' })).toBe(false);
-    expect(isWorldSnapshot({ ...phase4WorldSnapshot, tiles: [] })).toBe(false);
-  });
 });
 
 describe('parseWorldSnapshot', () => {
@@ -295,24 +356,13 @@ describe('parseWorldSnapshot', () => {
   });
 
   it('throws ProtocolParseError with a message when invalid', () => {
-    const error = captureParseError(() => parseWorldSnapshot({ size: {} }));
+    const error = captureParseError(() => parseWorldSnapshot({ size: { width: 20, height: 15 } }));
     expect(error.message).toBe('Invalid WorldSnapshot payload');
     expect(error.code).toBe('BAD_REQUEST');
   });
 
-  it('rejects the phase-3 single-actor shape', () => {
-    const error = captureParseError(() =>
-      parseWorldSnapshot({
-        size: { width: 20, height: 15 },
-        actor: validEntityState,
-        serverTime: validWorldSnapshot.serverTime,
-      }),
-    );
-    expect(error.message).toBe('Invalid WorldSnapshot payload');
-  });
-
-  it('rejects the phase-4 snapshot shape (no worldId, no tiles)', () => {
-    const error = captureParseError(() => parseWorldSnapshot(phase4WorldSnapshot));
+  it('rejects the phase-6 snapshot shape (WorldSize + 2D transform tile)', () => {
+    const error = captureParseError(() => parseWorldSnapshot(phase6WorldSnapshot));
     expect(error.message).toBe('Invalid WorldSnapshot payload');
   });
 });
@@ -336,22 +386,11 @@ describe('isGetWorldResponse', () => {
     expect(isGetWorldResponse({ world: null })).toBe(false);
   });
 
-  it('rejects the phase-3 single-actor snapshot inside `world`', () => {
-    expect(
-      isGetWorldResponse({
-        world: {
-          size: { width: 20, height: 15 },
-          actor: validEntityState,
-          serverTime: validWorldSnapshot.serverTime,
-        },
-      }),
-    ).toBe(false);
-  });
-
-  it('rejects the phase-4 snapshot (no worldId, no tiles) inside `world`', () => {
-    expect(isGetWorldResponse({ world: phase4WorldSnapshot })).toBe(false);
-    expect(isGetWorldResponse({ world: { ...phase4WorldSnapshot, worldId: 'world-1' } })).toBe(false);
-    expect(isGetWorldResponse({ world: { ...phase4WorldSnapshot, tiles: [] } })).toBe(false);
+  it('rejects the phase-6 snapshot shape inside `world`', () => {
+    expect(isGetWorldResponse({ world: phase6WorldSnapshot })).toBe(false);
+    expect(isGetWorldResponse({ world: { ...phase6WorldSnapshot, bounds: validWorldBounds } })).toBe(
+      false,
+    );
   });
 });
 
@@ -367,8 +406,8 @@ describe('parseGetWorldResponse', () => {
     expect(error.code).toBe('BAD_REQUEST');
   });
 
-  it('rejects the phase-4 snapshot (no worldId, no tiles)', () => {
-    const error = captureParseError(() => parseGetWorldResponse({ world: phase4WorldSnapshot }));
+  it('rejects the phase-6 snapshot shape', () => {
+    const error = captureParseError(() => parseGetWorldResponse({ world: phase6WorldSnapshot }));
     expect(error.message).toBe('Invalid GetWorldResponse payload');
   });
 });

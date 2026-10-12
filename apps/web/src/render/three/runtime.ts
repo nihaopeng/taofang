@@ -2,11 +2,11 @@
  * The Three.js runtime: the **only** module allowed to import `three`.
  *
  * It is an *executor* of the Render ISA. It knows nothing about the game: no
- * `actor`, no `entity`, no Organizer import, no game protocol. It receives
- * opaque `NodeId` / `AppearanceId` values and maps them onto a Three.js scene
- * graph. In particular, **which scene group a node lives in is decided by the
- * runtime's PREFAB registry entry for its appearance id, never by any game
- * concept** — the ISA only ever says "a node with an appearance in a layer".
+ * gameplay vocabulary in its logic, no Organizer import, no game protocol. It
+ * receives opaque `NodeId` / `AppearanceId` values and maps them onto a Three.js
+ * scene graph. **Which scene group a node lives in is decided by the runtime's
+ * PREFAB registry entry for its appearance id, never by any game concept** — the
+ * ISA only ever says "a node with an appearance in a layer".
  *
  * Testability without WebGL
  * -------------------------
@@ -16,50 +16,46 @@
  * `mount(canvas)` constructs the `WebGLRenderer`, sizes it, wires a resize
  * observer, and starts the `requestAnimationFrame` loop.
  *
- * 2.5D coordinate mapping (runtime-only; the ISA keeps tile coordinates)
- * ---------------------------------------------------------------------
- * The world is Y-up with the ground in the XZ plane. A render tile
- * `(x, y) -> scene (x, 0, y)`, so tile `+y` (south) is scene `+z`, i.e. toward
- * the camera, and a larger tile `y` appears LOWER on screen. This mapping exists
- * **only here**: `RenderTransform` on the wire carries tile coordinates, and
- * `inspect()` inverts the real `Object3D` position back to tile space so a
- * regression in the mapping is observable in tests.
+ * World-space placement (phase 7)
+ * -------------------------------
+ * Nodes are placed **directly at their authoritative world transform**. There is
+ * no tile/cell interpretation, no tile -> scene mapping, and no per-layer
+ * positional offset: `inspect()` reports real world positions with no inversion.
+ * The only ordering rule is `renderOrder` (the `base` layer draws before the
+ * `object` layer); every other occlusion decision is the real depth buffer's.
+ * Because there is no per-object `z`, an object's on-screen position is fully a
+ * function of its world transform and the camera's pitch/yaw.
  *
- * Camera stance (frozen by Main)
- * ------------------------------
- * Orthographic, front-facing, **no yaw**, tilted down by
- * {@link RENDER_CAMERA.pitchDegrees}. The camera lives in a `CameraRig` that is
- * moved to the focus point; the camera itself is a fixed child of the rig at a
- * fixed offset/rotation. A `setFollowTarget(nodeId)` follows a node's visual
- * position with light smoothing.
+ * CameraRig (the only place "2.5D" is allowed to live)
+ * ---------------------------------------------------
+ * The rig owns follow + smoothing, a **constrained** pitch, free yaw, and zoom.
+ * It is deliberately **orthographic** — that is the 2.5D look and the pragmatic
+ * choice — but the rig is the *only* thing that would change to switch to a
+ * perspective camera: the world model, the Actor motion model, and the Render ISA
+ * carry no projection assumption. Yaw rotates the rig (and therefore the view);
+ * it never changes the world coordinate system.
  *
- * There is deliberately **no camera primitive in the ISA**: the ISA describes
- * scene content, while a camera is a viewer. A single fixed camera behaviour
- * does not justify a primitive. The extension point for multi-camera/cutscenes
- * is this rig: when a second camera must be selected/ordered by scene content,
- * that is the moment a `camera.*` primitive should be considered.
+ * `inspect()` exposes the rig as plain data (`pitchDegrees`, `yawDegrees`,
+ * `zoom`, the frustum, and the camera's world position/forward/up) so tests can
+ * assert pitch clamping, yaw view changes, and zoom extent numerically.
  *
  * Layer / depth / occlusion (frozen policy)
  * ----------------------------------------
- * Occlusion is resolved by a **real 3D depth buffer** plus the tilted
- * orthographic camera. There is no per-object hand-written z, and none may be
- * added. The ISA's `layer` ('base' | 'object') is coarse ordering only and is
- * applied here as a small **depth offset along the camera view axis**, so it
- * separates terrain from objects without changing their on-screen position.
- *
- * Recorded consequence: real sprite/billboard art with alpha transparency will
- * need a uniform y-sorted transparent pass applied to every transparent node —
- * still a runtime-internal policy, still never a per-object patch.
+ * Occlusion is resolved by a **real 3D depth buffer** plus the tilted camera.
+ * There is no per-object hand-written z, and none may be added. The ISA's
+ * `layer` ('base' | 'object') is coarse ordering only and is applied here as
+ * `renderOrder`.
  *
  * Prefab registry / asset abstraction
  * -----------------------------------
  * `AppearanceId -> Prefab { group, defaultAnimation, motion?, createVisual() }`.
- * Prefabs are built from standard Three.js primitives only. Swapping to a sprite
- * atlas / billboards / GLTF / instanced meshes is a change to this registry
- * alone, because the ISA only ever names an appearance; the per-`(layer,
- * appearance)` `Set<NodeId>` bucket index at {@link bucketKey} is a pre-indexed
- * key whose only current consumer is `inspect()` — an instanced realisation is
- * what would consume it for real.
+ * The appearance ids below are **opaque catalogue keys** (data), not game logic:
+ * the runtime never interprets them. Prefabs are built from standard Three.js
+ * primitives only. Swapping to a sprite atlas / billboards / GLTF / instanced
+ * meshes is a change to this registry alone, because the ISA only ever names an
+ * appearance; the per-`(layer, appearance)` `Set<NodeId>` bucket index at
+ * {@link bucketKey} is a pre-indexed key whose only current consumer is
+ * `inspect()` — an instanced realisation is what would consume it for real.
  *
  * The registry also owns animation vocabulary as **data**: `defaultAnimation` is
  * the animation a node rests at, and `motion?` is the placeholder motion for the
@@ -94,6 +90,7 @@ import type {
   NodeId,
   RenderFrame,
   RenderLayer,
+  RenderTransform,
 } from '@starvalley/render-protocol';
 
 /** Scene group a prefab's nodes are parented to. */
@@ -123,13 +120,24 @@ interface Prefab {
   createVisual(): Group;
 }
 
+/** Plain-data snapshot of the camera rig: the only place 2.5D lives. */
+export interface CameraState {
+  /** Downward pitch from the horizontal, in degrees, within the rig's limits. */
+  pitchDegrees: number;
+  /** Yaw about `+Y`, in degrees, normalised to `[0, 360)`. */
+  yawDegrees: number;
+  /** Orthographic zoom factor; larger is closer. */
+  zoom: number;
+  /** World-space point the rig follows/looks at. */
+  focus: { x: number; y: number; z: number };
+}
+
 /**
  * Plain-data view of the runtime for tests and debugging. Never Three objects.
  *
- * `nodes` coordinates are derived from the real `Object3D` position (inverted
- * back to tile space), so the scene mapping itself is under test. `depth` is the
- * real scene-space `z`; because the camera sits on `+z` looking toward `-z`, a
- * LARGER `depth` is CLOSER to the camera and therefore in front.
+ * `nodes[].world`/`rotation`/`yaw` are read back off the node root's real
+ * `Object3D` world transform (not the runtime's bookkeeping copies), so they pin
+ * what the scene graph actually contains.
  */
 export interface RenderInspection {
   mounted: boolean;
@@ -143,12 +151,20 @@ export interface RenderInspection {
   groups: number;
   /** Sun shadow configuration, or `null` once the light rig has been released. */
   shadow: { sunCasts: boolean; mapWidth: number; mapHeight: number } | null;
-  /** The orthographic camera frustum plus its world position and view axes. */
+  /** The camera rig state and the orthographic frustum it produces. */
   camera: {
     left: number;
     right: number;
     top: number;
     bottom: number;
+    /** Constrained downward pitch, in degrees. */
+    pitchDegrees: number;
+    /** Free yaw, in degrees, normalised to `[0, 360)`. */
+    yawDegrees: number;
+    /** Orthographic zoom factor; larger is closer. */
+    zoom: number;
+    /** World-space rig focus. */
+    focus: { x: number; y: number; z: number };
     position: { x: number; y: number; z: number };
     /** Normalised world-space direction the camera looks along. */
     forward: { x: number; y: number; z: number };
@@ -157,17 +173,17 @@ export interface RenderInspection {
   };
   nodes: readonly {
     nodeId: string;
-    /** The node's render layer; `base` is drawn behind `object`. */
+    /** The node's render layer; `base` is drawn before `object` via render order. */
     layer: RenderLayer;
     /** The prefab group the node is parented to. */
     group: PrefabGroup;
-    x: number;
-    y: number;
-    /** Real scene-space `z`; a LARGER value is closer to the camera. */
-    depth: number;
-    /** Real world-space position of the node root. */
+    /** Draw order applied to the node root (`base` before `object`). */
+    renderOrder: number;
+    /** Real world-space position read off the node root's `Object3D`, no inversion. */
     world: { x: number; y: number; z: number };
-    /** Presentation-only yaw (radians) derived from the visual movement delta. */
+    /** The node root's real world rotation, read off its `Object3D`. */
+    rotation: { x: number; y: number; z: number; w: number };
+    /** Yaw about `+Y` (radians) extracted from {@link rotation}. */
     yaw: number;
     visible: boolean;
     appearance: string;
@@ -191,6 +207,12 @@ export interface RenderInspection {
   buckets: readonly { key: string; count: number }[];
 }
 
+/** Structural world AABB the runtime frames; deliberately not the Organizer type. */
+export interface RuntimeWorldBounds {
+  min: { x: number; y: number; z: number };
+  max: { x: number; y: number; z: number };
+}
+
 /** The executor surface the UI wires to the bridge. */
 export interface RenderRuntime {
   /**
@@ -212,6 +234,15 @@ export interface RenderRuntime {
    * configuration, not scene content, which is why it is not an ISA primitive.
    */
   setFollowTarget(nodeId: NodeId | null): void;
+  /** Read the rig state as plain data (yaw is what camera-relative input needs). */
+  getCameraState(): CameraState;
+  /**
+   * Set the rig's pitch and/or yaw. Pitch is clamped to the rig's limits; yaw is
+   * normalised to `[0, 360)`. Rotating the rig never changes world coordinates.
+   */
+  setCameraOrientation(orientation: { pitchDegrees?: number; yawDegrees?: number }): void;
+  /** Set the orthographic zoom factor (clamped to the rig's limits). */
+  setZoom(zoom: number): void;
   /** Snapshot the runtime as plain data. Works without `mount`. */
   inspect(): RenderInspection;
   /**
@@ -229,9 +260,10 @@ interface RuntimeNode {
   visual: Group;
   layer: RenderLayer;
   group: PrefabGroup;
-  /** Tile-space position (interpolated). */
-  x: number;
-  y: number;
+  /** Authoritative world position (interpolated), applied verbatim to `root`. */
+  world: Vector3;
+  /** Authoritative rotation (interpolated), applied verbatim to `root`. */
+  rotation: Quaternion;
   appearance: AppearanceId;
   animation: AnimationId;
   /** Animation this node's prefab rests at; a completed move resets to it. */
@@ -243,50 +275,43 @@ interface RuntimeNode {
   castsShadow: boolean;
   receivesShadow: boolean;
   /** Authoritative interpolation target, or `null` when the node is settled. */
-  target: { x: number; y: number; durationMs: number } | null;
+  target: { world: Vector3; rotation: Quaternion; durationMs: number } | null;
   /** Start time of the current interpolation, established by the first `update`. */
   startMs: number | null;
-  startX: number;
-  startY: number;
-  /** Presentation-only facing (radians), smoothed toward `targetYaw`. */
-  yaw: number;
-  targetYaw: number;
+  startWorld: Vector3;
+  startRotation: Quaternion;
 }
 
 /** Camera stance, frozen by Main. Exported so projection tests share one source. */
 export const RENDER_CAMERA = {
-  /** Downward pitch from the horizontal, in degrees. */
+  /** Default downward pitch from the horizontal, in degrees. */
   pitchDegrees: 58,
+  /** Pitch constraint: below this the world reads as a flat top-down map. */
+  minPitchDegrees: 20,
+  /** Pitch constraint: at/above this the camera is effectively level. */
+  maxPitchDegrees: 80,
   /** Camera distance from its focus point (orthographic, so scale-independent). */
   distance: 40,
   /** Extra world units of vertical half-extent so tall props are not clipped. */
   verticalHeadroom: 1,
+  /** Zoom constraint: smallest magnification (most zoomed out). */
+  minZoom: 0.25,
+  /** Zoom constraint: largest magnification (most zoomed in). */
+  maxZoom: 8,
 } as const;
 
-const PITCH_RADIANS = (RENDER_CAMERA.pitchDegrees * Math.PI) / 180;
-const SIN_PITCH = Math.sin(PITCH_RADIANS);
-const COS_PITCH = Math.cos(PITCH_RADIANS);
-
 /**
- * Unit vector from the focus point toward the camera. Moving a node along it
- * changes only its depth (not its on-screen position), because the camera has no
- * yaw. That is what makes a layer offset a *depth* offset.
+ * Draw order per layer. Nodes of every layer sit at their exact world position;
+ * this only sequences the draw so the `base` layer is submitted before the
+ * `object` layer. Real occlusion is the 3D depth buffer's job.
  */
-const VIEW_AXIS = new Vector3(0, SIN_PITCH, COS_PITCH);
-
-/**
- * Depth offset per layer, along {@link VIEW_AXIS}. `base` sits slightly farther
- * from the camera than `object`, so terrain is behind objects without any
- * per-object z fight and without moving either on screen.
- */
-const LAYER_DEPTH: Readonly<Record<RenderLayer, number>> = {
-  base: -0.05,
-  object: 0,
+const LAYER_RENDER_ORDER: Readonly<Record<RenderLayer, number>> = {
+  base: 0,
+  object: 1,
 };
 
 /** Smoothing time constants (ms) for presentation motion. */
 const FOLLOW_SMOOTHING_MS = 140;
-const TURN_SMOOTHING_MS = 120;
 /** Clamp for a single frame's delta so a long pause cannot cause a jump. */
 const MAX_FRAME_DELTA_MS = 100;
 
@@ -304,7 +329,9 @@ const SCENE_BACKGROUND_COLOUR = 0x1a140e;
  * Pixel size used to size the drawing buffer before the canvas has a layout
  * size. This only affects the backing store; the projection is world-sized.
  */
-const FALLBACK_PIXELS_PER_TILE = 32;
+const FALLBACK_PIXELS_PER_UNIT = 32;
+
+const DEGREES_TO_RADIANS = Math.PI / 180;
 
 function material(colour: number): MeshStandardMaterial {
   return new MeshStandardMaterial({ color: colour });
@@ -336,36 +363,85 @@ function bucketKey(layer: RenderLayer, appearance: AppearanceId): string {
 }
 
 /**
- * Orthographic frustum for a world size and canvas aspect.
+ * Yaw about `+Y` (radians) extracted from a rotation, for inspection only.
  *
- * The world's projected DEPTH is the baseline vertical half-extent (a world
- * `height` of tiles foreshortens to `height * sin(pitch)`), plus a small headroom
- * for tall props. The world is never cropped: if half the world `width` needs
- * more horizontal room than the canvas aspect provides, the *vertical* extent is
- * grown to match, so `halfWidth / halfHeight` always equals the canvas aspect and
- * the world-to-screen scale stays uniform (tiles are never stretched). A
- * narrow/portrait canvas therefore shows extra vertical world rather than
- * clipping horizontal world off the edges.
+ * The prefab front faces its local `+Z`, so this is the actor's heading in the
+ * world's convention (`yaw = atan2(vx, vz)`): yaw 0 faces `+Z`.
+ */
+function yawFromRotation(rotation: Quaternion): number {
+  return Math.atan2(
+    2 * (rotation.w * rotation.y + rotation.x * rotation.z),
+    1 - 2 * (rotation.y * rotation.y + rotation.x * rotation.x),
+  );
+}
+
+/**
+ * Orthographic frustum that frames the world's ground rectangle for the rig's
+ * current pitch/yaw/zoom and a canvas aspect.
+ *
+ * The world bounds' XZ footprint (at ground level) is projected onto the
+ * camera's own right/up axes, so the fit is correct for yaw too: rotating the
+ * rig widens the projected footprint (up to the box diagonal) and the whole
+ * world stays visible. A small vertical headroom keeps tall props off the clip
+ * edge. The single uniform half-height satisfies both the projected footprint
+ * and the canvas aspect, so `halfWidth / halfHeight` always equals the aspect
+ * and world-to-screen scale stays uniform (nothing is stretched). Finally the
+ * whole frustum is divided by `zoom` (larger zoom is closer).
  */
 export function orthographicBounds(options: {
-  worldSize: { width: number; height: number };
+  bounds: RuntimeWorldBounds;
   aspect: number;
+  pitchDegrees: number;
+  yawDegrees: number;
+  zoom: number;
 }): { left: number; right: number; top: number; bottom: number } {
-  const depthHalfHeight =
-    (options.worldSize.height / 2) * SIN_PITCH + RENDER_CAMERA.verticalHeadroom;
+  const pitch = options.pitchDegrees * DEGREES_TO_RADIANS;
+  const yaw = options.yawDegrees * DEGREES_TO_RADIANS;
+  const sinPitch = Math.sin(pitch);
+  const sinYaw = Math.sin(yaw);
+  const cosYaw = Math.cos(yaw);
+
+  // Camera basis in world space: the rig yaw is applied about `+Y` to a camera
+  // whose local -Z is pitched down by `pitch`.
+  //   right = Ry(yaw) * (1, 0, 0)
+  //   up    = Ry(yaw) * (0, cosPitch, -sinPitch)
+  const rightX = cosYaw;
+  const rightZ = -sinYaw;
+  const upX = -sinPitch * sinYaw;
+  const upZ = -sinPitch * cosYaw;
+
+  const halfWidth = (options.bounds.max.x - options.bounds.min.x) / 2;
+  const halfDepth = (options.bounds.max.z - options.bounds.min.z) / 2;
+
+  let extentRight = 0;
+  let extentUp = 0;
+  for (const signX of [-1, 1]) {
+    for (const signZ of [-1, 1]) {
+      const dx = signX * halfWidth;
+      const dz = signZ * halfDepth;
+      extentRight = Math.max(extentRight, Math.abs(dx * rightX + dz * rightZ));
+      extentUp = Math.max(extentUp, Math.abs(dx * upX + dz * upZ));
+    }
+  }
+
   const aspect = options.aspect > 0 ? options.aspect : 1;
-  // A single uniform half-height must satisfy both the projected depth and the
-  // full world width (`halfWidth = halfHeight * aspect >= width / 2`).
-  const halfHeight = Math.max(depthHalfHeight, options.worldSize.width / 2 / aspect);
-  const halfWidth = halfHeight * aspect;
-  return { left: -halfWidth, right: halfWidth, top: halfHeight, bottom: -halfHeight };
+  const zoom = options.zoom > 0 ? options.zoom : 1;
+  const vertical = extentUp + RENDER_CAMERA.verticalHeadroom;
+  const halfHeight = Math.max(vertical, extentRight / aspect) / zoom;
+  const halfWidthFinal = halfHeight * aspect;
+  return {
+    left: -halfWidthFinal,
+    right: halfWidthFinal,
+    top: halfHeight,
+    bottom: -halfHeight,
+  };
 }
 
 // ---------------------------------------------------------------------------
 // Prefab realisation (standard primitives only; no external art)
 // ---------------------------------------------------------------------------
 
-/** A grid tile: a thin plate whose top surface sits at `surfaceY`. */
+/** A ground plate: a thin box whose top surface sits at `surfaceY`. */
 function createPlate(size: number, colour: number, surfaceY: number): Mesh {
   const plate = new Mesh(new BoxGeometry(size, 0.2, size), material(colour));
   // Top at `surfaceY`, so the box centre is 0.1 below it.
@@ -418,7 +494,9 @@ function createWaterVisual(): Group {
 /**
  * Character placeholder: body + head + a facing marker on the local `+z` front,
  * anchored at the feet. Its silhouette and its facing are both readable, and it
- * is opaque.
+ * is opaque. The local `+Z` front matches the frozen heading convention
+ * (`yaw = atan2(vx, vz)`), so applying the authoritative quaternion turns the
+ * marker to face the authoritative heading with no extra derivation.
  */
 function createCharacterVisual(): Group {
   const group = new Group();
@@ -589,24 +667,31 @@ function prefabFor(appearance: AppearanceId): Prefab {
   return PREFABS[appearance] ?? FALLBACK_PREFAB;
 }
 
-/** Normalise an angle difference into `[-π, π]`. */
-function shortestAngle(from: number, to: number): number {
-  return Math.atan2(Math.sin(to - from), Math.cos(to - from));
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
+}
+
+/** Normalise yaw degrees into `[0, 360)`. */
+function normalizeYawDegrees(degrees: number): number {
+  const wrapped = degrees % 360;
+  return wrapped < 0 ? wrapped + 360 : wrapped;
 }
 
 /**
- * Create a render runtime for an authoritative world size.
+ * Create a render runtime for an authoritative world AABB.
  *
- * `worldSize` is required (there is no magic default): the caller that owns the
- * authoritative dimensions must supply them. The whole scene composition exists
+ * `bounds` is required (there is no magic default): the caller that owns the
+ * authoritative world extent must supply it. The whole scene composition exists
  * immediately, so `apply` works before (and without) `mount`; only `mount` needs
  * a real canvas.
  */
-export function createThreeRuntime(options: {
-  worldSize: { width: number; height: number };
-}): RenderRuntime {
-  const worldWidth = options.worldSize.width;
-  const worldHeight = options.worldSize.height;
+export function createThreeRuntime(options: { bounds: RuntimeWorldBounds }): RenderRuntime {
+  const bounds = options.bounds;
+  const worldWidth = bounds.max.x - bounds.min.x;
+  const worldDepth = bounds.max.z - bounds.min.z;
+  const worldCenterX = (bounds.min.x + bounds.max.x) / 2;
+  const worldCenterZ = (bounds.min.z + bounds.max.z) / 2;
+  const groundY = bounds.min.y;
 
   const scene = new Scene();
   // Fill the whole viewport, including the area outside the finite ground plate,
@@ -617,10 +702,6 @@ export function createThreeRuntime(options: {
   // Per-`(layer, appearance)` node index: the seam a future instanced / atlas
   // realisation swaps behind, keyed off the same bucket the ISA already implies.
   const buckets = new Map<string, Set<NodeId>>();
-
-  // Centre of the tile grid in render space.
-  const centerX = (worldWidth - 1) / 2;
-  const centerZ = (worldHeight - 1) / 2;
 
   // Scene graph: WorldRoot -> { Terrain, WorldObjects, Actors, Effects }.
   const worldRoot = new Group();
@@ -639,35 +720,64 @@ export function createThreeRuntime(options: {
 
   const cameraRig = new Group();
   cameraRig.name = 'CameraRig';
-  const cameraFocus = new Vector3(centerX, 0, centerZ);
+
+  // Rig state. `cameraFocus` is the world point the rig is centred on (also the
+  // smooth-follow target); the camera itself is a fixed local child.
+  let pitchDegrees: number = RENDER_CAMERA.pitchDegrees;
+  let yawDegrees = 0;
+  let zoom = 1;
+  const cameraFocus = new Vector3(worldCenterX, groundY, worldCenterZ);
   cameraRig.position.copy(cameraFocus);
   scene.add(cameraRig);
 
   const camera = new OrthographicCamera(-1, 1, 1, -1, 0.1, 100);
-  // Fixed child of the rig: offset up/back along the view axis and pitched down.
-  camera.position.set(
-    0,
-    RENDER_CAMERA.distance * SIN_PITCH,
-    RENDER_CAMERA.distance * COS_PITCH,
-  );
-  camera.rotation.set(-PITCH_RADIANS, 0, 0);
+  // Fixed child of the rig: offset up/back along the (rig-local) view axis and
+  // pitched down. The rig's yaw rotates the whole assembly.
   cameraRig.add(camera);
-  const initialBounds = orthographicBounds({
-    worldSize: { width: worldWidth, height: worldHeight },
-    aspect: worldWidth / worldHeight,
-  });
-  camera.left = initialBounds.left;
-  camera.right = initialBounds.right;
-  camera.top = initialBounds.top;
-  camera.bottom = initialBounds.bottom;
-  camera.updateProjectionMatrix();
 
-  const groundGeometry = new PlaneGeometry(worldWidth, worldHeight);
+  // Canvas aspect, updated on resize; defaults to square before any layout.
+  let cameraAspect = 1;
+
+  /**
+   * Recompute the camera's local offset/rotation from the rig state. Switching to
+   * a perspective camera would change only this function and the frustum helper.
+   */
+  function applyCameraTransform(): void {
+    const pitch = pitchDegrees * DEGREES_TO_RADIANS;
+    cameraRig.rotation.y = yawDegrees * DEGREES_TO_RADIANS;
+    camera.position.set(
+      0,
+      RENDER_CAMERA.distance * Math.sin(pitch),
+      RENDER_CAMERA.distance * Math.cos(pitch),
+    );
+    camera.rotation.set(-pitch, 0, 0);
+    reframe();
+  }
+
+  /** Reframe the orthographic frustum for the current rig state and aspect. */
+  function reframe(): void {
+    const frustum = orthographicBounds({
+      bounds,
+      aspect: cameraAspect,
+      pitchDegrees,
+      yawDegrees,
+      zoom,
+    });
+    camera.left = frustum.left;
+    camera.right = frustum.right;
+    camera.top = frustum.top;
+    camera.bottom = frustum.bottom;
+    camera.updateProjectionMatrix();
+  }
+
+  applyCameraTransform();
+
+  const groundGeometry = new PlaneGeometry(worldWidth, worldDepth);
   const groundMaterial = new MeshStandardMaterial({ color: 0x241c14 });
   let ground: Mesh | null = new Mesh(groundGeometry, groundMaterial);
-  // Ground lies in the XZ plane, slightly below the tile plates.
+  // Ground lies in the XZ plane, slightly below the terrain plates.
   ground.rotation.x = -Math.PI / 2;
-  ground.position.set(centerX, -0.3, centerZ);
+  ground.position.set(worldCenterX, groundY - 0.3, worldCenterZ);
   ground.receiveShadow = true;
   scene.add(ground);
 
@@ -678,7 +788,7 @@ export function createThreeRuntime(options: {
   let sun: DirectionalLight | null = sunLight;
   sunLight.castShadow = true;
   sunLight.shadow.mapSize.set(1024, 1024);
-  const shadowExtent = Math.max(worldWidth, worldHeight) / 2 + 4;
+  const shadowExtent = Math.max(worldWidth, worldDepth) / 2 + 4;
   sunLight.shadow.camera.left = -shadowExtent;
   sunLight.shadow.camera.right = shadowExtent;
   sunLight.shadow.camera.top = shadowExtent;
@@ -686,17 +796,16 @@ export function createThreeRuntime(options: {
   sunLight.shadow.camera.near = 1;
   sunLight.shadow.camera.far = 80;
   sunLight.shadow.camera.updateProjectionMatrix();
-  sunLight.position.set(centerX + 6, 14, centerZ + 6);
-  sunLight.target.position.set(centerX, 0, centerZ);
+  sunLight.position.set(worldCenterX + 6, groundY + 14, worldCenterZ + 6);
+  sunLight.target.position.set(worldCenterX, groundY, worldCenterZ);
   lightsGroup.add(ambient, sunLight, sunLight.target);
   scene.add(lightsGroup);
   const lights: Light[] = [ambient, sunLight];
 
   let followNodeId: NodeId | null = null;
   // Separate from the frame clock: follow smoothing re-baselines when the
-  // target changes, without perturbing interpolation/turn timing.
+  // target changes, without perturbing interpolation timing.
   let lastFollowMs: number | null = null;
-  let lastFrameMs: number | null = null;
 
   let mounted = false;
   let renderer: WebGLRenderer | null = null;
@@ -729,23 +838,43 @@ export function createThreeRuntime(options: {
     }
   }
 
-  /** Place a node's root from its tile position, applying the layer depth offset. */
+  /**
+   * Place a node at its authoritative world transform.
+   *
+   * There is **no tile interpretation and no per-layer positional offset**: the
+   * node lands exactly where the ISA says it is. The only ordering rule is
+   * `renderOrder` (set at creation), and real occlusion is the depth buffer's.
+   */
   function positionNode(node: RuntimeNode): void {
-    node.root.position.set(node.x, 0, node.y).addScaledVector(VIEW_AXIS, LAYER_DEPTH[node.layer]);
-    node.root.rotation.y = node.yaw;
+    node.root.position.copy(node.world);
+    node.root.quaternion.copy(node.rotation);
+  }
+
+  function applyTransform(node: RuntimeNode, transform: RenderTransform): void {
+    node.world.set(transform.position.x, transform.position.y, transform.position.z);
+    node.rotation.set(
+      transform.rotation.x,
+      transform.rotation.y,
+      transform.rotation.z,
+      transform.rotation.w,
+    );
+    node.root.scale.set(transform.scale.x, transform.scale.y, transform.scale.z);
+    positionNode(node);
   }
 
   function createNode(command: {
     nodeId: NodeId;
     layer: RenderLayer;
     appearance: AppearanceId;
-    transform: { x: number; y: number };
+    transform: RenderTransform;
     visible: boolean;
   }): void {
     const prefab = prefabFor(command.appearance);
     const root = new Group();
     const visual = prefab.createVisual();
     root.add(visual);
+    // Coarse draw order only; the depth buffer resolves real occlusion.
+    root.renderOrder = LAYER_RENDER_ORDER[command.layer];
     groups[prefab.group].add(root);
     const shadowFlags = measureShadowFlags(visual);
     const node: RuntimeNode = {
@@ -753,8 +882,8 @@ export function createThreeRuntime(options: {
       visual,
       layer: command.layer,
       group: prefab.group,
-      x: command.transform.x,
-      y: command.transform.y,
+      world: new Vector3(),
+      rotation: new Quaternion(),
       appearance: command.appearance,
       animation: prefab.defaultAnimation,
       defaultAnimation: prefab.defaultAnimation,
@@ -764,13 +893,11 @@ export function createThreeRuntime(options: {
       receivesShadow: shadowFlags.receivesShadow,
       target: null,
       startMs: null,
-      startX: command.transform.x,
-      startY: command.transform.y,
-      yaw: 0,
-      targetYaw: 0,
+      startWorld: new Vector3(),
+      startRotation: new Quaternion(),
     };
     root.visible = command.visible;
-    positionNode(node);
+    applyTransform(node, command.transform);
     nodes.set(command.nodeId, node);
     addToBucket(command.layer, command.appearance, command.nodeId);
   }
@@ -826,29 +953,37 @@ export function createThreeRuntime(options: {
           const node = nodes.get(command.nodeId);
           if (node !== undefined) {
             // Instant by definition: snap and drop any interpolation target.
-            node.x = command.transform.x;
-            node.y = command.transform.y;
+            applyTransform(node, command.transform);
             node.target = null;
             node.startMs = null;
             // A snap ends any move just as completing the interpolation does.
             node.animation = node.defaultAnimation;
-            positionNode(node);
           }
           break;
         }
         case 'transform.setTarget': {
           const node = nodes.get(command.nodeId);
           if (node !== undefined) {
-            node.target = {
-              x: command.transform.x,
-              y: command.transform.y,
+            const target = {
+              world: new Vector3(
+                command.transform.position.x,
+                command.transform.position.y,
+                command.transform.position.z,
+              ),
+              rotation: new Quaternion(
+                command.transform.rotation.x,
+                command.transform.rotation.y,
+                command.transform.rotation.z,
+                command.transform.rotation.w,
+              ),
               durationMs: command.durationMs,
             };
+            node.target = target;
             // `apply` reads no clock: the start time is set by the first
             // `update(nowMs)` after this command, which keeps `apply` pure.
             node.startMs = null;
-            node.startX = node.x;
-            node.startY = node.y;
+            node.startWorld.copy(node.world);
+            node.startRotation.copy(node.rotation);
           }
           break;
         }
@@ -898,47 +1033,37 @@ export function createThreeRuntime(options: {
   }
 
   function update(nowMs: number): void {
-    const frameDt =
-      lastFrameMs === null ? 0 : Math.max(0, Math.min(nowMs - lastFrameMs, MAX_FRAME_DELTA_MS));
-    lastFrameMs = nowMs;
-    const turnAlpha = frameDt === 0 ? 0 : 1 - Math.exp(-frameDt / TURN_SMOOTHING_MS);
-
     for (const node of nodes.values()) {
       const target = node.target;
       if (target !== null) {
         if (node.startMs === null) {
           node.startMs = nowMs;
-          node.startX = node.x;
-          node.startY = node.y;
+          node.startWorld.copy(node.world);
+          node.startRotation.copy(node.rotation);
         }
         const elapsed = nowMs - node.startMs;
         const progress =
           target.durationMs <= 0
             ? 1
             : Math.min(1, Math.max(0, elapsed / target.durationMs));
-        node.x = node.startX + (target.x - node.startX) * progress;
-        node.y = node.startY + (target.y - node.startY) * progress;
+        node.world.lerpVectors(node.startWorld, target.world, progress);
+        node.rotation.slerpQuaternions(node.startRotation, target.rotation, progress);
         if (progress >= 1) {
-          node.x = target.x;
-          node.y = target.y;
+          node.world.copy(target.world);
+          node.rotation.copy(target.rotation);
           node.target = null;
           node.startMs = null;
           // The runtime owns WHEN a move is over: it interpolated to the target,
-          // so it — not the bridge — returns the node to its rest animation. The
-          // bridge has no further frame after the last move to emit a settle on.
+          // so it — not the bridge — returns the node to its rest animation.
           node.animation = node.defaultAnimation;
         }
-        // Presentation-only facing from the visual movement delta (tile space,
-        // where local +z is the actor's front).
-        node.targetYaw = Math.atan2(target.x - node.startX, target.y - node.startY);
-        node.yaw += shortestAngle(node.yaw, node.targetYaw) * turnAlpha;
         positionNode(node);
       }
       updateVisualMotion(node, nowMs);
     }
 
     // Camera following: smooth the rig focus toward the followed node's visual
-    // (interpolated) position. `null` leaves the focus where it is.
+    // (interpolated) world position. `null` leaves the focus where it is.
     if (followNodeId !== null) {
       const followed = nodes.get(followNodeId);
       if (followed !== undefined) {
@@ -949,35 +1074,41 @@ export function createThreeRuntime(options: {
         lastFollowMs = nowMs;
         const followAlpha =
           followDt === 0 ? 0 : 1 - Math.exp(-followDt / FOLLOW_SMOOTHING_MS);
-        cameraFocus.x += (followed.x - cameraFocus.x) * followAlpha;
-        cameraFocus.z += (followed.y - cameraFocus.z) * followAlpha;
-        cameraRig.position.set(cameraFocus.x, 0, cameraFocus.z);
+        cameraFocus.x += (followed.world.x - cameraFocus.x) * followAlpha;
+        cameraFocus.y += (followed.world.y - cameraFocus.y) * followAlpha;
+        cameraFocus.z += (followed.world.z - cameraFocus.z) * followAlpha;
+        cameraRig.position.copy(cameraFocus);
       }
     }
   }
 
   function inspect(): RenderInspection {
-    camera.updateMatrixWorld(true);
+    // Update the real scene graph, then report each node's placement off its
+    // `Object3D` world transform. `node.world`/`node.rotation` are only the
+    // bookkeeping `positionNode()` copies FROM; deriving the report from them
+    // would let a broken placement pass inspection.
+    scene.updateMatrixWorld(true);
     const cameraWorld = new Vector3();
     camera.getWorldPosition(cameraWorld);
     const cameraQuaternion = camera.getWorldQuaternion(new Quaternion());
     const cameraForward = new Vector3(0, 0, -1).applyQuaternion(cameraQuaternion).normalize();
     const cameraUp = new Vector3(0, 1, 0).applyQuaternion(cameraQuaternion).normalize();
     const nodeList = [...nodes.entries()].map(([nodeId, node]) => {
-      // Invert the runtime-only tile -> scene mapping from the real Object3D.
-      // `y` removes the layer's depth offset so a base tile still reads as its
-      // own tile row; `depth` is the raw scene-space z used for occlusion.
-      const depthOffset = LAYER_DEPTH[node.layer] * COS_PITCH;
-      const position = node.root.position;
+      const worldPosition = node.root.getWorldPosition(new Vector3());
+      const worldRotation = node.root.getWorldQuaternion(new Quaternion());
       return {
         nodeId,
         layer: node.layer,
         group: node.group,
-        x: position.x,
-        y: position.z - depthOffset,
-        depth: position.z,
-        world: { x: position.x, y: position.y, z: position.z },
-        yaw: node.yaw,
+        renderOrder: node.root.renderOrder,
+        world: { x: worldPosition.x, y: worldPosition.y, z: worldPosition.z },
+        rotation: {
+          x: worldRotation.x,
+          y: worldRotation.y,
+          z: worldRotation.z,
+          w: worldRotation.w,
+        },
+        yaw: yawFromRotation(worldRotation),
         visible: node.root.visible,
         appearance: node.appearance,
         animation: node.animation,
@@ -1008,6 +1139,10 @@ export function createThreeRuntime(options: {
         right: camera.right,
         top: camera.top,
         bottom: camera.bottom,
+        pitchDegrees,
+        yawDegrees,
+        zoom,
+        focus: { x: cameraFocus.x, y: cameraFocus.y, z: cameraFocus.z },
         position: { x: cameraWorld.x, y: cameraWorld.y, z: cameraWorld.z },
         forward: { x: cameraForward.x, y: cameraForward.y, z: cameraForward.z },
         up: { x: cameraUp.x, y: cameraUp.y, z: cameraUp.z },
@@ -1029,21 +1164,13 @@ export function createThreeRuntime(options: {
     }
     const canvas = renderer.domElement;
     const width =
-      canvas.clientWidth > 0 ? canvas.clientWidth : worldWidth * FALLBACK_PIXELS_PER_TILE;
+      canvas.clientWidth > 0 ? canvas.clientWidth : worldWidth * FALLBACK_PIXELS_PER_UNIT;
     const height =
-      canvas.clientHeight > 0 ? canvas.clientHeight : worldHeight * FALLBACK_PIXELS_PER_TILE;
+      canvas.clientHeight > 0 ? canvas.clientHeight : worldDepth * FALLBACK_PIXELS_PER_UNIT;
     renderer.setSize(width, height, false);
 
-    const aspect = height > 0 ? width / height : 1;
-    const bounds = orthographicBounds({
-      worldSize: { width: worldWidth, height: worldHeight },
-      aspect,
-    });
-    camera.left = bounds.left;
-    camera.right = bounds.right;
-    camera.top = bounds.top;
-    camera.bottom = bounds.bottom;
-    camera.updateProjectionMatrix();
+    cameraAspect = height > 0 ? width / height : 1;
+    reframe();
   }
 
   function mount(canvas: HTMLCanvasElement): void {
@@ -1083,6 +1210,37 @@ export function createThreeRuntime(options: {
     followNodeId = nodeId;
     // Re-baseline smoothing so changing the target cannot cause a jump.
     lastFollowMs = null;
+  }
+
+  function getCameraState(): CameraState {
+    return {
+      pitchDegrees,
+      yawDegrees,
+      zoom,
+      focus: { x: cameraFocus.x, y: cameraFocus.y, z: cameraFocus.z },
+    };
+  }
+
+  function setCameraOrientation(orientation: {
+    pitchDegrees?: number;
+    yawDegrees?: number;
+  }): void {
+    if (orientation.pitchDegrees !== undefined) {
+      pitchDegrees = clamp(
+        orientation.pitchDegrees,
+        RENDER_CAMERA.minPitchDegrees,
+        RENDER_CAMERA.maxPitchDegrees,
+      );
+    }
+    if (orientation.yawDegrees !== undefined) {
+      yawDegrees = normalizeYawDegrees(orientation.yawDegrees);
+    }
+    applyCameraTransform();
+  }
+
+  function setZoom(nextZoom: number): void {
+    zoom = clamp(nextZoom, RENDER_CAMERA.minZoom, RENDER_CAMERA.maxZoom);
+    reframe();
   }
 
   function dispose(): void {
@@ -1135,5 +1293,15 @@ export function createThreeRuntime(options: {
     mounted = false;
   }
 
-  return { mount, apply, update, setFollowTarget, inspect, dispose };
+  return {
+    mount,
+    apply,
+    update,
+    setFollowTarget,
+    getCameraState,
+    setCameraOrientation,
+    setZoom,
+    inspect,
+    dispose,
+  };
 }

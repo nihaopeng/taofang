@@ -1,20 +1,29 @@
 import { ProtocolParseError } from './errors.ts';
 import { isActorId, isEntityId } from './identity.ts';
 import type { ActorId, EntityId } from './identity.ts';
-import { hasExactKeys, isFiniteInteger, isRecord } from './internal.ts';
+import { hasExactKeys, isRecord } from './internal.ts';
+import { isQuat, isVec3 } from './math.ts';
+import type { Quat, Vec3 } from './math.ts';
 
 /**
- * Integer tile coordinates. Origin is TOP-LEFT: `x` grows east, `y` grows south.
+ * Canonical 3D transform: a continuous world-space `position` and a `rotation`.
  *
- * No sign or bounds constraint: world-bounds validity is a Manager runtime rule,
- * not a wire invariant.
+ * `Transform` superseded the phase-3 `Position` and the 2D integer tile
+ * coordinate that phases 4-6 mistakenly used. The world is a real continuous 3D
+ * world; the gameplay grid is a separate interaction layer (`TileState` holds a
+ * `CellCoord`, never a transform).
  *
- * `Transform` is the canonical position value object for the primitive-driven
- * contract; it supersedes the phase-3 `Position`.
+ * There is deliberately **no visual `scale`**: scale has no gameplay semantics
+ * yet, so it does not belong in the Game transform. Current gameplay may only
+ * produce a yaw rotation, but the canonical type must not degenerate to
+ * `rotationY`-only.
+ *
+ * In-bounds validation is a Manager runtime concern, so finite out-of-bounds
+ * positions are accepted by the wire guard.
  */
 export interface Transform {
-  x: number;
-  y: number;
+  position: Vec3;
+  rotation: Quat;
 }
 
 /**
@@ -41,20 +50,18 @@ export interface EntityState {
   visible: boolean;
 }
 
-const TRANSFORM_KEYS = ['x', 'y'] as const;
+const TRANSFORM_KEYS = ['position', 'rotation'] as const;
 const ENTITY_STATE_KEYS = ['entityId', 'actorId', 'kind', 'transform', 'visible'] as const;
 
 /**
- * Structural guard for `Transform`.
- *
- * `x`/`y` must be finite integers of any sign. In-bounds validation is Manager's
- * runtime concern, so negative coordinates are accepted here.
+ * Structural guard for `Transform` (exactly `{ position, rotation }`).
+ * `position` is a finite `Vec3` and `rotation` is a non-zero finite `Quat`.
  */
 export function isTransform(value: unknown): value is Transform {
   if (!isRecord(value) || !hasExactKeys(value, TRANSFORM_KEYS)) {
     return false;
   }
-  return isFiniteInteger(value.x) && isFiniteInteger(value.y);
+  return isVec3(value.position) && isQuat(value.rotation);
 }
 
 /** Parse and validate `Transform`, throwing `ProtocolParseError` on mismatch. */

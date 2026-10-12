@@ -6,7 +6,11 @@
  */
 
 export { createRequestListener } from './create-request-listener.ts';
-export type { ResolveActorId, RouterDependencies } from './create-request-listener.ts';
+export type {
+  ResolveActorId,
+  RouterDependencies,
+  WorldStreamPort,
+} from './create-request-listener.ts';
 
 export { mapErrorCodeToStatus, protocolErrorBody } from './http-errors.ts';
 

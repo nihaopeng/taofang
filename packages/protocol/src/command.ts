@@ -1,20 +1,32 @@
 import { ProtocolParseError } from './errors.ts';
-import { isMoveDirection } from './direction.ts';
-import type { MoveDirection } from './direction.ts';
 import { isGameEvent } from './event.ts';
 import type { GameEvent } from './event.ts';
-import { hasExactKeys, isIsoUtcString, isRecord } from './internal.ts';
+import { hasExactKeys, isFiniteNumber, isIsoUtcString, isRecord } from './internal.ts';
+
+/** Allowed slack on the movement-intent magnitude (reject `|v| > 1`). */
+const MOVEMENT_MAGNITUDE_EPSILON = 1e-6;
 
 /**
- * Request body for `COMMAND_PATH`.
+ * Request body for `COMMAND_PATH`: "move the actor I control".
  *
- * Deliberately carries **no actor field**: a client may not name the actor it
- * acts as. The actor is resolved by Router from transport context and passed to
- * Manager out of band. An extra `actorId`/`playerId` field is rejected.
+ * `movement` is the desired horizontal direction with magnitude `<= 1`;
+ * `{ x: 0, z: 0 }` means stop. A magnitude below 1 is analog speed; the Manager
+ * multiplies it by the actor's speed. The client is never trusted with a
+ * position, only with an intent.
+ *
+ * Deliberately carries **no actor field**. The actor is resolved from transport
+ * context by Router and passed to Manager out of band (the phase-3 invariant,
+ * verified by three reviews); accepting a client-named actor would reopen the
+ * unauthenticated-actor hole. An extra `actorId`/`playerId` field is rejected.
+ *
+ * The command is **level-triggered, not one-shot**: the Manager stores the
+ * latest intent for the (single) controlled actor today and applies it every
+ * tick until superseded. A real per-actor intent store is required before a
+ * second actor can exist. The client therefore posts only on input change.
  */
-export interface ActorMoveCommand {
-  type: 'actor.move';
-  direction: MoveDirection;
+export interface MoveIntentCommand {
+  type: 'actor.moveIntent';
+  movement: { x: number; z: number };
 }
 
 /**
@@ -24,37 +36,55 @@ export interface ActorMoveCommand {
  * command is its own strongly-typed interface, so callers (and executors) narrow
  * on `type` and never need a cast.
  */
-export type GameCommand = ActorMoveCommand;
+export type GameCommand = MoveIntentCommand;
 
 /**
- * Response body for `COMMAND_PATH`.
+ * Authoritative delta produced by a command or a simulation step.
  *
- * `events` is the authoritative delta produced by the command. A refused command
- * is expressed as an **empty** array — there is no `moved` boolean.
+ * `events` is the delta; a refused command is expressed as an **empty** array —
+ * there is no `moved` boolean. This replaced the phase-6 `SubmitCommandResponse`
+ * (no alias) so the same envelope carries both the command ack and the tick
+ * output pushed over the stream.
  */
-export interface SubmitCommandResponse {
+export interface GameEventBatch {
   events: GameEvent[];
   /** ISO-8601 UTC timestamp. */
   serverTime: string;
 }
 
-const ACTOR_MOVE_COMMAND_KEYS = ['type', 'direction'] as const;
-const SUBMIT_COMMAND_RESPONSE_KEYS = ['events', 'serverTime'] as const;
+const MOVE_INTENT_COMMAND_KEYS = ['type', 'movement'] as const;
+const MOVE_MOVEMENT_KEYS = ['x', 'z'] as const;
+const GAME_EVENT_BATCH_KEYS = ['events', 'serverTime'] as const;
 
-/** Structural guard for `ActorMoveCommand` (exactly `{ type: 'actor.move', direction }`). */
-export function isActorMoveCommand(value: unknown): value is ActorMoveCommand {
+/**
+ * Structural guard for the movement intent (exactly `{ x, z }`, both finite,
+ * magnitude `<= 1` up to a small epsilon). Not exported: callers validate the
+ * command, and the movement type is inline on `MoveIntentCommand`.
+ */
+function isMovement(value: unknown): value is MoveIntentCommand['movement'] {
   return (
     isRecord(value) &&
-    hasExactKeys(value, ACTOR_MOVE_COMMAND_KEYS) &&
-    value.type === 'actor.move' &&
-    isMoveDirection(value.direction)
+    hasExactKeys(value, MOVE_MOVEMENT_KEYS) &&
+    isFiniteNumber(value.x) &&
+    isFiniteNumber(value.z) &&
+    value.x * value.x + value.z * value.z <= 1 + MOVEMENT_MAGNITUDE_EPSILON
   );
 }
 
-/** Parse and validate `ActorMoveCommand`, throwing `ProtocolParseError` on mismatch. */
-export function parseActorMoveCommand(value: unknown): ActorMoveCommand {
-  if (!isActorMoveCommand(value)) {
-    throw new ProtocolParseError('Invalid ActorMoveCommand payload');
+/** Structural guard for `MoveIntentCommand` (exactly `{ type: 'actor.moveIntent', movement }`). */
+export function isMoveIntentCommand(value: unknown): value is MoveIntentCommand {
+  return (
+    isRecord(value) &&
+    hasExactKeys(value, MOVE_INTENT_COMMAND_KEYS) &&
+    value.type === 'actor.moveIntent' &&
+    isMovement(value.movement)
+  );
+}
+
+/** Parse and validate `MoveIntentCommand`, throwing `ProtocolParseError` on mismatch. */
+export function parseMoveIntentCommand(value: unknown): MoveIntentCommand {
+  if (!isMoveIntentCommand(value)) {
+    throw new ProtocolParseError('Invalid MoveIntentCommand payload');
   }
   return value;
 }
@@ -70,8 +100,8 @@ export function isGameCommand(value: unknown): value is GameCommand {
     return false;
   }
   switch (value.type) {
-    case 'actor.move':
-      return isActorMoveCommand(value);
+    case 'actor.moveIntent':
+      return isMoveIntentCommand(value);
     default:
       return false;
   }
@@ -86,8 +116,8 @@ export function isGameCommand(value: unknown): value is GameCommand {
 export function parseGameCommand(value: unknown): GameCommand {
   if (isRecord(value)) {
     switch (value.type) {
-      case 'actor.move':
-        return parseActorMoveCommand(value);
+      case 'actor.moveIntent':
+        return parseMoveIntentCommand(value);
       default:
         break;
     }
@@ -95,9 +125,9 @@ export function parseGameCommand(value: unknown): GameCommand {
   throw new ProtocolParseError('Invalid GameCommand payload');
 }
 
-/** Structural guard for `SubmitCommandResponse` (exactly `{ events, serverTime }`). */
-export function isSubmitCommandResponse(value: unknown): value is SubmitCommandResponse {
-  if (!isRecord(value) || !hasExactKeys(value, SUBMIT_COMMAND_RESPONSE_KEYS)) {
+/** Structural guard for `GameEventBatch` (exactly `{ events, serverTime }`). */
+export function isGameEventBatch(value: unknown): value is GameEventBatch {
+  if (!isRecord(value) || !hasExactKeys(value, GAME_EVENT_BATCH_KEYS)) {
     return false;
   }
   if (!Array.isArray(value.events)) {
@@ -106,10 +136,10 @@ export function isSubmitCommandResponse(value: unknown): value is SubmitCommandR
   return value.events.every((event) => isGameEvent(event)) && isIsoUtcString(value.serverTime);
 }
 
-/** Parse and validate `SubmitCommandResponse`, throwing `ProtocolParseError` on mismatch. */
-export function parseSubmitCommandResponse(value: unknown): SubmitCommandResponse {
-  if (!isSubmitCommandResponse(value)) {
-    throw new ProtocolParseError('Invalid SubmitCommandResponse payload');
+/** Parse and validate `GameEventBatch`, throwing `ProtocolParseError` on mismatch. */
+export function parseGameEventBatch(value: unknown): GameEventBatch {
+  if (!isGameEventBatch(value)) {
+    throw new ProtocolParseError('Invalid GameEventBatch payload');
   }
   return value;
 }

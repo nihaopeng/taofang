@@ -1,6 +1,11 @@
 import type { IncomingMessage, RequestListener, ServerResponse } from 'node:http';
-import { ProtocolParseError } from '@starvalley/protocol';
-import type { ActorId, ProtocolErrorCode } from '@starvalley/protocol';
+import { ProtocolParseError, STREAM_PATH } from '@starvalley/protocol';
+import type {
+  ActorId,
+  GameEventBatch,
+  ProtocolErrorCode,
+  WorldStreamMessage,
+} from '@starvalley/protocol';
 import { UnknownActorError } from '@starvalley/manager';
 import type { GameInfoManager, WorldManager } from '@starvalley/manager';
 import { mapErrorCodeToStatus, protocolErrorBody } from './http-errors.ts';
@@ -17,20 +22,39 @@ import { allowedMethods, findRoute, isKnownPath } from './routes.ts';
  */
 export type ResolveActorId = (request: IncomingMessage) => ActorId | Promise<ActorId>;
 
+/**
+ * The realtime fan-out seam the composition root provides: a plain
+ * listener-registration port, deliberately timer-free.
+ *
+ * Router never owns a tick. The composition root owns the simulation clock and
+ * calls this port's listeners with the batch produced by each step; Router only
+ * adapts those typed batches onto the SSE transport.
+ */
+export interface WorldStreamPort {
+  subscribe(listener: (batch: GameEventBatch) => void): () => void;
+}
+
 /** Typed collaborators the Router layer needs from the application. */
 export interface RouterDependencies {
   readonly gameInfo: GameInfoManager;
   readonly world: WorldManager;
+  readonly worldStream: WorldStreamPort;
   readonly resolveActorId: ResolveActorId;
 }
 
 const JSON_CONTENT_TYPE = 'application/json; charset=utf-8';
+
+/** Media type committed on `GET STREAM_PATH`; a disconnect here is normal. */
+const EVENT_STREAM_CONTENT_TYPE = 'text/event-stream';
 
 /** Hard cap on a request body; anything larger is rejected with BAD_REQUEST. */
 const MAX_BODY_BYTES = 64 * 1024;
 
 /** Methods that may carry a body; anything else gets `body === undefined`. */
 const BODY_METHODS: ReadonlySet<string> = new Set(['POST', 'PUT', 'PATCH']);
+
+/** Heartbeat cadence for the SSE stream, keeping proxies from idling it out. */
+const STREAM_HEARTBEAT_MS = 15_000;
 
 type BodyFailureReason = 'too-large' | 'malformed' | 'empty';
 
@@ -108,6 +132,19 @@ function sendProtocolError(
 }
 
 /**
+ * Whether the response currently being written is an event stream.
+ *
+ * A client closing an event stream is the expected end of the stream, so the
+ * abort handler must not treat it as an exceptional client failure. The header
+ * is committed by `handleStream` before any frame is written, so it is already
+ * readable by the time a disconnect can occur.
+ */
+function isEventStreamResponse(response: ServerResponse): boolean {
+  const contentType = response.getHeader('content-type');
+  return typeof contentType === 'string' && contentType.startsWith(EVENT_STREAM_CONTENT_TYPE);
+}
+
+/**
  * Read and JSON-parse the request body for body-carrying methods.
  *
  * Transport concern, kept entirely in the listener: enforces the byte cap,
@@ -181,6 +218,118 @@ function readRequestBody(request: IncomingMessage, method: string): Promise<unkn
   });
 }
 
+/**
+ * Resolve the caller identity exactly once and reject a missing result.
+ *
+ * The resolver is the single authorization seam; a rejected or empty result is
+ * a server-side failure and must surface as the shared opaque `INTERNAL_ERROR`,
+ * never as an actor-less request that reaches Manager.
+ */
+async function resolveRequiredActor(
+  deps: RouterDependencies,
+  request: IncomingMessage,
+): Promise<ActorId> {
+  const actorId: ActorId | undefined = await deps.resolveActorId(request);
+  if (actorId === undefined) {
+    throw new Error('Actor resolution returned no actor');
+  }
+  return actorId;
+}
+
+/**
+ * Serve `GET STREAM_PATH` as a Server-Sent Events stream.
+ *
+ * Transport-only: commits the SSE headers, emits the leading `snapshot` frame
+ * (resolved for `actorId`, which closes the connect race), then relays every
+ * batch delivered by the injected `worldStream` port as an `events` frame. A
+ * periodic heartbeat comment keeps intermediaries from idling the connection.
+ * On client disconnect the subscription is released and the response is ended
+ * exactly once. There is no timer for the world and no game rule here: the
+ * composition root owns the tick.
+ */
+async function handleStream(
+  deps: RouterDependencies,
+  request: IncomingMessage,
+  response: ServerResponse,
+  actorId: ActorId,
+): Promise<void> {
+  // Resolve the snapshot BEFORE committing headers so an unknown actor still
+  // yields the normal JSON error path instead of a half-open stream.
+  const snapshot = deps.world.getSnapshot({ actorId });
+
+  response.statusCode = 200;
+  response.setHeader('content-type', 'text/event-stream');
+  response.setHeader('cache-control', 'no-cache');
+  response.setHeader('connection', 'keep-alive');
+  response.flushHeaders();
+
+  let finished = false;
+  let unsubscribe: (() => void) | undefined;
+  let heartbeat: NodeJS.Timeout | undefined;
+
+  const writeMessage = (message: WorldStreamMessage): void => {
+    if (finished || response.destroyed || response.writableEnded) {
+      return;
+    }
+    try {
+      response.write(`data: ${JSON.stringify(message)}\n\n`);
+    } catch (error) {
+      console.error('[router] failed to write stream frame:', error);
+    }
+  };
+
+  const finish = (): void => {
+    if (finished) {
+      return;
+    }
+    finished = true;
+    if (heartbeat !== undefined) {
+      clearInterval(heartbeat);
+      heartbeat = undefined;
+    }
+    if (unsubscribe !== undefined) {
+      const release = unsubscribe;
+      unsubscribe = undefined;
+      release();
+    }
+    request.off('close', finish);
+    request.off('aborted', finish);
+    response.off('close', finish);
+    if (!response.writableEnded) {
+      try {
+        response.end();
+      } catch (error) {
+        console.error('[router] failed to finalize stream response:', error);
+      }
+    }
+  };
+
+  request.on('close', finish);
+  request.on('aborted', finish);
+  response.on('close', finish);
+
+  heartbeat = setInterval(() => {
+    if (finished || response.destroyed || response.writableEnded) {
+      return;
+    }
+    try {
+      response.write(': heartbeat\n\n');
+    } catch (error) {
+      console.error('[router] failed to write stream heartbeat:', error);
+    }
+  }, STREAM_HEARTBEAT_MS);
+  // Do not let a live stream keep the process alive after the server closes.
+  heartbeat.unref();
+
+  // The leading snapshot (full state) precedes any delta, so a consumer can
+  // materialise the world without a separate request and cannot miss changes
+  // that occurred before the subscription was registered.
+  writeMessage({ type: 'snapshot', snapshot });
+  unsubscribe = deps.worldStream.subscribe((batch) => {
+    writeMessage({ type: 'events', batch });
+  });
+}
+
 async function handleRequest(
   deps: RouterDependencies,
   request: IncomingMessage,
@@ -195,6 +344,19 @@ async function handleRequest(
       return;
     }
 
+    // The stream is a transport-shaped route (SSE headers, incremental writes),
+    // so it is served directly here rather than through a JSON RouteDefinition.
+    if (url.pathname === STREAM_PATH) {
+      if (method !== 'GET') {
+        response.setHeader('Allow', allowedMethods(url.pathname).join(', '));
+        sendProtocolError(response, 'METHOD_NOT_ALLOWED', `Method ${method} not allowed`);
+        return;
+      }
+      const streamActorId = await resolveRequiredActor(deps, request);
+      await handleStream(deps, request, response, streamActorId);
+      return;
+    }
+
     const route = findRoute(url.pathname, method);
     if (route === undefined) {
       response.setHeader('Allow', allowedMethods(url.pathname).join(', '));
@@ -205,7 +367,7 @@ async function handleRequest(
     const body = await readRequestBody(request, method);
     // Resolve the caller identity exactly once per request, from transport
     // context (never the body), then pass it as typed context to the handler.
-    const actorId = await deps.resolveActorId(request);
+    const actorId = await resolveRequiredActor(deps, request);
     const result = await route.handle({
       gameInfo: deps.gameInfo,
       world: deps.world,
@@ -266,9 +428,18 @@ export function createRequestListener(deps: RouterDependencies): RequestListener
     request.on('aborted', () => {
       // Once the response is finalized the abort is the expected consequence of
       // our own oversized-body teardown, not a client failure.
-      if (!response.writableEnded) {
-        console.warn('[router] client aborted the request');
+      if (response.writableEnded) {
+        return;
       }
+      // Closing an event stream is the normal end of `GET STREAM_PATH`, not an
+      // exceptional abort: teardown is owned by the stream's own disconnect
+      // handler, so there is nothing to warn about and no one to warn for.
+      if (isEventStreamResponse(response)) {
+        return;
+      }
+      // A genuinely exceptional abort on an ordinary request (e.g. the peer
+      // vanished mid-response) still deserves a warning.
+      console.warn('[router] client aborted the request');
     });
     response.on('error', (error: Error) => {
       console.error('[router] response stream error:', error);

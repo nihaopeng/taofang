@@ -20,35 +20,66 @@ const nonObjects: Array<[string, unknown]> = [
 ];
 
 describe('isTransform', () => {
-  it('accepts a well-formed Transform', () => {
+  it('accepts a well-formed 3D Transform', () => {
     expect(isTransform(validTransform)).toBe(true);
   });
 
-  it('accepts zero and negative integers (bounds are not a Protocol concern)', () => {
-    expect(isTransform({ x: 0, y: 0 })).toBe(true);
-    expect(isTransform({ x: -5, y: -12 })).toBe(true);
+  it('accepts fractional and negative positions (bounds are not a Protocol concern)', () => {
+    expect(
+      isTransform({ position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0, w: 1 } }),
+    ).toBe(true);
+    expect(
+      isTransform({ position: { x: -1.25, y: 3.5, z: -0.001 }, rotation: { x: 1, y: 2, z: 3, w: 4 } }),
+    ).toBe(true);
+  });
+
+  it('accepts a non-normalised but non-zero quaternion (normalisation is runtime, not wire)', () => {
+    expect(
+      isTransform({ position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 2, z: 0, w: 2 } }),
+    ).toBe(true);
+  });
+
+  it('rejects a zero quaternion (not a rotation)', () => {
+    expect(
+      isTransform({ position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0, w: 0 } }),
+    ).toBe(false);
+  });
+
+  it('rejects the old 2D `{ x, y }` tile-coordinate shape', () => {
+    expect(isTransform({ x: 3, y: 4 })).toBe(false);
+    expect(isTransform({ position: { x: 0, y: 0 }, rotation: { x: 0, y: 0, z: 0, w: 1 } })).toBe(
+      false,
+    );
   });
 
   it.each(nonObjects)('rejects %s', (_label, value) => {
     expect(isTransform(value)).toBe(false);
   });
 
-  it.each(['x', 'y'])('rejects a missing %s', (key) => {
+  it.each(['position', 'rotation'])('rejects a missing %s', (key) => {
     const value: Record<string, unknown> = { ...validTransform };
     delete value[key];
     expect(isTransform(value)).toBe(false);
   });
 
-  it('rejects unknown extra fields', () => {
-    expect(isTransform({ ...validTransform, z: 1 })).toBe(false);
+  it('rejects unknown extra fields, including a visual scale', () => {
+    expect(isTransform({ ...validTransform, x: 1 })).toBe(false);
+    expect(
+      isTransform({ ...validTransform, scale: { x: 1, y: 1, z: 1 } }),
+    ).toBe(false);
   });
 
-  it('rejects wrong field types and non-integers', () => {
-    expect(isTransform({ ...validTransform, x: '3' })).toBe(false);
-    expect(isTransform({ ...validTransform, y: null })).toBe(false);
-    expect(isTransform({ ...validTransform, x: 1.5 })).toBe(false);
-    expect(isTransform({ ...validTransform, y: Number.NaN })).toBe(false);
-    expect(isTransform({ ...validTransform, x: Number.POSITIVE_INFINITY })).toBe(false);
+  it('rejects wrong field types', () => {
+    expect(isTransform({ ...validTransform, position: null })).toBe(false);
+    expect(isTransform({ ...validTransform, position: { x: 1, y: 2 } })).toBe(false);
+    expect(isTransform({ ...validTransform, position: { x: 1, y: 2, z: '3' } })).toBe(false);
+    expect(isTransform({ ...validTransform, position: { x: 1, y: 2, z: Number.NaN } })).toBe(false);
+    expect(
+      isTransform({ ...validTransform, position: { x: 1, y: 2, z: Number.POSITIVE_INFINITY } }),
+    ).toBe(false);
+    expect(isTransform({ ...validTransform, rotation: null })).toBe(false);
+    expect(isTransform({ ...validTransform, rotation: { x: 0, y: 0, z: 0 } })).toBe(false);
+    expect(isTransform({ ...validTransform, rotation: { x: 0, y: 0, z: 0, w: '1' } })).toBe(false);
   });
 });
 
@@ -58,7 +89,7 @@ describe('parseTransform', () => {
   });
 
   it('throws ProtocolParseError with a message when invalid', () => {
-    const error = captureParseError(() => parseTransform({ ...validTransform, x: 1.5 }));
+    const error = captureParseError(() => parseTransform({ x: 3, y: 4 }));
     expect(error.message).toBe('Invalid Transform payload');
     expect(error.code).toBe('BAD_REQUEST');
   });
@@ -143,7 +174,7 @@ describe('isEntityState', () => {
     expect(isEntityState({ ...validEntityState, kind: 'npc' })).toBe(false);
     expect(isEntityState({ ...validEntityState, kind: 1 })).toBe(false);
     expect(isEntityState({ ...validEntityState, transform: null })).toBe(false);
-    expect(isEntityState({ ...validEntityState, transform: { x: 1 } })).toBe(false);
+    expect(isEntityState({ ...validEntityState, transform: { x: 1, y: 2 } })).toBe(false);
     expect(isEntityState({ ...validEntityState, visible: 'true' })).toBe(false);
     expect(isEntityState({ ...validEntityState, visible: 1 })).toBe(false);
   });

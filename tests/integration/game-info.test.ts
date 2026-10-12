@@ -41,6 +41,8 @@ beforeAll(async () => {
       gameInfo,
       world: createWorldManager(),
       resolveActorId: () => parseActorId('actor-1'),
+      // game-info does not use the realtime stream; the port is required by the listener.
+      worldStream: { subscribe: () => () => undefined },
     }),
   );
   await new Promise<void>((resolve) => {

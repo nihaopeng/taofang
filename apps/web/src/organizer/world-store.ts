@@ -1,51 +1,93 @@
 /**
  * Client-side store for the world feature.
  *
- * Owns the world request lifecycle (`idle -> loading -> ready | error`), the
- * command pipeline, subscriptions, and the mapping from internal transport
- * failures to user-presentable strings. It is intentionally a *second* module
- * singleton, separate from `game-info-store`, so the two resources never share
- * state or in-flight bookkeeping.
+ * Owns the world request lifecycle (`idle -> loading -> ready | error`) for the
+ * one-shot snapshot, the realtime stream lifecycle (`idle -> connecting -> live |
+ * error`), the movement-intent pipeline, subscriptions, and the mapping from
+ * internal transport failures to user-presentable strings.
  *
- * The client is **event-driven over the primitive contract**: a command returns an
- * authoritative `{ events, serverTime }` delta, and the store applies those events
- * to its entity state. An empty `events` array is the server *refusing* the
- * command; it is not an error and changes nothing.
+ * The client is **authoritative-only**: it never predicts and never interpolates.
+ * A snapshot and a stream `events` message are the *only* things that move an
+ * entity; `setMovementIntent` sends a direction and changes no client position.
+ * Smoothing/interpolation between authoritative transforms is the renderer's job
+ * (Render ISA `transform.setTarget`), not the Organizer's.
  *
- * Terrain is **static**: no event carries it, so `tiles` is only ever replaced by
- * a fresh snapshot and is carried over reference-identically by the event applier.
- * `terrain` stays an opaque string here; walkability is an authoritative Manager
- * rule, so the store derives no collision rule of its own. A blocked step reaches
- * the client only as a refusal (empty `events`), never as client-side validation.
+ * ## Realtime stream
  *
- * Authoritative server state only. There is no prediction, interpolation, deltas,
- * or bounds checking: the visible world changes *only* when a validated snapshot
- * or event is reconciled into the view model.
+ * After a successful snapshot, the store opens exactly one Server-Sent Events
+ * connection (`world-stream`). The server sends a full `snapshot` first on every
+ * connection (which replaces client state wholesale), then `events` batches
+ * (applied through the same applier used for command acks). The store owns the
+ * retry policy: a bounded exponential backoff, and after a bounded number of
+ * consecutive connection failures `streamStatus` stays `error` instead of
+ * reconnecting forever. `resetWorldState()` closes the connection.
+ *
+ * Every frame is validated with the canonical Protocol guard
+ * (`parseWorldStreamMessage`); a malformed frame is ignored and never corrupts
+ * state. This module never invents a wire field.
+ *
+ * ## Movement intent
+ *
+ * `setMovementIntent({ x, z })` is level-triggered: the UI posts only when the
+ * input *changes*, and the Manager stores the latest intent per actor. The body
+ * is exactly `{ type: 'actor.moveIntent', movement: { x, z } }` — no actor field
+ * (the actor is resolved from transport context) and no position (the client is
+ * never trusted with one). Requests are serialised with a single in-flight slot
+ * and latest-wins coalescing so rapid input cannot storm the network.
+ *
+ * Terrain is **static**: no event carries it, so `tiles`/`grid`/`bounds` are only
+ * ever replaced by a fresh snapshot and are carried over reference-identically by
+ * the event applier. `terrain` stays an opaque string; walkability is an
+ * authoritative Manager rule, so the store derives no collision rule of its own.
  */
 
-import type { ActorMoveCommand, GameEvent } from '@starvalley/protocol';
+import { parseWorldStreamMessage } from '@starvalley/protocol';
+import type {
+  GameEvent,
+  MoveIntentCommand,
+  WorldSnapshot,
+  WorldStreamMessage,
+} from '@starvalley/protocol';
 
 import { ApiError, describeApiError } from './transport';
 import { fetchWorld, submitCommand } from './world-api-client';
+import { createWorldEventSource } from './world-stream';
+import type { EventSourceLike } from './world-stream';
 import {
   compareEntityViewModels,
+  toBoundsViewModel,
   toEntityViewModels,
   toEntityViewModel,
+  toGridViewModel,
   toTileViewModels,
-  toWorldViewModel,
 } from './world-view-model';
-import type { EntityViewModel, MoveDirection, TileViewModel, WorldViewModel } from './world-view-model';
+import type {
+  BoundsViewModel,
+  EntityViewModel,
+  GridViewModel,
+  TileViewModel,
+} from './world-view-model';
 
-/** World request lifecycle as observed by the UI. */
+/** Snapshot request lifecycle as observed by the UI. */
 export type WorldStatus = 'idle' | 'loading' | 'ready' | 'error';
 
-/** Observable state. `world`/`tiles`/`entities` are populated once a snapshot is `ready`. */
+/** Realtime stream lifecycle as observed by the UI. */
+export type StreamStatus = 'idle' | 'connecting' | 'live' | 'error';
+
+/** Desired horizontal movement direction, each component in `[-1, 1]`. */
+type MovementIntent = { x: number; z: number };
+
+/** Observable state. */
 export interface WorldState {
   status: WorldStatus;
+  streamStatus: StreamStatus;
   /** The loaded world's identity, or `null` while no snapshot is `ready`. */
   worldId: string | null;
-  world: WorldViewModel | null;
-  /** Static terrain, ordered deterministically by `y` then `x`. */
+  /** The world's AABB, or `null` while no snapshot is `ready`. */
+  bounds: BoundsViewModel | null;
+  /** The gameplay grid configuration, or `null` while no snapshot is `ready`. */
+  grid: GridViewModel | null;
+  /** Static terrain, ordered deterministically by `cellZ` then `cellX`. */
   tiles: readonly TileViewModel[];
   /** Authoritative entities, ordered deterministically by `entityId`. */
   entities: readonly EntityViewModel[];
@@ -57,47 +99,70 @@ export interface WorldState {
 
 type Listener = (state: WorldState) => void;
 
-/** Shared empty list so idle/loading states are reference-stable. */
-const NO_ENTITIES: readonly EntityViewModel[] = Object.freeze([]);
-/** Shared empty tile list so idle/loading states are reference-stable. */
+/** Shared empty lists so idle/loading states are reference-stable. */
 const NO_TILES: readonly TileViewModel[] = Object.freeze([]);
+const NO_ENTITIES: readonly EntityViewModel[] = Object.freeze([]);
 
 /** Canonical initial state. Reused so `getWorldState` is reference-stable. */
 const IDLE_STATE: WorldState = {
   status: 'idle',
+  streamStatus: 'idle',
   worldId: null,
-  world: null,
+  bounds: null,
+  grid: null,
   tiles: NO_TILES,
   entities: NO_ENTITIES,
   controlledActorId: null,
   error: null,
 };
 
+/**
+ * Bounded stream reconnect policy.
+ *
+ * A connection failure sets `streamStatus` to `error` and schedules a retry after
+ * an exponential backoff (capped at `STREAM_MAX_RETRY_DELAY_MS`). After
+ * `STREAM_MAX_RECONNECT_ATTEMPTS` consecutive failures the store stops and leaves
+ * `streamStatus === 'error'` rather than reconnecting forever. A successful open
+ * resets the counter.
+ */
+const STREAM_BASE_RETRY_DELAY_MS = 250;
+const STREAM_MAX_RETRY_DELAY_MS = 4_000;
+const STREAM_MAX_RECONNECT_ATTEMPTS = 4;
+
 let state: WorldState = IDLE_STATE;
 /**
- * Bumped on reset so a response that settles afterwards cannot clobber newer
- * state. Read-only during normal operation.
+ * Bumped on reset so a response or timer that settles afterwards cannot clobber
+ * newer state. Read-only during normal operation.
  */
 let generation = 0;
 let inFlightLoad: Promise<void> | null = null;
 const listeners = new Set<Listener>();
 
+// --- Realtime stream bookkeeping -------------------------------------------
+
+/** The single open connection, or `null` while none is open. */
+let eventSource: EventSourceLike | null = null;
+/** Pending reconnect timer, or `null` when no reconnect is scheduled. */
+let streamRetryTimer: ReturnType<typeof setTimeout> | null = null;
+/** Consecutive connection failures since the last successful open. */
+let streamAttempt = 0;
+
+// --- Intent pipeline bookkeeping -------------------------------------------
+
 /**
- * Command serialization.
- *
- * Exactly one command may be in flight at a time (`activeMoveToken`). While one
- * is in flight, `moveActor` records only the *latest* requested direction
- * (`queuedDirection`) and returns a promise that settles once the in-flight
- * request that superseded it (or its own request) has settled. This bounds
- * held-key input to one request per settle and keeps ordering deterministic.
+ * Exactly one intent request may be in flight at a time (`activeIntentToken`).
+ * While one is in flight, `setMovementIntent` records only the *latest* requested
+ * movement (`queuedIntent`) and returns a promise that settles once the request
+ * that superseded it (or its own request) has settled. This bounds rapid input to
+ * one request per settle and keeps ordering deterministic.
  */
-interface MoveLoopToken {
+interface IntentLoopToken {
   readonly active: true;
 }
 
-let activeMoveToken: MoveLoopToken | null = null;
-let queuedDirection: MoveDirection | null = null;
-let queuedWaiters: Array<() => void> = [];
+let activeIntentToken: IntentLoopToken | null = null;
+let queuedIntent: MovementIntent | null = null;
+let queuedIntentWaiters: Array<() => void> = [];
 
 /**
  * Current state. Returns the same object reference until an actual transition
@@ -119,16 +184,18 @@ export function subscribeWorld(listener: Listener): () => void {
 }
 
 /**
- * Return to the initial `idle` state, discard any in-flight load result, and
- * drain any queued move requests (their promises resolve without further I/O).
+ * Return to the initial `idle` state, discard any in-flight load result, close the
+ * stream, cancel any pending reconnect, and drain any queued intents (their
+ * promises resolve without further I/O).
  */
 export function resetWorldState(): void {
   generation += 1;
   inFlightLoad = null;
-  activeMoveToken = null;
-  queuedDirection = null;
-  const waiters = queuedWaiters;
-  queuedWaiters = [];
+  resetStream();
+  activeIntentToken = null;
+  queuedIntent = null;
+  const waiters = queuedIntentWaiters;
+  queuedIntentWaiters = [];
   for (const resolve of waiters) {
     resolve();
   }
@@ -136,15 +203,23 @@ export function resetWorldState(): void {
 }
 
 /**
- * Load the authoritative world snapshot. Never rejects: the returned promise
- * resolves once the state has settled (`ready` or `error`). Concurrent calls
- * while a request is in flight share the same promise and do not trigger a
- * second fetch. A successful snapshot **replaces** the world, tile, and entity state
- * wholesale.
+ * Load the authoritative world snapshot, then open the realtime stream.
+ *
+ * Never rejects: the returned promise resolves once the snapshot has settled
+ * (`ready` or `error`). Idempotent: concurrent calls share the same promise, and
+ * a call while a stream is already `connecting`/`live` is a no-op (it does not
+ * re-fetch or restart the stream). A successful snapshot **replaces** the world,
+ * bounds, grid, tile, and entity state wholesale.
  */
 export function loadWorld(): Promise<void> {
   if (inFlightLoad !== null) {
     return inFlightLoad;
+  }
+  if (
+    state.status === 'ready' &&
+    (state.streamStatus === 'connecting' || state.streamStatus === 'live')
+  ) {
+    return Promise.resolve();
   }
 
   const requestGeneration = generation;
@@ -160,10 +235,16 @@ export function loadWorld(): Promise<void> {
 }
 
 async function runLoad(requestGeneration: number): Promise<void> {
+  // Drop any stale connection/timer from a previous attempt before starting over.
+  teardownStream();
+  streamAttempt = 0;
+
   setState({
     status: 'loading',
+    streamStatus: 'idle',
     worldId: null,
-    world: null,
+    bounds: null,
+    grid: null,
     tiles: NO_TILES,
     entities: NO_ENTITIES,
     controlledActorId: null,
@@ -175,23 +256,18 @@ async function runLoad(requestGeneration: number): Promise<void> {
     if (requestGeneration !== generation) {
       return;
     }
-    setState({
-      status: 'ready',
-      worldId: snapshot.worldId,
-      world: toWorldViewModel(snapshot),
-      tiles: toTileViewModels(snapshot.tiles),
-      entities: toEntityViewModels(snapshot.entities),
-      controlledActorId: snapshot.controlledActorId,
-      error: null,
-    });
+    setState(fromSnapshot(snapshot, 'ready', 'idle', null));
+    openStream(requestGeneration);
   } catch (error) {
     if (requestGeneration !== generation) {
       return;
     }
     setState({
       status: 'error',
+      streamStatus: 'idle',
       worldId: null,
-      world: null,
+      bounds: null,
+      grid: null,
       tiles: NO_TILES,
       entities: NO_ENTITIES,
       controlledActorId: null,
@@ -201,129 +277,297 @@ async function runLoad(requestGeneration: number): Promise<void> {
 }
 
 /**
- * UI intent: move the controlled actor one tile in `direction`.
- *
- * The store owns the wire command: the primitive is built from the direction
- * alone as `{ type: 'actor.move', direction }`. The server resolves *which* actor
- * the caller controls from transport context, so no actor/player id is ever sent
- * (and none may be invented here). Semantics:
- *
- * - **No world loaded yet:** safe no-op that resolves without sending anything
- *   (there is no authoritative controlled actor to move).
- * - **A command already in flight:** no second concurrent request; the latest
- *   direction is queued and dispatched when the current request settles.
- * - **Never rejects:** failures settle the store into `error` and resolve.
+ * Project a validated snapshot into client state. Bounds/grid are mapped fresh,
+ * tiles get their world positions derived from the grid, and entities are mapped
+ * with their full 3D transform.
  */
-export function moveActor(direction: MoveDirection): Promise<void> {
-  if (state.controlledActorId === null) {
-    // No authoritative snapshot yet; refuse the step rather than send a command
-    // the server would have to reject.
-    return Promise.resolve();
+function fromSnapshot(
+  snapshot: WorldSnapshot,
+  status: WorldStatus,
+  streamStatus: StreamStatus,
+  error: string | null,
+): WorldState {
+  return {
+    status,
+    streamStatus,
+    worldId: snapshot.worldId,
+    bounds: toBoundsViewModel(snapshot.bounds),
+    grid: toGridViewModel(snapshot.grid),
+    tiles: toTileViewModels(snapshot.tiles, snapshot.grid),
+    entities: toEntityViewModels(snapshot.entities),
+    controlledActorId: snapshot.controlledActorId,
+    error,
+  };
+}
+
+// --- Stream lifecycle ------------------------------------------------------
+
+/**
+ * Open the stream through the injected factory. The store owns the retry policy;
+ * this only wires the connection's lifecycle callbacks to the store's state.
+ */
+function openStream(streamGeneration: number): void {
+  teardownStream();
+  setStreamStatus('connecting');
+
+  let source: EventSourceLike;
+  try {
+    source = createWorldEventSource();
+  } catch {
+    // No EventSource (SSR/test without an injected factory): treat it as a
+    // connection failure so the bounded retry policy still applies.
+    handleStreamFailure(null, streamGeneration);
+    return;
   }
 
-  return new Promise<void>((resolve) => {
-    if (activeMoveToken !== null) {
-      queuedDirection = direction;
-      queuedWaiters.push(resolve);
+  eventSource = source;
+  source.onopen = () => {
+    if (eventSource !== source) {
       return;
     }
-
-    const token: MoveLoopToken = { active: true };
-    activeMoveToken = token;
-    void runMoveLoop(direction, [resolve], token);
+    streamAttempt = 0;
+    setStreamStatus('live');
+  };
+  source.onerror = () => {
+    if (eventSource !== source) {
+      return;
+    }
+    handleStreamFailure(source, streamGeneration);
+  };
+  source.addEventListener('message', (event) => {
+    if (eventSource !== source) {
+      return;
+    }
+    handleStreamFrame(event.data);
   });
 }
 
-async function runMoveLoop(
-  initialDirection: MoveDirection,
+/**
+ * Handle one connection failure: close the source, surface `error`, and schedule
+ * a bounded reconnect unless the attempt budget is exhausted.
+ */
+function handleStreamFailure(source: EventSourceLike | null, streamGeneration: number): void {
+  if (source !== null && eventSource !== source) {
+    return;
+  }
+  if (source !== null) {
+    source.onopen = null;
+    source.onerror = null;
+    source.close();
+  }
+  eventSource = null;
+  streamAttempt += 1;
+  setStreamStatus('error');
+
+  if (streamAttempt >= STREAM_MAX_RECONNECT_ATTEMPTS) {
+    return;
+  }
+
+  const delay = Math.min(
+    STREAM_BASE_RETRY_DELAY_MS * 2 ** (streamAttempt - 1),
+    STREAM_MAX_RETRY_DELAY_MS,
+  );
+  streamRetryTimer = setTimeout(() => {
+    streamRetryTimer = null;
+    if (streamGeneration !== generation) {
+      return;
+    }
+    openStream(streamGeneration);
+  }, delay);
+}
+
+/** Close the current connection and cancel any pending reconnect (keeps the counter). */
+function teardownStream(): void {
+  if (streamRetryTimer !== null) {
+    clearTimeout(streamRetryTimer);
+    streamRetryTimer = null;
+  }
+  if (eventSource !== null) {
+    eventSource.onopen = null;
+    eventSource.onerror = null;
+    eventSource.close();
+    eventSource = null;
+  }
+}
+
+/** Close the stream and forget the attempt history (used by `resetWorldState`). */
+function resetStream(): void {
+  teardownStream();
+  streamAttempt = 0;
+}
+
+/**
+ * Validate and apply one stream frame. A malformed frame (bad JSON or a payload
+ * that fails the canonical Protocol guard) is ignored: one unrecognised frame
+ * must never crash the client or corrupt the current state.
+ */
+function handleStreamFrame(data: string): void {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return;
+  }
+
+  let message: WorldStreamMessage;
+  try {
+    message = parseWorldStreamMessage(parsed);
+  } catch {
+    return;
+  }
+
+  switch (message.type) {
+    case 'snapshot': {
+      // A stream snapshot is authoritative and replaces state wholesale.
+      setState(fromSnapshot(message.snapshot, 'ready', state.streamStatus, null));
+      break;
+    }
+    case 'events': {
+      applyEvents(message.batch.events);
+      break;
+    }
+    default: {
+      // Exhaustiveness guard on the server-sent union; a future member is a
+      // compile error until handled here.
+      const exhaustive: never = message;
+      void exhaustive;
+      break;
+    }
+  }
+}
+
+/** Mutate only `streamStatus`, preserving every other field reference-identically. */
+function setStreamStatus(next: StreamStatus): void {
+  if (state.streamStatus === next) {
+    return;
+  }
+  setState({ ...state, streamStatus: next });
+}
+
+// --- Movement intent -------------------------------------------------------
+
+/**
+ * UI intent: "the actor I control should move in `movement`", level-triggered.
+ *
+ * The store builds the wire command itself as
+ * `{ type: 'actor.moveIntent', movement: { x, z } }`. The server resolves *which*
+ * actor the caller controls from transport context, so no actor/player id is ever
+ * sent (and none may be invented here), and the client never sends a position.
+ * Semantics:
+ *
+ * - **No world loaded yet:** safe no-op that resolves without sending anything.
+ * - **A request already in flight:** no second concurrent request; the latest
+ *   movement is queued and dispatched when the current request settles.
+ * - **Never rejects:** failures settle the store into `error` and resolve.
+ *
+ * It changes no client position: only the authoritative events returned by the
+ * server (or the stream) move an entity. There is no prediction.
+ */
+export function setMovementIntent(movement: { x: number; z: number }): Promise<void> {
+  if (state.controlledActorId === null) {
+    // No authoritative snapshot yet; refuse the intent rather than send a
+    // command the server would have to reject.
+    return Promise.resolve();
+  }
+
+  // Copy only the contract fields so a stray runtime key cannot reach the wire.
+  const intent: MovementIntent = { x: movement.x, z: movement.z };
+
+  return new Promise<void>((resolve) => {
+    if (activeIntentToken !== null) {
+      queuedIntent = intent;
+      queuedIntentWaiters.push(resolve);
+      return;
+    }
+
+    const token: IntentLoopToken = { active: true };
+    activeIntentToken = token;
+    void runIntentLoop(intent, [resolve], token);
+  });
+}
+
+async function runIntentLoop(
+  initialMovement: MovementIntent,
   initialWaiters: Array<() => void>,
-  token: MoveLoopToken,
+  token: IntentLoopToken,
 ): Promise<void> {
   const loopGeneration = generation;
-  let currentDirection = initialDirection;
+  let currentMovement = initialMovement;
   let currentWaiters: Array<() => void> = initialWaiters;
 
   try {
-    // Dispatch `currentDirection`, then adopt the latest queued direction (if
-    // any) as the next request. Waiters attached to a direction resolve once the
-    // request that superseded it (or its own request) has settled.
     for (;;) {
-      await performMove(currentDirection, loopGeneration);
+      await performIntent(currentMovement, loopGeneration);
 
-      // Settle the waiters attached to the request that just completed. These
-      // are owned by this loop regardless of whether it is still current.
+      // Settle the waiters attached to the request that just completed.
       for (const resolve of currentWaiters) {
         resolve();
       }
       currentWaiters = [];
 
-      // A reset supersedes this loop. `resetWorldState` already drained the
-      // waiters that were queued when it ran, and any newer queue belongs to the
-      // loop that now owns the token. Do not consume it: touching the shared
-      // queue here would silently drop a newer caller's direction and leave its
-      // promise unsettled forever.
+      // A reset supersedes this loop; it already drained the waiters that were
+      // queued when it ran. Do not consume the newer queue: it belongs to the
+      // successor loop.
       if (loopGeneration !== generation) {
         break;
       }
 
-      const nextDirection = queuedDirection;
-      const nextWaiters = queuedWaiters;
-      queuedDirection = null;
-      queuedWaiters = [];
+      const nextMovement = queuedIntent;
+      const nextWaiters = queuedIntentWaiters;
+      queuedIntent = null;
+      queuedIntentWaiters = [];
 
-      if (nextDirection === null) {
+      if (nextMovement === null) {
         break;
       }
-      currentDirection = nextDirection;
+      currentMovement = nextMovement;
       currentWaiters = nextWaiters;
     }
   } finally {
-    // Only the current generation's loop owns the shared queue. Drain anything
-    // queued after the final dispatch so no caller is left waiting. A superseded
-    // loop must not touch the queue owned by its successor.
     if (loopGeneration === generation) {
-      for (const resolve of queuedWaiters) {
+      for (const resolve of queuedIntentWaiters) {
         resolve();
       }
-      queuedWaiters = [];
-      queuedDirection = null;
+      queuedIntentWaiters = [];
+      queuedIntent = null;
     }
-    if (activeMoveToken === token) {
-      activeMoveToken = null;
+    if (activeIntentToken === token) {
+      activeIntentToken = null;
     }
   }
 }
 
-async function performMove(direction: MoveDirection, loopGeneration: number): Promise<void> {
+async function performIntent(
+  movement: MovementIntent,
+  loopGeneration: number,
+): Promise<void> {
   if (state.controlledActorId === null) {
     return;
   }
 
-  const command: ActorMoveCommand = { type: 'actor.move', direction };
+  const command: MoveIntentCommand = {
+    type: 'actor.moveIntent',
+    movement: { x: movement.x, z: movement.z },
+  };
 
   try {
-    const response = await submitCommand(command);
+    const batch = await submitCommand(command);
     if (loopGeneration !== generation) {
       return;
     }
-    // A concurrent `loadWorld`/`resetWorldState` invalidates this result.
     if (state.controlledActorId === null) {
       return;
     }
-    applyEvents(response.events);
+    applyEvents(batch.events);
   } catch (error) {
     if (loopGeneration !== generation) {
       return;
     }
-    // Preserve the last authoritative world/entities so the map stays visible;
-    // only the status/error signal the failure.
+    // Preserve the last authoritative world so the scene stays visible; only the
+    // status/error signal the failure.
     setState({
+      ...state,
       status: 'error',
-      worldId: state.worldId,
-      world: state.world,
-      tiles: state.tiles,
-      entities: state.entities,
-      controlledActorId: state.controlledActorId,
       error: toMoveErrorMessage(error),
     });
   }
@@ -337,20 +581,25 @@ function toMoveErrorMessage(error: unknown): string {
   if (error instanceof ApiError && error.kind === 'status' && error.status === 404) {
     return 'That actor could not be found.';
   }
-  return describeApiError(error, 'Something went wrong while moving.');
+  return describeApiError(error, 'Something went wrong while sending movement.');
 }
 
+// --- Event reconciliation --------------------------------------------------
+
 /**
- * Reconcile the authoritative event delta into entity state.
+ * Reconcile an authoritative event delta into entity state.
  *
  * - `transform.changed` updates exactly that entity; it never creates one.
  * - `entity.spawned` adds (or replaces) the entity.
  * - `entity.removed` drops the entity.
  *
- * An **empty** event list is the server refusing the command: it is not an error,
+ * An **empty** event list is the server refusing a command: it is not an error,
  * the status stays `ready`, the error stays `null`, and nothing changes. Events
- * that would produce no observable change are also ignored so the state object
- * (and therefore the `useSyncExternalStore` snapshot) stays reference-stable.
+ * that would produce no observable change are ignored so the state object (and
+ * therefore the `useSyncExternalStore` snapshot) stays reference-stable.
+ *
+ * Static tiles/grid/bounds are carried over reference-identically: no event
+ * replaces them, only a fresh snapshot does.
  *
  * Exported as an internal seam only (it is deliberately **not** re-exported from
  * the public `organizer/index.ts` surface): the transport's Protocol guards reject
@@ -388,16 +637,25 @@ export function applyEvents(events: readonly GameEvent[]): void {
       case 'transform.changed': {
         const previous = byId.get(event.entityId);
         // Create nothing and invent nothing: an unknown entity is ignored.
-        if (
-          previous !== undefined &&
-          (previous.x !== event.transform.x || previous.y !== event.transform.y)
-        ) {
-          byId.set(event.entityId, {
+        if (previous !== undefined) {
+          const next: EntityViewModel = {
             ...previous,
-            x: event.transform.x,
-            y: event.transform.y,
-          });
-          changed = true;
+            position: {
+              x: event.transform.position.x,
+              y: event.transform.position.y,
+              z: event.transform.position.z,
+            },
+            rotation: {
+              x: event.transform.rotation.x,
+              y: event.transform.rotation.y,
+              z: event.transform.rotation.z,
+              w: event.transform.rotation.w,
+            },
+          };
+          if (!entityEquals(previous, next)) {
+            byId.set(event.entityId, next);
+            changed = true;
+          }
         }
         break;
       }
@@ -423,12 +681,12 @@ export function applyEvents(events: readonly GameEvent[]): void {
   }
 
   setState({
+    ...state,
     status: 'ready',
-    worldId: state.worldId,
-    world: state.world,
     tiles: state.tiles,
+    grid: state.grid,
+    bounds: state.bounds,
     entities: [...byId.values()].sort(compareEntityViewModels),
-    controlledActorId: state.controlledActorId,
     error: null,
   });
 }
@@ -438,9 +696,14 @@ function entityEquals(a: EntityViewModel, b: EntityViewModel): boolean {
     a.entityId === b.entityId &&
     a.actorId === b.actorId &&
     a.kind === b.kind &&
-    a.x === b.x &&
-    a.y === b.y &&
-    a.visible === b.visible
+    a.visible === b.visible &&
+    a.position.x === b.position.x &&
+    a.position.y === b.position.y &&
+    a.position.z === b.position.z &&
+    a.rotation.x === b.rotation.x &&
+    a.rotation.y === b.rotation.y &&
+    a.rotation.z === b.rotation.z &&
+    a.rotation.w === b.rotation.w
   );
 }
 

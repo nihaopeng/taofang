@@ -135,6 +135,22 @@ body {
   margin: 0 0 0.75rem;
 }
 
+.world__stream {
+  margin: 0 0 0.75rem;
+  font-size: 0.85rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #b9a583;
+}
+
+.world__stream[data-stream-status='live'] {
+  color: var(--leaf);
+}
+
+.world__stream[data-stream-status='error'] {
+  color: var(--danger);
+}
+
 .world__actor-coords {
   color: #b9a583;
   font-variant-numeric: tabular-nums;
@@ -197,6 +213,8 @@ body {
   font-size: 1.1rem;
   line-height: 1;
   cursor: pointer;
+  touch-action: none;
+  user-select: none;
 }
 
 .world__control:hover:not(:disabled) {

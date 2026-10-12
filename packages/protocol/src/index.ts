@@ -9,6 +9,11 @@
  * commands, events, and value objects rather than by adding a bespoke endpoint
  * pair. Commands and events are discriminated unions on `type`; there is no
  * `action: string` + `args: unknown` catch-all.
+ *
+ * Phase 7 models a real continuous 3D world. The gameplay grid is a separate
+ * interaction layer (`GridSpec`/`CellCoord`/`TileState`); it is never the
+ * Actor's motion coordinate system. `Vec3`/`Quat` are re-exported here so
+ * consumers keep a single import site.
  */
 
 export {
@@ -16,11 +21,9 @@ export {
   GAME_INFO_PATH,
   HEALTH_PATH,
   PROTOCOL_VERSION,
+  STREAM_PATH,
   WORLD_PATH,
 } from './constants.ts';
-
-export { isMoveDirection, parseMoveDirection } from './direction.ts';
-export type { MoveDirection } from './direction.ts';
 
 export {
   isEntityKind,
@@ -53,14 +56,14 @@ export type {
 } from './event.ts';
 
 export {
-  isActorMoveCommand,
   isGameCommand,
-  isSubmitCommandResponse,
-  parseActorMoveCommand,
+  isGameEventBatch,
+  isMoveIntentCommand,
   parseGameCommand,
-  parseSubmitCommandResponse,
+  parseGameEventBatch,
+  parseMoveIntentCommand,
 } from './command.ts';
-export type { ActorMoveCommand, GameCommand, SubmitCommandResponse } from './command.ts';
+export type { GameCommand, GameEventBatch, MoveIntentCommand } from './command.ts';
 
 export {
   isGameInfo,
@@ -85,16 +88,34 @@ export {
 } from './identity.ts';
 export type { ActorId, EntityId, PlayerId, WorldId } from './identity.ts';
 
+export { isQuat, isVec3, parseQuat, parseVec3 } from './math.ts';
+export type { Quat, Vec3 } from './math.ts';
+
+export { isWorldStreamMessage, parseWorldStreamMessage } from './stream.ts';
+export type { WorldStreamMessage } from './stream.ts';
+
 export {
+  isCellCoord,
   isGetWorldResponse,
+  isGridSpec,
   isTerrainKind,
   isTileState,
-  isWorldSize,
+  isWorldBounds,
   isWorldSnapshot,
+  parseCellCoord,
   parseGetWorldResponse,
+  parseGridSpec,
   parseTerrainKind,
   parseTileState,
-  parseWorldSize,
+  parseWorldBounds,
   parseWorldSnapshot,
 } from './world.ts';
-export type { GetWorldResponse, TerrainKind, TileState, WorldSize, WorldSnapshot } from './world.ts';
+export type {
+  CellCoord,
+  GetWorldResponse,
+  GridSpec,
+  TerrainKind,
+  TileState,
+  WorldBounds,
+  WorldSnapshot,
+} from './world.ts';

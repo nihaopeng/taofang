@@ -5,6 +5,7 @@ import {
   GAME_INFO_PATH,
   HEALTH_PATH,
   PROTOCOL_VERSION,
+  STREAM_PATH,
   WORLD_PATH,
 } from '../src/index.ts';
 
@@ -19,7 +20,11 @@ describe('protocol constants', () => {
     expect(COMMAND_PATH).toBe('/api/command');
   });
 
-  it('exposes the phase-6 protocol version (water / tree vocabulary additions)', () => {
-    expect(PROTOCOL_VERSION).toBe(5);
+  it('exposes the phase-7 world stream path', () => {
+    expect(STREAM_PATH).toBe('/api/stream');
+  });
+
+  it('exposes the phase-7 protocol version (continuous 3D world / grid split)', () => {
+    expect(PROTOCOL_VERSION).toBe(6);
   });
 });

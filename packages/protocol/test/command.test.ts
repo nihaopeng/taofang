@@ -1,18 +1,18 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  isActorMoveCommand,
   isGameCommand,
-  isSubmitCommandResponse,
-  parseActorMoveCommand,
+  isGameEventBatch,
+  isMoveIntentCommand,
   parseGameCommand,
-  parseSubmitCommandResponse,
+  parseGameEventBatch,
+  parseMoveIntentCommand,
 } from '../src/index.ts';
-import type { GameCommand, MoveDirection } from '../src/index.ts';
+import type { GameCommand, GameEventBatch, MoveIntentCommand } from '../src/index.ts';
 import {
   captureParseError,
-  validActorMoveCommand,
-  validSubmitCommandResponse,
+  validGameEventBatch,
+  validMoveIntentCommand,
   validTransformChangedEvent,
 } from './support.ts';
 
@@ -25,88 +25,138 @@ const nonObjects: Array<[string, unknown]> = [
   ['an array', []],
 ];
 
-describe('isActorMoveCommand', () => {
-  it('accepts a well-formed command', () => {
-    expect(isActorMoveCommand(validActorMoveCommand)).toBe(true);
-    expect(isActorMoveCommand({ type: 'actor.move', direction: 'west' })).toBe(true);
+/** Wrap a movement value in an otherwise valid intent command. */
+function intentWith(movement: unknown): Record<string, unknown> {
+  return { type: 'actor.moveIntent', movement };
+}
+
+describe('moveIntent movement magnitude (via isMoveIntentCommand)', () => {
+  it('accepts directions within the unit disc, including stop', () => {
+    expect(isMoveIntentCommand(intentWith({ x: 1, z: 0 }))).toBe(true);
+    expect(isMoveIntentCommand(intentWith({ x: 0, z: 0 }))).toBe(true);
+    expect(isMoveIntentCommand(intentWith({ x: 0.6, z: 0.8 }))).toBe(true);
+    expect(isMoveIntentCommand(intentWith({ x: -1, z: 0 }))).toBe(true);
   });
 
-  it.each(nonObjects)('rejects %s', (_label, value) => {
-    expect(isActorMoveCommand(value)).toBe(false);
+  it('accepts a magnitude exactly 1 and a tiny overshoot within epsilon', () => {
+    expect(isMoveIntentCommand(intentWith({ x: 1, z: 0 }))).toBe(true);
+    expect(isMoveIntentCommand(intentWith({ x: 1 + 1e-7, z: 0 }))).toBe(true);
   });
 
-  it.each(['type', 'direction'])('rejects a missing %s', (key) => {
-    const value: Record<string, unknown> = { ...validActorMoveCommand };
-    delete value[key];
-    expect(isActorMoveCommand(value)).toBe(false);
+  it('rejects a magnitude above 1 beyond epsilon', () => {
+    expect(isMoveIntentCommand(intentWith({ x: 1.0001, z: 0 }))).toBe(false);
+    expect(isMoveIntentCommand(intentWith({ x: 2, z: 0 }))).toBe(false);
+    expect(isMoveIntentCommand(intentWith({ x: 0.7072, z: 0.7072 }))).toBe(false);
+    expect(isMoveIntentCommand(intentWith({ x: -1.5, z: 0 }))).toBe(false);
   });
 
-  it('rejects unknown extra fields', () => {
-    expect(isActorMoveCommand({ ...validActorMoveCommand, extra: 1 })).toBe(false);
+  it('rejects non-finite components', () => {
+    expect(isMoveIntentCommand(intentWith({ x: Number.NaN, z: 0 }))).toBe(false);
+    expect(isMoveIntentCommand(intentWith({ x: Number.POSITIVE_INFINITY, z: 0 }))).toBe(false);
+    expect(isMoveIntentCommand(intentWith({ x: 0, z: Number.NEGATIVE_INFINITY }))).toBe(false);
   });
 
-  it('rejects an attempted actor field (client may not name the actor)', () => {
-    expect(isActorMoveCommand({ actorId: 'actor-1', direction: 'east' })).toBe(false);
-    expect(isActorMoveCommand({ playerId: 'p', direction: 'east' })).toBe(false);
-    expect(isActorMoveCommand({ ...validActorMoveCommand, actorId: 'actor-1' })).toBe(false);
+  it.each(['x', 'z'])('rejects a missing %s', (key) => {
+    const movement: Record<string, unknown> = { x: 1, z: 0 };
+    delete movement[key];
+    expect(isMoveIntentCommand(intentWith(movement))).toBe(false);
   });
 
-  it('rejects a bad type discriminant or a bad direction', () => {
-    expect(isActorMoveCommand({ type: 'actor.walk', direction: 'east' })).toBe(false);
-    expect(isActorMoveCommand({ type: 'move', direction: 'east' })).toBe(false);
-    expect(isActorMoveCommand({ type: 1, direction: 'east' })).toBe(false);
-    expect(isActorMoveCommand({ type: 'actor.move', direction: 'up' })).toBe(false);
-    expect(isActorMoveCommand({ type: 'actor.move', direction: 2 })).toBe(false);
+  it('rejects unknown extra fields and a 2D `{ x, y }` shape', () => {
+    expect(isMoveIntentCommand(intentWith({ x: 1, z: 0, y: 0 }))).toBe(false);
+    expect(isMoveIntentCommand(intentWith({ x: 1, y: 0 }))).toBe(false);
+  });
+
+  it('rejects a non-object movement for every non-object', () => {
+    for (const [, value] of nonObjects) {
+      expect(isMoveIntentCommand(intentWith(value))).toBe(false);
+    }
   });
 });
 
-describe('parseActorMoveCommand', () => {
+describe('isMoveIntentCommand', () => {
+  it('accepts a well-formed intent command', () => {
+    expect(isMoveIntentCommand(validMoveIntentCommand)).toBe(true);
+    expect(isMoveIntentCommand({ type: 'actor.moveIntent', movement: { x: 0, z: 0 } })).toBe(true);
+    expect(isMoveIntentCommand({ type: 'actor.moveIntent', movement: { x: 0.5, z: -0.5 } })).toBe(
+      true,
+    );
+  });
+
+  it.each(nonObjects)('rejects %s', (_label, value) => {
+    expect(isMoveIntentCommand(value)).toBe(false);
+  });
+
+  it.each(['type', 'movement'])('rejects a missing %s', (key) => {
+    const value: Record<string, unknown> = { ...validMoveIntentCommand };
+    delete value[key];
+    expect(isMoveIntentCommand(value)).toBe(false);
+  });
+
+  it('rejects unknown extra fields', () => {
+    expect(isMoveIntentCommand({ ...validMoveIntentCommand, extra: 1 })).toBe(false);
+  });
+
+  it('rejects an attempted actor field (the client may not name the actor)', () => {
+    expect(isMoveIntentCommand({ actorId: 'actor-1', type: 'actor.moveIntent', movement: { x: 1, z: 0 } })).toBe(
+      false,
+    );
+    expect(isMoveIntentCommand({ ...validMoveIntentCommand, actorId: 'actor-1' })).toBe(false);
+    expect(isMoveIntentCommand({ ...validMoveIntentCommand, playerId: 'player-1' })).toBe(false);
+  });
+
+  it('rejects a bad type discriminant or a malformed movement', () => {
+    expect(isMoveIntentCommand({ type: 'actor.move', movement: { x: 1, z: 0 } })).toBe(false);
+    expect(isMoveIntentCommand({ type: 'actor.moveIntent', movement: null })).toBe(false);
+    expect(isMoveIntentCommand({ type: 'actor.moveIntent', movement: { x: 2 } })).toBe(false);
+    expect(isMoveIntentCommand({ type: 1, movement: { x: 1, z: 0 } })).toBe(false);
+  });
+});
+
+describe('parseMoveIntentCommand', () => {
   it('returns the value unchanged when valid', () => {
-    expect(parseActorMoveCommand(validActorMoveCommand)).toBe(validActorMoveCommand);
+    expect(parseMoveIntentCommand(validMoveIntentCommand)).toBe(validMoveIntentCommand);
   });
 
   it('throws ProtocolParseError with a message when invalid', () => {
     const error = captureParseError(() =>
-      parseActorMoveCommand({ type: 'actor.move', direction: 'up' }),
+      parseMoveIntentCommand({ type: 'actor.moveIntent', movement: { x: 2, z: 0 } }),
     );
-    expect(error.message).toBe('Invalid ActorMoveCommand payload');
+    expect(error.message).toBe('Invalid MoveIntentCommand payload');
     expect(error.code).toBe('BAD_REQUEST');
   });
 });
 
 describe('isGameCommand', () => {
   it('accepts the known command', () => {
-    expect(isGameCommand(validActorMoveCommand)).toBe(true);
+    expect(isGameCommand(validMoveIntentCommand)).toBe(true);
   });
 
   it.each(nonObjects)('rejects %s', (_label, value) => {
     expect(isGameCommand(value)).toBe(false);
   });
 
-  it('rejects an unknown type discriminant', () => {
-    expect(isGameCommand({ type: 'actor.jump', direction: 'north' })).toBe(false);
+  it('rejects an unknown type discriminant, including the deleted `actor.move`', () => {
+    expect(isGameCommand({ type: 'actor.jump', movement: { x: 1, z: 0 } })).toBe(false);
     expect(isGameCommand({ type: 'unknown' })).toBe(false);
+    expect(isGameCommand({ type: 'actor.move', direction: 'north' })).toBe(false);
   });
 
-  it('rejects the phase-3 shapes (no `type`, and named-actor fields)', () => {
-    // Phase-3 `MoveActorCommand` was a flat `{ direction }` with no discriminant.
+  it('rejects the phase-6 shapes (one-tile direction, and named-actor fields)', () => {
+    expect(isGameCommand({ type: 'actor.move', direction: 'north' })).toBe(false);
     expect(isGameCommand({ direction: 'north' })).toBe(false);
-    // Phase-3 player-shaped command.
-    expect(isGameCommand({ playerId: 'player-1', direction: 'north' })).toBe(false);
-    // Flat actor field on an otherwise valid shape.
-    expect(isGameCommand({ actorId: 'actor-1', direction: 'north' })).toBe(false);
-    expect(isGameCommand({ ...validActorMoveCommand, actorId: 'actor-1' })).toBe(false);
-    expect(isGameCommand({ ...validActorMoveCommand, playerId: 'player-1' })).toBe(false);
+    expect(isGameCommand({ ...validMoveIntentCommand, actorId: 'actor-1' })).toBe(false);
+    expect(isGameCommand({ ...validMoveIntentCommand, playerId: 'player-1' })).toBe(false);
   });
 });
 
 describe('parseGameCommand', () => {
   it('parses a command into the discriminated union without a cast', () => {
-    const value: unknown = { type: 'actor.move', direction: 'east' };
+    const value: unknown = { type: 'actor.moveIntent', movement: { x: -1, z: 0 } };
     const command: GameCommand = parseGameCommand(value);
-    if (command.type === 'actor.move') {
-      const direction: MoveDirection = command.direction;
-      expect(direction).toBe('east');
+    if (command.type === 'actor.moveIntent') {
+      const movement: { x: number; z: number } = command.movement;
+      expect(movement).toEqual({ x: -1, z: 0 });
     } else {
       throw new Error('unreachable: single-member union should narrow');
     }
@@ -118,78 +168,71 @@ describe('parseGameCommand', () => {
     expect(error.code).toBe('BAD_REQUEST');
   });
 
-  it('throws ProtocolParseError for both phase-3 shapes', () => {
+  it('throws ProtocolParseError for the deleted phase-6 move command shape', () => {
+    expect(captureParseError(() => parseGameCommand({ type: 'actor.move', direction: 'north' })).message).toBe(
+      'Invalid GameCommand payload',
+    );
     expect(captureParseError(() => parseGameCommand({ direction: 'north' })).message).toBe(
       'Invalid GameCommand payload',
     );
-    expect(
-      captureParseError(() => parseGameCommand({ playerId: 'player-1', direction: 'north' })).message,
-    ).toBe('Invalid GameCommand payload');
-    expect(
-      captureParseError(() => parseGameCommand({ actorId: 'actor-1', direction: 'north' })).message,
-    ).toBe('Invalid GameCommand payload');
-  });
-
-  it('rejects MoveActorCommand-shaped payloads as a regression guard', () => {
-    // The phase-3 MoveActorCommand is no longer accepted anywhere.
-    expect(isActorMoveCommand({ direction: 'north' })).toBe(false);
-    expect(isGameCommand({ direction: 'north' })).toBe(false);
-    expect(() => parseGameCommand({ direction: 'north' })).toThrow();
   });
 });
 
-describe('isSubmitCommandResponse', () => {
-  it('accepts a well-formed response', () => {
-    expect(isSubmitCommandResponse(validSubmitCommandResponse)).toBe(true);
+describe('isGameEventBatch', () => {
+  it('accepts a well-formed batch', () => {
+    expect(isGameEventBatch(validGameEventBatch)).toBe(true);
   });
 
-  it('accepts an empty events array (a refused command is the empty delta)', () => {
-    expect(isSubmitCommandResponse({ events: [], serverTime: '2025-01-02T03:04:05.000Z' })).toBe(
-      true,
-    );
+  it('accepts an empty events array (a refused command / idle tick is the empty delta)', () => {
+    expect(isGameEventBatch({ events: [], serverTime: '2025-01-02T03:04:05.000Z' })).toBe(true);
   });
 
   it.each(nonObjects)('rejects %s', (_label, value) => {
-    expect(isSubmitCommandResponse(value)).toBe(false);
+    expect(isGameEventBatch(value)).toBe(false);
   });
 
   it.each(['events', 'serverTime'])('rejects a missing %s', (key) => {
-    const value: Record<string, unknown> = { ...validSubmitCommandResponse };
+    const value: Record<string, unknown> = { ...validGameEventBatch };
     delete value[key];
-    expect(isSubmitCommandResponse(value)).toBe(false);
+    expect(isGameEventBatch(value)).toBe(false);
   });
 
-  it('rejects unknown extra fields', () => {
-    expect(isSubmitCommandResponse({ ...validSubmitCommandResponse, moved: true })).toBe(false);
+  it('rejects unknown extra fields (including the removed `moved` flag)', () => {
+    expect(isGameEventBatch({ ...validGameEventBatch, moved: true })).toBe(false);
   });
 
   it('rejects a non-array events field and malformed events', () => {
-    expect(isSubmitCommandResponse({ ...validSubmitCommandResponse, events: {} })).toBe(false);
-    expect(isSubmitCommandResponse({ ...validSubmitCommandResponse, events: null })).toBe(false);
+    expect(isGameEventBatch({ ...validGameEventBatch, events: {} })).toBe(false);
+    expect(isGameEventBatch({ ...validGameEventBatch, events: null })).toBe(false);
+    expect(isGameEventBatch({ ...validGameEventBatch, events: [{ type: 'unknown' }] })).toBe(false);
     expect(
-      isSubmitCommandResponse({ ...validSubmitCommandResponse, events: [{ type: 'unknown' }] }),
-    ).toBe(false);
-    expect(
-      isSubmitCommandResponse({
-        ...validSubmitCommandResponse,
-        events: [{ ...validTransformChangedEvent, transform: { x: 1.5, y: 2 } }],
+      isGameEventBatch({
+        ...validGameEventBatch,
+        events: [{ ...validTransformChangedEvent, transform: { x: 1, y: 2 } }],
       }),
     ).toBe(false);
   });
 
   it('rejects a non-ISO serverTime', () => {
-    expect(isSubmitCommandResponse({ ...validSubmitCommandResponse, serverTime: 'now' })).toBe(false);
+    expect(isGameEventBatch({ ...validGameEventBatch, serverTime: 'now' })).toBe(false);
+  });
+
+  it('does not accept the old `SubmitCommandResponse` name as a wire shape', () => {
+    // There is no alias: the envelope is `GameEventBatch` and its keys are exact.
+    const legacy = { commandResult: { events: [], serverTime: '2025-01-02T03:04:05.000Z' } };
+    expect(isGameEventBatch(legacy)).toBe(false);
   });
 });
 
-describe('parseSubmitCommandResponse', () => {
+describe('parseGameEventBatch', () => {
   it('returns the value unchanged when valid', () => {
-    expect(parseSubmitCommandResponse(validSubmitCommandResponse)).toBe(validSubmitCommandResponse);
+    const batch: GameEventBatch = validGameEventBatch;
+    expect(parseGameEventBatch(batch)).toBe(validGameEventBatch);
   });
 
   it('throws ProtocolParseError with a message when invalid', () => {
-    const error = captureParseError(() => parseSubmitCommandResponse({ events: [] }));
-    expect(error.message).toBe('Invalid SubmitCommandResponse payload');
+    const error = captureParseError(() => parseGameEventBatch({ events: [] }));
+    expect(error.message).toBe('Invalid GameEventBatch payload');
     expect(error.code).toBe('BAD_REQUEST');
   });
 });
@@ -200,20 +243,21 @@ describe('parseSubmitCommandResponse', () => {
  * removed, so "no new instruction" is enforced by the compiler, not just
  * asserted in prose.
  */
-const gameCommandTypes = ['actor.move'] as const;
+const gameCommandTypes = ['actor.moveIntent'] as const;
 type ListedGameCommandType = (typeof gameCommandTypes)[number];
 type Exact<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
 
 /** Exported so `noUnusedLocals` cannot swallow the compile-time exactness proof. */
-export const gameCommandTypesAreExact: Exact<
-  GameCommand['type'],
-  ListedGameCommandType
-> = true;
+export const gameCommandTypesAreExact: Exact<GameCommand['type'], ListedGameCommandType> = true;
+
+/** Keep `MoveIntentCommand` referenced so the union member is not a swallowed local. */
+export const moveIntentCommandType: MoveIntentCommand['type'] = 'actor.moveIntent';
 
 describe('GameCommand exact shape', () => {
-  it('is exactly one member (`actor.move`) and has no catch-all', () => {
+  it('is exactly one member (`actor.moveIntent`) and has no catch-all', () => {
     expect(gameCommandTypesAreExact).toBe(true);
     expect(gameCommandTypes).toHaveLength(1);
-    expect(gameCommandTypes[0]).toBe('actor.move');
+    expect(gameCommandTypes[0]).toBe('actor.moveIntent');
+    expect(moveIntentCommandType).toBe('actor.moveIntent');
   });
 });

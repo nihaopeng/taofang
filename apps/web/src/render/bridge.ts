@@ -18,31 +18,44 @@
  *   mapping it to an appearance is presentation, but whether it is walkable is
  *   an authoritative Manager rule the client must never infer.
  *
+ * Phase 7: the world is continuous 3D
+ * ----------------------------------
+ * A tile view model already carries its derived **world position** (the
+ * Organizer owns the grid -> world formula), and an entity carries an
+ * authoritative 3D `position` + `rotation`. The bridge maps those through
+ * unchanged into `RenderTransform { position, rotation, scale }`: there is **no
+ * tile -> scene mapping** and no coordinate-system conversion anywhere on the
+ * client. `transform.setTarget` still means "interpolate toward this transform",
+ * and its default duration is close to the authoritative 20 Hz tick period
+ * (50 ms) so continuous movement renders smoothly at 60 fps.
+ *
  * When `animation.play` is emitted (documented driving state)
  * ---------------------------------------------------------
- * `animation.play` is re-added in phase 6 because a real driving state now
- * exists: whether a visual move is in flight. The bridge owns the **vocabulary**
- * only — it emits `walk` on the frame that starts a move (the same frame as
- * `transform.setTarget`). It deliberately does **not** emit a settle animation:
- * the runtime interpolates to the target, so the runtime owns WHEN the move is
- * over and returns the node to its prefab's `defaultAnimation` when that
- * interpolation completes. A client-side settle emission would also be
- * unreachable: the world store is event-driven, so after the last move no further
- * frame arrives for the bridge to observe the settle.
+ * The bridge owns the **vocabulary** only — it emits `walk` on a frame where the
+ * authoritative **position** changed (the same frame as `transform.setTarget`).
+ * It deliberately does **not** emit a settle animation: the runtime interpolates
+ * to the target, so the runtime owns WHEN the move is over and returns the node
+ * to its prefab's `defaultAnimation` when that interpolation completes. A
+ * client-side settle emission would also be unreachable: the world store is
+ * event-driven, so after the last move no further frame arrives for the bridge to
+ * observe the settle.
  *
  * Identity: a render `NodeId` is derived from game identity, but the two are
  * deliberately different types. The renderer must not be able to read game
  * identity (it receives only `NodeId`); game identity stops here. Tile and entity
- * ids are **namespaced** (`tile:<x>,<y>` / `entity:<entityId>`) so a tile can
- * never collide with an entity whose id happens to look like a coordinate.
+ * ids are **namespaced** (`tile:<cellX>,<cellZ>` / `entity:<entityId>`) so a tile
+ * can never collide with an entity whose id happens to look like a coordinate.
  */
 
 import type {
   AnimationId,
   AppearanceId,
   NodeId,
+  Quat,
   RenderCommand,
   RenderFrame,
+  RenderTransform,
+  Vec3,
 } from '@starvalley/render-protocol';
 
 import type { WorldState } from '../organizer';
@@ -53,17 +66,23 @@ import type { WorldState } from '../organizer';
 export type { RenderCommand, RenderFrame } from '@starvalley/render-protocol';
 
 /**
- * Default duration for interpolating an authoritative transform target. This is
- * presentation-only smoothing: the target already came from the server, so
- * easing toward it is not client prediction.
+ * Default duration for interpolating an authoritative transform target. Close to
+ * the Manager's 20 Hz tick period (50 ms) so a continuous stream of authoritative
+ * transforms renders smoothly at 60 fps without adding perceptible lag. This is
+ * presentation-only smoothing: the target already came from the server, so easing
+ * toward it is not client prediction.
  */
-const DEFAULT_STEP_DURATION_MS = 150;
+const DEFAULT_STEP_DURATION_MS = 50;
 
 /**
  * Animation ids the bridge can emit. The runtime owns what they look like and
  * when a move is over; the bridge owns which animation a move start uses.
  */
 const ANIMATION_WALK = 'walk' as AnimationId;
+
+/** The neutral rotation/scale applied where the source has no meaningful value. */
+const IDENTITY_ROTATION: Quat = { x: 0, y: 0, z: 0, w: 1 };
+const UNIT_SCALE: Vec3 = { x: 1, y: 1, z: 1 };
 
 /**
  * Appearance catalogue: game `kind` -> opaque render `AppearanceId`.
@@ -89,10 +108,10 @@ const APPEARANCE_BY_KIND: Readonly<Record<string, AppearanceId>> = {
  * `terrain` is an opaque string at the bridge boundary, but nothing the real
  * transport delivers is absent from this catalogue: the Organizer's world guard
  * validates every tile against the closed `TerrainKind` union before a frame is
- * built, so an unknown terrain rejects there and the client settles into
- * `error` without the bridge ever seeing it. The fallback is therefore
- * defence-in-depth for direct or looser callers, not for a value the server can
- * deliver through the transport.
+ * built, so an unknown terrain rejects there and the client settles into `error`
+ * without the bridge ever seeing it. The fallback is therefore defence-in-depth
+ * for direct or looser callers, not for a value the server can deliver through
+ * the transport.
  */
 const APPEARANCE_BY_TERRAIN: Readonly<Record<string, AppearanceId>> = {
   grass: asAppearanceId('appearance.terrain.grass'),
@@ -147,19 +166,20 @@ export const BRIDGE_APPEARANCES: readonly AppearanceId[] = [
  * bridge performs the branding at the one point where it is legitimate: the
  * Organizer/ISA boundary. Downstream, a `NodeId` is opaque.
  *
- * Ids are namespaced by kind so the two collections can never collide.
+ * Ids are namespaced by kind so the two collections can never collide. A tile's
+ * cell coordinate is part of its *identity* here; it is not a scene mapping.
  */
-function tileNodeId(x: number, y: number): NodeId {
-  return `tile:${x},${y}` as NodeId;
+function tileNodeId(cellX: number, cellZ: number): NodeId {
+  return `tile:${cellX},${cellZ}` as NodeId;
 }
 
 function entityNodeId(entityId: string): NodeId {
   return `entity:${entityId}` as NodeId;
 }
 
-/** Key for the internal tile bookkeeping; position is the tile's identity. */
-function tileKey(x: number, y: number): string {
-  return `${x},${y}`;
+/** Key for the internal tile bookkeeping; the cell coordinate is the tile's identity. */
+function tileKey(cellX: number, cellZ: number): string {
+  return `${cellX},${cellZ}`;
 }
 
 function asAppearanceId(value: string): AppearanceId {
@@ -176,18 +196,43 @@ function appearanceForTerrain(terrain: string): AppearanceId {
   return APPEARANCE_BY_TERRAIN[terrain] ?? FALLBACK_APPEARANCE;
 }
 
+/**
+ * Build a Render ISA transform from a view-model world position/rotation.
+ *
+ * Phase 7's `RenderTransform` is a real 3D transform (`position`, `rotation`,
+ * `scale`). The bridge maps the Organizer's world values through **unchanged**:
+ * no tile interpretation, no axis flipping, no coordinate conversion.
+ */
+function renderTransform(position: Vec3, rotation: Quat): RenderTransform {
+  return {
+    position: { x: position.x, y: position.y, z: position.z },
+    rotation: { x: rotation.x, y: rotation.y, z: rotation.z, w: rotation.w },
+    // Scale has no gameplay semantics yet; the ISA carries it, the bridge leaves it neutral.
+    scale: { x: UNIT_SCALE.x, y: UNIT_SCALE.y, z: UNIT_SCALE.z },
+  };
+}
+
+function sameVec3(a: Vec3, b: Vec3): boolean {
+  return a.x === b.x && a.y === b.y && a.z === b.z;
+}
+
+function sameQuat(a: Quat, b: Quat): boolean {
+  return a.x === b.x && a.y === b.y && a.z === b.z && a.w === b.w;
+}
+
 /** The render state the bridge believes exists for one entity node. */
 interface KnownEntity {
   appearance: AppearanceId;
-  x: number;
-  y: number;
+  position: Vec3;
+  rotation: Quat;
   visible: boolean;
 }
 
 /** The render state the bridge believes exists for one tile node. */
 interface KnownTile {
-  x: number;
-  y: number;
+  cellX: number;
+  cellZ: number;
+  position: Vec3;
   terrain: string;
 }
 
@@ -209,12 +254,9 @@ function byEntityId(
   return 0;
 }
 
-/** Deterministic tile order: ascending by `y`, then `x` (row-major). */
-function byTilePosition(
-  a: { x: number; y: number },
-  b: { x: number; y: number },
-): number {
-  return a.y - b.y || a.x - b.x;
+/** Deterministic tile order: ascending by `cellZ`, then `cellX` (row-major). */
+function byCell(a: { cellX: number; cellZ: number }, b: { cellX: number; cellZ: number }): number {
+  return a.cellZ - b.cellZ || a.cellX - b.cellX;
 }
 
 /** Stateful mapper from `WorldState` to ordered render frames. */
@@ -256,12 +298,12 @@ export function controlledActorNodeId(state: WorldState): NodeId | null {
  * `RenderFrame` is applied **in order**, so the order is deterministic and
  * documented:
  *
- * 1. base-layer creates (`node.create` for new tiles), sorted `y` then `x`;
+ * 1. base-layer creates (`node.create` for new tiles), sorted `cellZ` then `cellX`;
  * 2. object-layer commands (`node.create` for new entities, then per-entity
  *    `transform.setTarget` / `animation.play` / `visibility.set` /
  *    `appearance.set`), sorted by `entityId`;
- * 3. base-layer terrain changes (`appearance.set`), sorted `y` then `x`;
- * 4. base-layer destroys (`node.destroy` for removed tiles), sorted `y` then `x`;
+ * 3. base-layer terrain changes (`appearance.set`), sorted `cellZ` then `cellX`;
+ * 4. base-layer destroys (`node.destroy` for removed tiles), sorted `cellZ` then `cellX`;
  * 5. object-layer destroys (`node.destroy` for removed entities), sorted by
  *    `entityId`.
  *
@@ -272,6 +314,11 @@ export function controlledActorNodeId(state: WorldState): NodeId | null {
  * leaves the world can never be recreated by a later command; and every phase is
  * a pure function of coordinates or ids, so the frame is byte-identical across
  * runs and input orderings.
+ *
+ * A `transform.setTarget` is emitted when the authoritative **position or
+ * rotation** changed, so an authoritative heading turn is applied even when the
+ * position is static. `animation.play walk` is emitted only when the **position**
+ * changed: turning in place is not a step.
  */
 export function createRenderBridge(options?: { stepDurationMs?: number }): RenderBridge {
   const stepDurationMs = options?.stepDurationMs ?? DEFAULT_STEP_DURATION_MS;
@@ -291,12 +338,12 @@ export function createRenderBridge(options?: { stepDurationMs?: number }): Rende
   return {
     frameFor(state: WorldState): RenderFrame {
       const commands: RenderCommand[] = [];
-      const sortedTiles = [...state.tiles].sort(byTilePosition);
+      const sortedTiles = [...state.tiles].sort(byCell);
       const sortedEntities = [...state.entities].sort(byEntityId);
 
       // A change of `worldId` means every known node belongs to a different
-      // world. Node ids are derived from position/entity id, so a new world can
-      // reuse `tile:<x>,<y>` / `entity:<id>` for a DIFFERENT node; diffing
+      // world. Node ids are derived from cell/entity identity, so a new world can
+      // reuse `tile:<cellX>,<cellZ>` / `entity:<id>` for a DIFFERENT node; diffing
       // against the old world would emit `transform.setTarget` and make the
       // actor interpolate out of its previous world instead of snapping in.
       // Snapshot the old nodes (so any the new world does not contain are still
@@ -311,23 +358,25 @@ export function createRenderBridge(options?: { stepDurationMs?: number }): Rende
         knownWorldId = state.worldId;
       }
 
-      // 1. Base-layer creates: first sight of a tile.
+      // 1. Base-layer creates: first sight of a tile. Its world position is
+      //    already authoritative in the view model.
       const seenTiles = new Set<string>();
       for (const tile of sortedTiles) {
-        const key = tileKey(tile.x, tile.y);
+        const key = tileKey(tile.cellX, tile.cellZ);
         seenTiles.add(key);
         if (!knownTiles.has(key)) {
           commands.push({
             type: 'node.create',
             layer: 'base',
-            nodeId: tileNodeId(tile.x, tile.y),
+            nodeId: tileNodeId(tile.cellX, tile.cellZ),
             appearance: appearanceForTerrain(tile.terrain),
-            transform: { x: tile.x, y: tile.y },
+            transform: renderTransform(tile.position, IDENTITY_ROTATION),
             visible: true,
           });
           knownTiles.set(key, {
-            x: tile.x,
-            y: tile.y,
+            cellX: tile.cellX,
+            cellZ: tile.cellZ,
+            position: tile.position,
             terrain: tile.terrain,
           });
         }
@@ -338,6 +387,7 @@ export function createRenderBridge(options?: { stepDurationMs?: number }): Rende
       for (const entity of sortedEntities) {
         const nodeId = entityNodeId(entity.entityId);
         const appearance = appearanceForKind(entity.kind);
+        const transform = renderTransform(entity.position, entity.rotation);
         seenEntities.add(entity.entityId);
 
         const previous = knownEntities.get(entity.entityId);
@@ -349,38 +399,43 @@ export function createRenderBridge(options?: { stepDurationMs?: number }): Rende
             layer: 'object',
             nodeId,
             appearance,
-            transform: { x: entity.x, y: entity.y },
+            transform,
             visible: entity.visible,
           });
           knownEntities.set(entity.entityId, {
             appearance,
-            x: entity.x,
-            y: entity.y,
+            position: { ...transform.position },
+            rotation: { ...transform.rotation },
             visible: entity.visible,
           });
           continue;
         }
 
-        if (previous.x !== entity.x || previous.y !== entity.y) {
-          // The new position is authoritative; the runtime may interpolate to it.
+        const positionChanged = !sameVec3(previous.position, entity.position);
+        const rotationChanged = !sameQuat(previous.rotation, entity.rotation);
+
+        if (positionChanged || rotationChanged) {
+          // The new transform is authoritative; the runtime may interpolate to it.
           commands.push({
             type: 'transform.setTarget',
             nodeId,
-            transform: { x: entity.x, y: entity.y },
+            transform,
             durationMs: stepDurationMs,
           });
-          previous.x = entity.x;
-          previous.y = entity.y;
-          // A visual move is in flight, so the actor walks. The runtime resets to
-          // its rest animation when the interpolation completes; the bridge does
-          // not emit a settle. `appearance`/`visible` changes below do not affect
-          // this: they are not movement.
-          commands.push({
-            type: 'animation.play',
-            nodeId,
-            animation: ANIMATION_WALK,
-            loop: true,
-          });
+          previous.position = { ...transform.position };
+          previous.rotation = { ...transform.rotation };
+          // A change of authoritative POSITION is a visual move, so the actor
+          // walks. A pure heading turn is applied but is not a step. The runtime
+          // resets to its rest animation when the interpolation completes; the
+          // bridge does not emit a settle.
+          if (positionChanged) {
+            commands.push({
+              type: 'animation.play',
+              nodeId,
+              animation: ANIMATION_WALK,
+              loop: true,
+            });
+          }
         }
 
         if (previous.visible !== entity.visible) {
@@ -397,15 +452,14 @@ export function createRenderBridge(options?: { stepDurationMs?: number }): Rende
       // 3. Base-layer terrain changes: a static tile whose terrain changed swaps
       //    appearance in place (it must not be recreated).
       for (const tile of sortedTiles) {
-        const previous = knownTiles.get(tileKey(tile.x, tile.y));
+        const previous = knownTiles.get(tileKey(tile.cellX, tile.cellZ));
         if (previous === undefined || previous.terrain === tile.terrain) {
           continue;
         }
-        const appearance = appearanceForTerrain(tile.terrain);
         commands.push({
           type: 'appearance.set',
-          nodeId: tileNodeId(tile.x, tile.y),
-          appearance,
+          nodeId: tileNodeId(tile.cellX, tile.cellZ),
+          appearance: appearanceForTerrain(tile.terrain),
         });
         previous.terrain = tile.terrain;
       }
@@ -416,11 +470,11 @@ export function createRenderBridge(options?: { stepDurationMs?: number }): Rende
       const removedTiles = [
         ...[...knownTiles.entries()].filter(([key]) => !seenTiles.has(key)),
         ...previousTiles
-          .filter((tile) => !seenTiles.has(tileKey(tile.x, tile.y)))
-          .map((tile): [string, KnownTile] => [tileKey(tile.x, tile.y), tile]),
-      ].sort(([, a], [, b]) => byTilePosition(a, b));
+          .filter((tile) => !seenTiles.has(tileKey(tile.cellX, tile.cellZ)))
+          .map((tile): [string, KnownTile] => [tileKey(tile.cellX, tile.cellZ), tile]),
+      ].sort(([, a], [, b]) => byCell(a, b));
       for (const [key, tile] of removedTiles) {
-        commands.push({ type: 'node.destroy', nodeId: tileNodeId(tile.x, tile.y) });
+        commands.push({ type: 'node.destroy', nodeId: tileNodeId(tile.cellX, tile.cellZ) });
         knownTiles.delete(key);
       }
 
