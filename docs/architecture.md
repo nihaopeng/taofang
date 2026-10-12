@@ -231,6 +231,87 @@ with the primitive contract (`submitCommand`, `EntityState`, `WorldState.entitie
 `controlledActorId`). See "Phase 4 frozen contract — primitive-driven architecture" above for the
 current surface; this section is kept only so the phase-3 history is not silently rewritten.
 
+## Phase 11 frozen contract — narrow-FOV perspective camera + a minimal renderer regression scene
+
+Owner's decision: switch the rig to a **narrow-FOV `PerspectiveCamera` (initial 28 degrees)**, fixed pitch,
+`roll = 0`, yaw + bounded zoom only, for **gentle** near-large/far-small rather than strong third-person
+perspective. Orthographic has **no** foreshortening by construction, so "far is smaller" can never come from
+it — and it must NOT be faked with per-object scale (forbidden).
+
+### The regression scene (required BEFORE and AFTER the camera switch)
+
+A minimal scene that renders **only a regular grid of terrain**: no actor, no props, no decorations, no
+GridOverlay, no fake shadow geometry. Yaw is swept 0..345 degrees. It exists so camera and terrain defects
+are separated instead of argued about visually. It asserts:
+
+1. **Orthographic**: the parallel near and far edges are STRICTLY equal in projected length (measured ratio
+   exactly 1 to 9 decimals; verified at yaw 0/30/45/60/90/135/180/225/270/315).
+2. **Perspective**: the near edge is STABLY longer than the far edge (a ratio with a lower bound, not merely
+   `!=`) at every yaw.
+3. **No terrain crack at any yaw**: adjacent tiles share boundaries in WORLD space exactly
+   (`|centre_{i+1} - centre_i| == cellSize` and each footprint == cellSize), so no gap can exist.
+4. **Tile world footprint is always exactly `cellSize`** (measured from real geometry, at every yaw).
+5. **Every tile/node scale is constantly 1.**
+
+### Decision rules (explicit, so nobody tunes visuals instead of fixing a cause)
+
+- If the minimal ORTHO scene shows "near short, far long", do **not** tune camera/visual parameters:
+  investigate `CameraRig`, parent transforms and `WorldRoot` scale.
+- If PERSPECTIVE shows a crack, do **not** attribute it to perspective: keep investigating terrain geometry.
+- If perspective feels too strong, prefer a **narrower FOV plus a larger camera distance** to preserve
+  composition. Never correct per tile.
+- If per-tile meshes still show a raster seam, escalate the terrain to a **shared/chunked continuous mesh**
+  (shared vertices along cell boundaries, e.g. one mesh per (layer, appearance)). The gameplay grid, the
+  protocol and every other layer stay exactly as they are; only the realisation changes.
+
+### Terrain rules that remain in force
+
+- The gameplay tile/grid continues to exist as an interaction layer; nothing about it changes.
+- Visible terrain tiles have **no inset**; the footprint is exactly `cellSize`; neighbours share boundaries.
+- The dark base plate must **never** be used to show through as grid lines; `GridOverlay` (an independent
+  layer, hidden by default) is the only grid-line mechanism.
+- No per-tile `scale`, per-tile `offset`, or `renderOrder` hack anywhere.
+- Phase 9/10 record: the seam removal, the independent `GridOverlay`, the `framingMargin`, and the rule that
+the oversized backdrop does **not** receive/cast shadows (outside the shadow map the clamped lookup draws a
+false world-space boundary that reads as a tapering trapezoid — 73% of the floor lay beyond it at zoom 1).
+
+### Consequences recorded for the perspective rig
+
+- "Projection is affine" and "on-screen footprint is constant with depth" are **intentionally given up**;
+  depth-dependent on-screen size is the point. The affineness assertions are replaced by rule 2.
+- Framing and backdrop coverage must be recomputed for a perspective frustum: the visible ground is now a
+  trapezoid running to a horizon, so the backdrop is sized from the projected view footprint (with the
+  framing margin) and the camera needs a sane `near`/`far`; zoom must keep the world framed and must never
+  expose the backdrop's edge.
+- The shadow camera stays orthographic and keeps covering the world.
+- `inspect().camera` must describe a perspective frustum honestly (e.g. fov/near/far) instead of ortho
+  left/right/top/bottom, so tests assert what the renderer actually uses.
+
+### Final rig parameters (Wave C outcome, measured)
+
+- **Camera**: `PerspectiveCamera`, pitch 58 (fixed), roll 0, yaw free, orthographic shadow camera unchanged.
+- **Orbit radius is FIXED** at `distance = worstCaseFit / tan(fovMax / 2)` with `fovMax = 28` and
+  `worstCaseFit = max(extentUp + verticalHeadroom, extentRight / aspect) * framingMargin` taken as the exact
+  maximum over yaw (closed form, not sampled). At aspect 1 / zoom 1 that is **40.839126**, constant across the
+  whole yaw sweep to 7e-15 (verified).
+- **The per-yaw fit is expressed as the FOV, not as a dolly**: `fov(yaw) = 2*atan(fit(yaw)/distance)`,
+  clamped to `[15, 28]`; measured **20.2854 (axis-aligned) .. 28.0000 (diagonal)**. This is the perspective
+  analog of the old orthographic per-yaw frustum fit, and it is the reason the camera no longer moves while
+  rotating.
+- **Zoom is a DOLLY** (`distance = base / zoom`) while the derived FOV is zoom-invariant; a dolly does change
+  foreshortening, which is acceptable because it is an explicit user action and the orbit is exactly constant
+  at any single zoom. Verified at zoom 0.25 / 1 / 8.
+- **`near` is derived from the geometry**, not a small constant: `max(0.5, distance - worldRadius - 1)`
+  (18.762 = full bounds diagonal, so a follow focus anywhere in the world is covered), further clamped below
+  the nearest visible ground-corner depth. At default that is **21.0775** (was 0.1, which wasted depth
+  precision); the tightest case is max zoom where `near = 0.5` with ~4.18 clearance.
+- **Residual ratio variation is geometric, not a defect**: the selected near/far edge pair is 12*cos(pitch) =
+  6.36 apart in depth at axis-aligned yaws and 12*cos(pitch)*cos45 = 4.50 at the diagonals, and the ratio is
+  FOV-independent, so no FOV can flatten it (only a much larger distance would, and that abandons the
+  composition). The harness therefore asserts the STRUCTURAL properties exactly (constant distance/height at
+  1e-9, calibration against `pick()`, near strictly > far, footprint/boundary/scale exactly 0) and treats the
+  ratio band (`|ratio - 1.133279| <= 0.04`, measured span 0.071) as a smoke check only.
+
 ## Phase 8 frozen design — GLB asset pipeline + mouse-first input
 
 Two presentation-side additions, then they are wired to the phase-7 continuous authoritative

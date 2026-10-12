@@ -44,7 +44,7 @@ import {
   KNOWN_APPEARANCES,
   RENDER_CAMERA,
   createThreeRuntime,
-  orthographicBounds,
+  perspectiveFrustum,
 } from '../src/render/three/runtime.ts';
 import type {
   ModelLoader,
@@ -148,18 +148,18 @@ function cameraRight(camera: RenderInspection['camera']): Vec3 {
   return cross(camera.forward, camera.up);
 }
 
-/** Project a world point to NDC through the orthographic rig's real inspect data. */
+/** Project a world point to NDC through the perspective rig's real inspect data. */
 function projectToNdc(
   point: Vec3,
   camera: RenderInspection['camera'],
 ): { x: number; y: number } {
   const right = cameraRight(camera);
   const relative = subtract(point, camera.position);
-  const halfWidth = (camera.right - camera.left) / 2;
-  const halfHeight = (camera.top - camera.bottom) / 2;
+  const depth = dot(relative, camera.forward);
+  const tanHalfFov = Math.tan((camera.fovDegrees * Math.PI) / 360);
   return {
-    x: dot(relative, right) / halfWidth,
-    y: dot(relative, camera.up) / halfHeight,
+    x: dot(relative, right) / (tanHalfFov * camera.aspect * depth),
+    y: dot(relative, camera.up) / (tanHalfFov * depth),
   };
 }
 
@@ -642,13 +642,24 @@ describe('three runtime camera rig', () => {
     runtime.dispose();
   });
 
-  it('changes the frustum extent with zoom, clamped to the rig limits', () => {
+  it('changes the perspective distance with zoom, clamped to the rig limits', () => {
     const runtime = makeRuntime();
     const base = runtime.inspect().camera;
+    const baseDistance = Math.hypot(base.position.x, base.position.y, base.position.z);
 
     runtime.setZoom(2);
     const zoomedIn = runtime.inspect().camera;
-    expect(zoomedIn.top).toBeCloseTo(base.top / 2, 9);
+    const zoomedDistance = Math.hypot(
+      zoomedIn.position.x,
+      zoomedIn.position.y,
+      zoomedIn.position.z,
+    );
+    // Zoom keeps the narrow FOV fixed and scales the camera DISTANCE (larger zoom
+    // is closer), so the visible half-height at the focus plane halves.
+    expect(zoomedIn.fovDegrees).toBe(base.fovDegrees);
+    const tanHalf = Math.tan((base.fovDegrees * Math.PI) / 360);
+    expect(zoomedDistance).toBeCloseTo(baseDistance / 2, 6);
+    expect(zoomedDistance * tanHalf).toBeCloseTo((baseDistance * tanHalf) / 2, 6);
     expect(zoomedIn.zoom).toBe(2);
 
     runtime.setZoom(100);
@@ -757,19 +768,45 @@ describe('three runtime lifecycle', () => {
     }).not.toThrow();
   });
 
-  it('frames the world with the tilted-orthographic projection and a literal top bound', () => {
+  it('frames the world with the narrow-FOV perspective projection and reports the frustum honestly', () => {
     const runtime = makeRuntime();
     const { camera } = runtime.inspect();
 
-    // The 12-deep ground foreshortens to (12/2)*sin(58) plus 1 unit of vertical
-    // headroom, then the symmetric framing margin scales both axes.
-    const expectedTop =
+    // Phase 11 Wave C: a pure orbit with constant foreshortening. `inspect()`
+    // must describe the frustum it actually uses, and the derived FOV sits in
+    // the documented [fovMin, fovMax] band (narrower than fovMax at axis yaws).
+    expect(camera.near).toBeGreaterThan(0);
+    expect(camera.far).toBeGreaterThan(camera.near);
+    expect(camera.aspect).toBe(1);
+    expect(camera.fovDegrees).toBeGreaterThanOrEqual(RENDER_CAMERA.fovMinDegrees);
+    expect(camera.fovDegrees).toBeLessThanOrEqual(RENDER_CAMERA.fovMaxDegrees);
+    expect(camera.fovDegrees).toBeLessThan(RENDER_CAMERA.fovMaxDegrees);
+
+    // The camera distance is fixed by the WORST-CASE yaw fit (the box diagonal)
+    // at the widest FOV, so rotating cannot dolly it.
+    const diagonal = Math.hypot(
+      (BOUNDS.max.x - BOUNDS.min.x) / 2,
+      (BOUNDS.max.z - BOUNDS.min.z) / 2,
+    );
+    const worstHalfHeight =
+      Math.max(
+        diagonal * Math.sin((58 * Math.PI) / 180) + RENDER_CAMERA.verticalHeadroom,
+        diagonal,
+      ) * RENDER_CAMERA.framingMargin;
+    const expectedDistance =
+      worstHalfHeight / Math.tan((RENDER_CAMERA.fovMaxDegrees * Math.PI) / 360);
+    const distance = Math.hypot(camera.position.x, camera.position.y, camera.position.z);
+    expect(distance).toBeCloseTo(expectedDistance, 6);
+
+    // At yaw 0 the fit is axis-aligned, so the derived FOV makes exactly the
+    // (12/2)*sin(58) + 1 headroom, times margin, half-height visible at the fixed
+    // distance.
+    const expectedHalfHeight =
       ((12 / 2) * Math.sin((58 * Math.PI) / 180) + 1) * RENDER_CAMERA.framingMargin;
-    expect(camera.top).toBeCloseTo(expectedTop, 6);
-    expect(camera.bottom).toBeCloseTo(-expectedTop, 6);
-    // Square aspect: halfWidth equals halfHeight.
-    expect(camera.left).toBeCloseTo(-expectedTop, 6);
-    expect(camera.right).toBeCloseTo(expectedTop, 6);
+    expect(distance * Math.tan((camera.fovDegrees * Math.PI) / 360)).toBeCloseTo(
+      expectedHalfHeight,
+      6,
+    );
 
     // Frozen default stance: yaw 0, pitched down by exactly 58 degrees.
     expect(camera.forward.x).toBeCloseTo(0, 6);
@@ -777,28 +814,32 @@ describe('three runtime lifecycle', () => {
     expect(camera.forward.z).toBeCloseTo(-Math.cos((58 * Math.PI) / 180), 6);
     expect(camera.up.y).toBeGreaterThan(0);
 
-    // Cross-check the projection helper for the same arguments.
-    const expected = orthographicBounds({
+    // Cross-check the projection helper for the same arguments: it is the single
+    // source of the fit, the distance, and near/far.
+    const expected = perspectiveFrustum({
       bounds: BOUNDS,
       aspect: 1,
       pitchDegrees: 58,
       yawDegrees: 0,
       zoom: 1,
     });
-    expect(camera.left).toBeCloseTo(expected.left);
-    expect(camera.right).toBeCloseTo(expected.right);
-    expect(camera.top).toBeCloseTo(expected.top);
-    expect(camera.bottom).toBeCloseTo(expected.bottom);
+    expect(expected.fovDegrees).toBeCloseTo(camera.fovDegrees, 12);
+    expect(expected.halfHeight).toBeCloseTo(expectedHalfHeight, 6);
+    expect(expected.halfWidth).toBeCloseTo(expectedHalfHeight, 6);
+    expect(camera.near).toBe(expected.near);
+    expect(camera.far).toBe(expected.far);
+    expect(camera.aspect).toBe(expected.aspect);
+    expect(distance).toBeCloseTo(expected.distance, 6);
 
     runtime.dispose();
   });
 
   it('grows the vertical extent to fit a world wider than the canvas aspect, keeping scale uniform', () => {
     // A portrait canvas (aspect 0.5): the aspect-derived half-width would crop
-    // the 12-wide world, so the single uniform scale grows the vertical bound
-    // until halfWidth matches the full world width. The framing margin then
-    // scales both axes together.
-    const bounds = orthographicBounds({
+    // the 12-wide world, so the single uniform half-height grows until
+    // halfWidth matches the full world width. The framing margin then scales
+    // both axes together, and the distance follows from the fit.
+    const frustum = perspectiveFrustum({
       bounds: BOUNDS,
       aspect: 0.5,
       pitchDegrees: 58,
@@ -806,10 +847,24 @@ describe('three runtime lifecycle', () => {
       zoom: 1,
     });
     const framing = RENDER_CAMERA.framingMargin;
-    expect(bounds.right).toBeCloseTo(6 * framing, 6);
-    expect(bounds.left).toBeCloseTo(-6 * framing, 6);
-    expect(bounds.top).toBeCloseTo(12 * framing, 6);
-    expect(bounds.right / bounds.top).toBeCloseTo(0.5, 6);
+    expect(frustum.halfHeight).toBeCloseTo(12 * framing, 6);
+    expect(frustum.halfWidth).toBeCloseTo(6 * framing, 6);
+    expect(frustum.halfWidth / frustum.halfHeight).toBeCloseTo(0.5, 6);
+    // A different canvas aspect changes the fixed distance (the fit scales), not
+    // the per-yaw FOV mechanism.
+    const diagonal = Math.hypot(
+      (BOUNDS.max.x - BOUNDS.min.x) / 2,
+      (BOUNDS.max.z - BOUNDS.min.z) / 2,
+    );
+    const worstHalfHeight =
+      Math.max(
+        diagonal * Math.sin((58 * Math.PI) / 180) + RENDER_CAMERA.verticalHeadroom,
+        diagonal / 0.5,
+      ) * framing;
+    expect(frustum.distance).toBeCloseTo(
+      worstHalfHeight / Math.tan((RENDER_CAMERA.fovMaxDegrees * Math.PI) / 360),
+      6,
+    );
   });
 
   it('does not throw for an unknown appearance and falls back to a material', () => {
@@ -1048,36 +1103,61 @@ describe('three runtime grid overlay (phase 9)', () => {
   });
 });
 
-describe('three runtime rotation stability (phase 9)', () => {
-  it('holds a valid frustum, exact pitch, zoom, focus and an affine projection across a full yaw sweep', () => {
+describe('three runtime rotation stability (phase 11: perspective)', () => {
+  it('holds a valid perspective frustum, exact pitch, zoom, focus and real foreshortening across a full yaw sweep', () => {
     const runtime = makeRuntime();
     const focus = runtime.inspect().camera.focus;
     const zoom = runtime.getCameraState().zoom;
+    let orbitDistance: number | null = null;
+    let orbitHeight: number | null = null;
 
     for (let yaw = 0; yaw < 360; yaw += 15) {
       runtime.setCameraOrientation({ yawDegrees: yaw });
       const camera = runtime.inspect().camera;
 
-      // A valid frustum at every yaw: no inverted/near-zero bounds.
-      expect(camera.left).toBeLessThan(camera.right);
-      expect(camera.bottom).toBeLessThan(camera.top);
+      // A valid, honest perspective frustum at every yaw (phase 11 replaced the
+      // ortho left/right/top/bottom fields). The derived FOV varies per yaw
+      // inside the documented band; it is NOT fixed any more.
+      expect(camera.fovDegrees).toBeGreaterThanOrEqual(RENDER_CAMERA.fovMinDegrees);
+      expect(camera.fovDegrees).toBeLessThanOrEqual(RENDER_CAMERA.fovMaxDegrees);
+      expect(camera.near).toBeGreaterThan(0);
+      expect(camera.far).toBeGreaterThan(camera.near);
+      expect(camera.aspect).toBe(1);
       // Rotation never drifts the pitch, zoom or focus.
       expect(camera.pitchDegrees).toBe(RENDER_CAMERA.pitchDegrees);
       expect(runtime.getCameraState().pitchDegrees).toBe(RENDER_CAMERA.pitchDegrees);
       expect(camera.zoom).toBe(zoom);
       expect(camera.focus).toEqual(focus);
 
-      // The projection is affine: equal NDC steps map to equal world steps on
-      // the ground, on both axes, at every yaw (a perspective camera would not).
+      // Wave C pure orbit: the camera's radius and height about the focus are
+      // identical at every yaw (the FOV absorbs the fit, not the distance).
+      const offset = {
+        x: camera.position.x - camera.focus.x,
+        y: camera.position.y - camera.focus.y,
+        z: camera.position.z - camera.focus.z,
+      };
+      const distance = Math.hypot(offset.x, offset.y, offset.z);
+      if (orbitDistance === null || orbitHeight === null) {
+        orbitDistance = distance;
+        orbitHeight = offset.y;
+      } else {
+        expect(distance).toBeCloseTo(orbitDistance, 9);
+        expect(offset.y).toBeCloseTo(orbitHeight, 9);
+      }
+
+      // Phase 11 deliberately gives up "the projection is affine". Across the
+      // view (vertical NDC), equal NDC steps map to LARGER world steps farther
+      // from the camera — real foreshortening, not a restated identity.
       const first = runtime.pick(0, 0);
-      const second = runtime.pick(0.2, 0);
-      const third = runtime.pick(0.4, 0);
+      const second = runtime.pick(0, 0.2);
+      const third = runtime.pick(0, 0.4);
       expect(first?.kind).toBe('ground');
       expect(second?.kind).toBe('ground');
       expect(third?.kind).toBe('ground');
       if (first?.kind === 'ground' && second?.kind === 'ground' && third?.kind === 'ground') {
-        expect(second.point.x - first.point.x).toBeCloseTo(third.point.x - second.point.x, 5);
-        expect(second.point.z - first.point.z).toBeCloseTo(third.point.z - second.point.z, 5);
+        const nearStep = Math.hypot(second.point.x - first.point.x, second.point.z - first.point.z);
+        const farStep = Math.hypot(third.point.x - second.point.x, third.point.z - second.point.z);
+        expect(farStep).toBeGreaterThan(nearStep);
       }
     }
 
@@ -1093,9 +1173,8 @@ describe('three runtime rotation stability (phase 9)', () => {
   });
 });
 
-describe('three runtime unbounded backdrop and framing margin (phase 10)', () => {
+describe('three runtime unbounded backdrop and framing margin (phase 11)', () => {
   const MIN_ZOOM = RENDER_CAMERA.minZoom;
-  const FRAMING_NDC = 1 / RENDER_CAMERA.framingMargin;
 
   /** 12x12 grass tiles whose combined footprint is exactly the world bounds. */
   function tileWorldFrame(): NodeCreateCommand[] {
@@ -1115,10 +1194,15 @@ describe('three runtime unbounded backdrop and framing margin (phase 10)', () =>
   }
 
   it('keeps the world silhouette off the viewport edge at every yaw, at default and minimum zoom', () => {
-    // The framing margin is a real gap, not decoration. The tight bounds fit
-    // puts the fit-driving corner at |ndc| = 1 / framingMargin; removing the
-    // margin (framingMargin = 1) makes this guard and the sweep below fail.
-    expect(FRAMING_NDC).toBeLessThanOrEqual(0.95);
+    // The framing margin is a real gap, not decoration. The perspective fit puts
+    // the fit-driving FOCUS-plane corner at |ndc| = 1 / framingMargin; the near
+    // ground corners project a little larger than that (real foreshortening),
+    // but must stay strictly inside the viewport. Removing the margin
+    // (framingMargin = 1) makes the near corners cross |ndc| = 1 and fails here.
+    const FIT_NDC = 1 / RENDER_CAMERA.framingMargin;
+    // Measured worst case at zoom 1 (yaw 0/90/180/270) for this 12x12 world.
+    const PERSPECTIVE_NEAR_NDC = 0.93;
+    expect(FIT_NDC).toBeLessThanOrEqual(0.95);
 
     const runtime = makeRuntime();
     runtime.apply(tileWorldFrame());
@@ -1142,57 +1226,110 @@ describe('three runtime unbounded backdrop and framing margin (phase 10)', () =>
             }
           }
         }
-        // At zoom 1 the fit is tight, so this is the exact margin bound; at the
-        // most zoomed-out state the world is far smaller on screen.
-        expect(maxNdc).toBeLessThanOrEqual(FRAMING_NDC + 1e-9);
+        // Strictly inside the viewport: the silhouette never touches the edge.
+        // At the most zoomed-out state the world is far smaller on screen.
+        expect(maxNdc).toBeLessThanOrEqual(PERSPECTIVE_NEAR_NDC + 1e-9);
       }
     }
 
     runtime.dispose();
   });
 
-  it('sizes the single backdrop so the min-zoom frustum footprint always lands well inside it', () => {
+  it('derives the near plane from the geometry so nothing visible is clipped at any yaw or zoom', () => {
+    // Wave C replaces the old fixed `near = 0.1`. The near plane is now derived
+    // from the world radius and clamped below the nearest VISIBLE ground depth,
+    // so at every yaw and every zoom it must sit strictly in front of the
+    // nearest ground ray and behind it for `far`.
     const runtime = makeRuntime();
-    runtime.setZoom(MIN_ZOOM);
+    const groundY = BOUNDS.min.y;
 
-    for (let yaw = 0; yaw < 360; yaw += 15) {
-      runtime.setCameraOrientation({ yawDegrees: yaw });
-      const camera = runtime.inspect().camera;
-      const backdrop = runtime.inspect().backdrop;
-      expect(backdrop).not.toBeNull();
-      if (backdrop === null) {
-        continue;
+    for (const zoom of [MIN_ZOOM, 0.5, 1, 2, 4, RENDER_CAMERA.maxZoom]) {
+      runtime.setZoom(zoom);
+      for (let yaw = 0; yaw < 360; yaw += 15) {
+        runtime.setCameraOrientation({ yawDegrees: yaw });
+        const camera = runtime.inspect().camera;
+        expect(camera.near).toBeGreaterThan(0);
+        expect(camera.far).toBeGreaterThan(camera.near);
+
+        const right = cameraRight(camera);
+        const tanHalfFov = Math.tan((camera.fovDegrees * Math.PI) / 360);
+        let minDepth = Number.POSITIVE_INFINITY;
+        let maxDepth = 0;
+        for (const u of [-1, 1]) {
+          for (const v of [-1, 1]) {
+            const dir: Vec3 = {
+              x:
+                camera.forward.x +
+                right.x * u * tanHalfFov * camera.aspect +
+                camera.up.x * v * tanHalfFov,
+              y: camera.forward.y + camera.up.y * v * tanHalfFov,
+              z:
+                camera.forward.z +
+                right.z * u * tanHalfFov * camera.aspect +
+                camera.up.z * v * tanHalfFov,
+            };
+            const t = (groundY - camera.position.y) / dir.y;
+            expect(t).toBeGreaterThan(0);
+            const depth = Math.hypot(t * dir.x, t * dir.y, t * dir.z);
+            minDepth = Math.min(minDepth, depth);
+            maxDepth = Math.max(maxDepth, depth);
+          }
+        }
+        // Near is strictly closer than the nearest visible ground (no hole in
+        // the backdrop), and far is strictly beyond the farthest ground.
+        expect(camera.near).toBeLessThan(minDepth);
+        expect(camera.far).toBeGreaterThan(maxDepth);
       }
-      const right = cameraRight(camera);
-      const halfWidth = (camera.right - camera.left) / 2;
-      const halfHeight = (camera.top - camera.bottom) / 2;
-      const backdropHalfX = backdrop.sizeX / 2;
-      const backdropHalfZ = backdrop.sizeZ / 2;
+    }
 
-      for (const u of [-halfWidth, halfWidth]) {
-        for (const v of [-halfHeight, halfHeight]) {
-          // Orthographic ray through the frustum corner: origin on the camera
-          // plane at (u, v), direction = camera forward.
-          const origin: Vec3 = {
-            x: camera.position.x + u * right.x + v * camera.up.x,
-            y: camera.position.y + u * right.y + v * camera.up.y,
-            z: camera.position.z + u * right.z + v * camera.up.z,
-          };
-          const t = (backdrop.center.y - origin.y) / camera.forward.y;
-          expect(t).toBeGreaterThan(0);
-          const hit: Vec3 = {
-            x: origin.x + t * camera.forward.x,
-            y: origin.y + t * camera.forward.y,
-            z: origin.z + t * camera.forward.z,
-          };
-          const offsetX = Math.abs(hit.x - backdrop.center.x);
-          const offsetZ = Math.abs(hit.z - backdrop.center.z);
-          // Strictly inside, so the silhouette is off-screen...
-          expect(offsetX).toBeLessThanOrEqual(backdropHalfX);
-          expect(offsetZ).toBeLessThanOrEqual(backdropHalfZ);
-          // ...and well inside: the edge keeps >20% of its half-extent as gap.
-          expect(offsetX).toBeLessThanOrEqual(backdropHalfX * 0.8);
-          expect(offsetZ).toBeLessThanOrEqual(backdropHalfZ * 0.8);
+    runtime.dispose();
+  });
+
+  it('sizes the single backdrop so the min-zoom perspective footprint always lands well inside it', () => {
+    const runtime = makeRuntime();
+    const groundY = BOUNDS.min.y;
+
+    for (const zoom of [1, MIN_ZOOM]) {
+      runtime.setZoom(zoom);
+      for (let yaw = 0; yaw < 360; yaw += 15) {
+        runtime.setCameraOrientation({ yawDegrees: yaw });
+        const camera = runtime.inspect().camera;
+        const backdrop = runtime.inspect().backdrop;
+        expect(backdrop).not.toBeNull();
+        if (backdrop === null) {
+          continue;
+        }
+        const right = cameraRight(camera);
+        const tanHalfFov = Math.tan((camera.fovDegrees * Math.PI) / 360);
+        const backdropHalfX = backdrop.sizeX / 2;
+        const backdropHalfZ = backdrop.sizeZ / 2;
+
+        // The four viewport corners cast rays that meet the ground; every one
+        // must land inside the backdrop — and with a real gap (the overshoot).
+        for (const u of [-1, 1]) {
+          for (const v of [-1, 1]) {
+            const dir: Vec3 = {
+              x:
+                camera.forward.x +
+                right.x * u * tanHalfFov * camera.aspect +
+                camera.up.x * v * tanHalfFov,
+              y: camera.forward.y + camera.up.y * v * tanHalfFov,
+              z:
+                camera.forward.z +
+                right.z * u * tanHalfFov * camera.aspect +
+                camera.up.z * v * tanHalfFov,
+            };
+            const t = (groundY - camera.position.y) / dir.y;
+            expect(t).toBeGreaterThan(0);
+            const offsetX = Math.abs(camera.position.x + t * dir.x - backdrop.center.x);
+            const offsetZ = Math.abs(camera.position.z + t * dir.z - backdrop.center.z);
+            // Strictly inside, so the silhouette is off-screen...
+            expect(offsetX).toBeLessThanOrEqual(backdropHalfX);
+            expect(offsetZ).toBeLessThanOrEqual(backdropHalfZ);
+            // ...and well inside: the edge keeps >=20% of its half-extent as gap.
+            expect(offsetX).toBeLessThanOrEqual(backdropHalfX * 0.8);
+            expect(offsetZ).toBeLessThanOrEqual(backdropHalfZ * 0.8);
+          }
         }
       }
     }

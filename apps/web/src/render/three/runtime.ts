@@ -29,15 +29,20 @@
  * CameraRig (the only place "2.5D" is allowed to live)
  * ---------------------------------------------------
  * The rig owns follow + smoothing, a **constrained** pitch, free yaw, and zoom.
- * It is deliberately **orthographic** — that is the 2.5D look and the pragmatic
- * choice — but the rig is the *only* thing that would change to switch to a
- * perspective camera: the world model, the Actor motion model, and the Render ISA
- * carry no projection assumption. Yaw rotates the rig (and therefore the view);
- * it never changes the world coordinate system.
+ * It is deliberately a **narrow-FOV perspective** camera (phase 11): the tilt and
+ * the narrow FOV give a gentle near-large/far-small read without a strong
+ * third-person look. Wave C makes the view a **pure orbit**: the camera DISTANCE
+ * is fixed per aspect/zoom (no yaw dolly), and the FOV is derived per yaw from
+ * the bounds fit so the composition is preserved while the foreshortening stays
+ * constant. The world model, the Actor motion model, and the Render ISA
+ * carry no projection assumption, so the rig remains the *only* module that knows
+ * how the scene is projected. Yaw rotates the rig (and therefore the view); it
+ * never changes the world coordinate system.
  *
  * `inspect()` exposes the rig as plain data (`pitchDegrees`, `yawDegrees`,
- * `zoom`, the frustum, and the camera's world position/forward/up) so tests can
- * assert pitch clamping, yaw view changes, and zoom extent numerically.
+ * `zoom`, the honest perspective frustum — `fovDegrees`/`near`/`far`/`aspect` —
+ * and the camera's world position/forward/up) so tests can assert pitch clamping,
+ * yaw view changes, and zoom extent numerically.
  *
  * Layer / depth / occlusion (frozen policy)
  * ----------------------------------------
@@ -98,8 +103,8 @@ import {
   Mesh,
   MeshBasicMaterial,
   MeshStandardMaterial,
-  OrthographicCamera,
   PCFSoftShadowMap,
+  PerspectiveCamera,
   Plane,
   PlaneGeometry,
   Quaternion,
@@ -202,7 +207,7 @@ export interface CameraState {
   pitchDegrees: number;
   /** Yaw about `+Y`, in degrees, normalised to `[0, 360)`. */
   yawDegrees: number;
-  /** Orthographic zoom factor; larger is closer. */
+  /** Perspective zoom factor; larger is closer. */
   zoom: number;
   /** World-space point the rig follows/looks at. */
   focus: { x: number; y: number; z: number };
@@ -256,17 +261,21 @@ export interface RenderInspection {
    * loaded model rather than only forgetting it.
    */
   released: { geometries: number; materials: number; textures: number };
-  /** The camera rig state and the orthographic frustum it produces. */
+  /** The camera rig state and the perspective frustum it produces. */
   camera: {
-    left: number;
-    right: number;
-    top: number;
-    bottom: number;
+    /** Vertical field of view, in degrees, actually applied to the camera. */
+    fovDegrees: number;
+    /** Near clip plane, in world units. */
+    near: number;
+    /** Far clip plane, in world units. */
+    far: number;
+    /** Canvas aspect (width / height) the frustum was fitted to. */
+    aspect: number;
     /** Constrained downward pitch, in degrees. */
     pitchDegrees: number;
     /** Free yaw, in degrees, normalised to `[0, 360)`. */
     yawDegrees: number;
-    /** Orthographic zoom factor; larger is closer. */
+    /** Perspective zoom factor; larger is closer. */
     zoom: number;
     /** World-space rig focus. */
     focus: { x: number; y: number; z: number };
@@ -412,7 +421,7 @@ export interface RenderRuntime {
    * normalised to `[0, 360)`. Rotating the rig never changes world coordinates.
    */
   setCameraOrientation(orientation: { pitchDegrees?: number; yawDegrees?: number }): void;
-  /** Set the orthographic zoom factor (clamped to the rig's limits). */
+  /** Set the perspective zoom factor (clamped to the rig's limits). */
   setZoom(zoom: number): void;
   /**
    * Show or hide the independent `GridOverlay` layer (hidden by default). This is
@@ -512,8 +521,34 @@ export const RENDER_CAMERA = {
   minPitchDegrees: 20,
   /** Pitch constraint: at/above this the camera is effectively level. */
   maxPitchDegrees: 80,
-  /** Camera distance from its focus point (orthographic, so scale-independent). */
-  distance: 40,
+  /**
+   * Widest vertical field of view, in degrees. Deliberately narrow (phase 11)
+   * so the projected near/far size difference stays gentle.
+   *
+   * Wave C: the FOV is no longer fixed. The camera DISTANCE is fixed (once per
+   * aspect/zoom) from the WORST-case yaw fit at this FOV; the per-yaw FOV is then
+   * derived from the same fit so the composition is preserved exactly while
+   * perspective strength (which depends on distance only) stays constant. See
+   * {@link perspectiveFrustum}.
+   */
+  fovMaxDegrees: 28,
+  /**
+   * Narrowest vertical field of view, in degrees. A guard for degenerate
+   * bounds/aspect fits; for the shipped world shapes the derived FOV stays
+   * around 20 (axis-aligned) to 28 (diagonal) and this never binds.
+   */
+  fovMinDegrees: 15,
+  /**
+   * Minimum near clip distance, in world units. `near` is otherwise derived from
+   * the geometry (see {@link perspectiveFrustum}); this only guards a positive
+   * near when the camera is closer to the focus than the world radius.
+   */
+  minNear: 0.5,
+  /**
+   * World units of clearance between the near plane and the nearest world
+   * geometry, so rounding at the plane never shaves a tile.
+   */
+  nearClearance: 1,
   /** Extra world units of vertical half-extent so tall props are not clipped. */
   verticalHeadroom: 1,
   /**
@@ -750,94 +785,259 @@ function yawFromRotation(rotation: Quaternion): number {
 }
 
 /**
- * Orthographic frustum that frames the world's ground rectangle for the rig's
- * current pitch/yaw/zoom and a canvas aspect.
+ * Perspective frustum plus the visible ground footprint that frame the world's
+ * ground rectangle for the rig's current pitch/yaw/zoom and a canvas aspect.
  *
- * The world bounds' XZ footprint (at ground level) is projected onto the
- * camera's own right/up axes, so the fit is correct for yaw too: rotating the
- * rig widens the projected footprint (up to the box diagonal) and the whole
- * world stays visible. A small vertical headroom keeps tall props off the clip
- * edge, and the symmetric {@link RENDER_CAMERA.framingMargin} then pushes both
- * axes a little past the tight fit so no silhouette ever touches the viewport
- * edge. The single uniform half-height satisfies both the projected footprint
- * and the canvas aspect, so `halfWidth / halfHeight` always equals the aspect
- * and world-to-screen scale stays uniform (nothing is stretched). Finally the
- * whole frustum is divided by `zoom` (larger zoom is closer).
+ * Wave C (phase 11): the rig is a **pure orbit with constant foreshortening**.
+ *
+ * - The camera basis (right/up/forward) and the symmetric bounds fit are the
+ *   phase-10 orthographic fit: the world bounds' XZ footprint (at ground level)
+ *   is projected onto the camera's right/up axes, `verticalHeadroom` keeps tall
+ *   props off the clip edge, and `framingMargin` pushes both axes past the tight
+ *   fit so the fit-driving corner lands at `|ndc| = 1 / framingMargin` AT THE
+ *   FOCUS PLANE — the same composition the orthographic rig produced.
+ * - The camera DISTANCE is fixed for a given aspect/zoom, from the fit at the
+ *   WORST yaw and the widest FOV
+ *   (`distance = worstCaseFit(aspect, zoom) / tan(fovMax / 2)`). It does NOT
+ *   depend on yaw, so rotating is a pure orbit with no dolly.
+ * - The FOV is derived per yaw from the same fit
+ *   (`fov(yaw) = 2 * atan(fit(yaw, aspect, zoom) / distance)`), clamped to
+ *   `[fovMin, fovMax]`. The fit fixes the apparent size of the world, while
+ *   perspective strength is set by the fixed DISTANCE, so the floor's
+ *   foreshortening does not breathe with yaw. This is the honest perspective
+ *   analogue of the orthographic rig's per-yaw frustum fit.
+ * - `zoom` is a DOLLY: `distance` is inversely proportional to zoom while the
+ *   derived FOV is zoom-invariant. A dolly does change perspective strength (a
+ *   farther camera foreshortens less), which is expected for an explicit zoom
+ *   action; at any single zoom the pure-orbit property is exact.
+ * - `near` is derived from the geometry, not a close constant. The camera may
+ *   follow anywhere inside the world, so a conservative world radius (the bounds
+ *   diagonal) is subtracted from the distance, leaving `nearClearance` as
+ *   margin. It is additionally clamped below the nearest VISIBLE ground depth so
+ *   the backdrop can never be clipped on-screen. `far` is derived from the
+ *   visible ground footprint (1.2x the farthest viewport ground corner plus 1),
+ *   so terrain and backdrop stay inside the frustum.
  */
-export function orthographicBounds(options: {
+
+/** The symmetric half-height the rig must show to frame `bounds` at one yaw. */
+function fittedHalfHeight(
+  bounds: RuntimeWorldBounds,
+  aspect: number,
+  pitchDegrees: number,
+  yawDegrees: number,
+  zoom: number,
+): number {
+  const pitch = pitchDegrees * DEGREES_TO_RADIANS;
+  const yaw = yawDegrees * DEGREES_TO_RADIANS;
+  const sinPitch = Math.sin(pitch);
+  const sinYaw = Math.sin(yaw);
+  const cosYaw = Math.cos(yaw);
+  const rightX = cosYaw;
+  const rightZ = -sinYaw;
+  const upX = -sinPitch * sinYaw;
+  const upZ = -sinPitch * cosYaw;
+  const halfWidthWorld = (bounds.max.x - bounds.min.x) / 2;
+  const halfDepthWorld = (bounds.max.z - bounds.min.z) / 2;
+  let extentRight = 0;
+  let extentUp = 0;
+  for (const signX of [-1, 1]) {
+    for (const signZ of [-1, 1]) {
+      const dx = signX * halfWidthWorld;
+      const dz = signZ * halfDepthWorld;
+      extentRight = Math.max(extentRight, Math.abs(dx * rightX + dz * rightZ));
+      extentUp = Math.max(extentUp, Math.abs(dx * upX + dz * upZ));
+    }
+  }
+  const vertical = extentUp + RENDER_CAMERA.verticalHeadroom;
+  // Tight, aspect-preserving bounds fit, then a symmetric framing margin on both
+  // axes so the world silhouette keeps clear of the viewport edge at every yaw.
+  // Dividing by `zoom` keeps a larger zoom closer.
+  return (Math.max(vertical, extentRight / aspect) / zoom) * RENDER_CAMERA.framingMargin;
+}
+
+/**
+ * The largest {@link fittedHalfHeight} over every yaw, computed in closed form.
+ *
+ * `max_theta max(f(theta), g(theta)) = max(max_theta f, max_theta g)`, and over a
+ * full turn those two projected extents attain `sin(pitch) * diag + headroom`
+ * (up axis) and `diag` (right axis), with `diag = hypot(halfWidth, halfDepth)`.
+ * This is exact, not a yaw sample, so the fixed orbit distance can never be too
+ * small and no yaw can overflow the framed composition.
+ */
+function worstCaseFittedHalfHeight(
+  bounds: RuntimeWorldBounds,
+  aspect: number,
+  pitchDegrees: number,
+  zoom: number,
+): number {
+  const sinPitch = Math.sin(pitchDegrees * DEGREES_TO_RADIANS);
+  const halfWidthWorld = (bounds.max.x - bounds.min.x) / 2;
+  const halfDepthWorld = (bounds.max.z - bounds.min.z) / 2;
+  const diagonal = Math.hypot(halfWidthWorld, halfDepthWorld);
+  const vertical = sinPitch * diagonal + RENDER_CAMERA.verticalHeadroom;
+  const horizontal = diagonal / aspect;
+  return (Math.max(vertical, horizontal) / zoom) * RENDER_CAMERA.framingMargin;
+}
+
+/** The fixed orbit distance for an aspect/zoom: worst-case fit at the widest FOV. */
+function orbitDistance(
+  bounds: RuntimeWorldBounds,
+  aspect: number,
+  pitchDegrees: number,
+  zoom: number,
+): number {
+  const tanHalfFovMax = Math.tan((RENDER_CAMERA.fovMaxDegrees * DEGREES_TO_RADIANS) / 2);
+  return worstCaseFittedHalfHeight(bounds, aspect, pitchDegrees, zoom) / tanHalfFovMax;
+}
+
+export function perspectiveFrustum(options: {
   bounds: RuntimeWorldBounds;
   aspect: number;
   pitchDegrees: number;
   yawDegrees: number;
   zoom: number;
-}): { left: number; right: number; top: number; bottom: number } {
+}): {
+  fovDegrees: number;
+  near: number;
+  far: number;
+  aspect: number;
+  distance: number;
+  halfHeight: number;
+  halfWidth: number;
+  /** Half-extent of the visible ground footprint around the focus, on world X. */
+  footprintHalfX: number;
+  /** Half-extent of the visible ground footprint around the focus, on world Z. */
+  footprintHalfZ: number;
+} {
   const pitch = options.pitchDegrees * DEGREES_TO_RADIANS;
   const yaw = options.yawDegrees * DEGREES_TO_RADIANS;
   const sinPitch = Math.sin(pitch);
+  const cosPitch = Math.cos(pitch);
   const sinYaw = Math.sin(yaw);
   const cosYaw = Math.cos(yaw);
 
-  // Camera basis in world space: the rig yaw is applied about `+Y` to a camera
-  // whose local -Z is pitched down by `pitch`.
-  //   right = Ry(yaw) * (1, 0, 0)
-  //   up    = Ry(yaw) * (0, cosPitch, -sinPitch)
+  // Camera basis in world space (the same convention `applyCameraTransform`
+  // writes to the rig):
+  //   right   = Ry(yaw) * (1, 0, 0)
+  //   up      = Ry(yaw) * (0,  cosPitch, -sinPitch)
+  //   forward = Ry(yaw) * (0, -sinPitch, -cosPitch)
   const rightX = cosYaw;
   const rightZ = -sinYaw;
   const upX = -sinPitch * sinYaw;
+  const upY = cosPitch;
   const upZ = -sinPitch * cosYaw;
-
-  const halfWidth = (options.bounds.max.x - options.bounds.min.x) / 2;
-  const halfDepth = (options.bounds.max.z - options.bounds.min.z) / 2;
-
-  let extentRight = 0;
-  let extentUp = 0;
-  for (const signX of [-1, 1]) {
-    for (const signZ of [-1, 1]) {
-      const dx = signX * halfWidth;
-      const dz = signZ * halfDepth;
-      extentRight = Math.max(extentRight, Math.abs(dx * rightX + dz * rightZ));
-      extentUp = Math.max(extentUp, Math.abs(dx * upX + dz * upZ));
-    }
-  }
+  const forwardX = -cosPitch * sinYaw;
+  const forwardY = -sinPitch;
+  const forwardZ = -cosPitch * cosYaw;
 
   const aspect = options.aspect > 0 ? options.aspect : 1;
   const zoom = options.zoom > 0 ? options.zoom : 1;
-  const vertical = extentUp + RENDER_CAMERA.verticalHeadroom;
-  // Tight, aspect-preserving bounds fit, then a symmetric framing margin on both
-  // axes so the world silhouette keeps clear of the viewport edge at every yaw.
-  // Dividing by `zoom` keeps a larger zoom closer.
-  const halfHeight =
-    (Math.max(vertical, extentRight / aspect) / zoom) * RENDER_CAMERA.framingMargin;
-  const halfWidthFinal = halfHeight * aspect;
+
+  const fitted = fittedHalfHeight(
+    options.bounds,
+    aspect,
+    options.pitchDegrees,
+    options.yawDegrees,
+    zoom,
+  );
+  const distance = orbitDistance(options.bounds, aspect, options.pitchDegrees, zoom);
+  const requiredFovDegrees = (2 * Math.atan(fitted / distance)) / DEGREES_TO_RADIANS;
+  const fovDegrees = clamp(
+    requiredFovDegrees,
+    RENDER_CAMERA.fovMinDegrees,
+    RENDER_CAMERA.fovMaxDegrees,
+  );
+  const tanHalfFov = Math.tan((fovDegrees * DEGREES_TO_RADIANS) / 2);
+  // Visible half-height at the focus plane. Equals the fitted value unless the
+  // `fovMin` guard widened the view.
+  const halfHeight = distance * tanHalfFov;
+  const halfWidth = halfHeight * aspect;
+
+  // Camera position relative to the focus. The focus lies on the ground plane,
+  // so the camera height above it is `distance * sin(pitch)`. The distance is
+  // yaw-independent, so rotating the rig orbits without dollying.
+  const camX = distance * cosPitch * sinYaw;
+  const camY = distance * sinPitch;
+  const camZ = distance * cosPitch * cosYaw;
+
+  // Project the four viewport corners onto the ground plane. For the rig's
+  // pitch/fov clamps every ray points below the horizon, so the footprint is a
+  // finite trapezoid; `footprintHalfX/Z` are measured from the focus,
+  // `maxDepth` is the farthest camera-to-corner distance used for `far`, and
+  // `minDepth` is the nearest VISIBLE ground distance used to keep the near
+  // plane from clipping the backdrop on-screen.
+  let footprintHalfX = 0;
+  let footprintHalfZ = 0;
+  let maxDepth = 0;
+  let minDepth = Number.POSITIVE_INFINITY;
+  let parallelToGround = false;
+  for (const u of [-1, 1]) {
+    for (const v of [-1, 1]) {
+      const dirX = forwardX + rightX * (u * tanHalfFov * aspect) + upX * (v * tanHalfFov);
+      const dirY = forwardY + upY * (v * tanHalfFov);
+      const dirZ = forwardZ + rightZ * (u * tanHalfFov * aspect) + upZ * (v * tanHalfFov);
+      if (dirY >= -1e-9) {
+        // A ray at/above the horizon never meets the ground: the footprint is
+        // unbounded. Cannot happen for the rig's clamps (pitch >= 20 > fov/2),
+        // but keep the guard so a future FOV/pitch change cannot produce NaN.
+        parallelToGround = true;
+        continue;
+      }
+      const t = -camY / dirY;
+      footprintHalfX = Math.max(footprintHalfX, Math.abs(camX + t * dirX));
+      footprintHalfZ = Math.max(footprintHalfZ, Math.abs(camZ + t * dirZ));
+      const depth = Math.hypot(t * dirX, t * dirY, t * dirZ);
+      maxDepth = Math.max(maxDepth, depth);
+      minDepth = Math.min(minDepth, depth);
+    }
+  }
+
+  // Near clip derived from the geometry. The world radius is the bounds diagonal
+  // (full extents, not halves): the camera may follow to ANY point inside the
+  // world, so `distance - worldRadius` bounds the closest any world point can be
+  // from ANY focus the rig can reach. The extra `minDepth` clamp below the
+  // nearest visible ground corner guarantees the oversized backdrop is never
+  // clipped on-screen, even at the most zoomed-out state.
+  const worldRadius = Math.hypot(
+    options.bounds.max.x - options.bounds.min.x,
+    Math.max(0, options.bounds.max.y - options.bounds.min.y),
+    options.bounds.max.z - options.bounds.min.z,
+  );
+  let near = Math.max(
+    RENDER_CAMERA.minNear,
+    distance - worldRadius - RENDER_CAMERA.nearClearance,
+  );
+  if (Number.isFinite(minDepth)) {
+    near = Math.max(RENDER_CAMERA.minNear, Math.min(near, minDepth - RENDER_CAMERA.nearClearance));
+  }
+
   return {
-    left: -halfWidthFinal,
-    right: halfWidthFinal,
-    top: halfHeight,
-    bottom: -halfHeight,
+    fovDegrees,
+    near,
+    far: parallelToGround ? Math.max(distance, 1) * 8 : maxDepth * 1.2 + 1,
+    aspect,
+    distance,
+    halfHeight,
+    halfWidth,
+    footprintHalfX,
+    footprintHalfZ,
   };
 }
 
 /**
  * Half-extents (world units on X and Z) of the single ground backdrop that make
- * the frustum's projected footprint land well inside it, so the floor reads as
- * unbounded instead of showing a clipped silhouette.
+ * the perspective frustum's projected footprint land well inside it, so the
+ * floor reads as unbounded instead of showing a clipped silhouette.
  *
- * A yawed orthographic camera viewing a horizontal plane turns the viewport
- * rectangle into a parallelogram, which is expected. This derives that
- * parallelogram from the same camera basis {@link orthographicBounds} uses: for
- * a viewport corner `(u, v)` and backdrop height `H`, the world offset from the
- * rig focus is
- *
- * ```text
- * x = Δy·cot(pitch)·sin(yaw) + u·cos(yaw) − v·sin(yaw)/sin(pitch)
- * z = Δy·cot(pitch)·cos(yaw) − u·sin(yaw) − v·cos(yaw)/sin(pitch)
- * ```
- *
- * with `Δy = H − focusY`. Each axis is linear in `u`/`v`, so the maximum over
- * the four corners is exact for the state (no sampling). The footprint is then
- * multiplied by `overshoot` (> 1) so the silhouette sits off-screen, and the
- * world half-extents are added so the backdrop still covers the viewport when
- * the rig follows a node anywhere inside the world.
+ * The visible ground through a perspective frustum is a trapezoid running toward
+ * (but never reaching) the horizon. This uses the trapezoid's world-space
+ * bounding half-extents measured from the rig focus by {@link perspectiveFrustum}
+ * (exact over the four viewport corners, no sampling), multiplies them by
+ * `overshoot` (> 1) so the silhouette sits off-screen, and adds the world
+ * half-extents so the backdrop still covers the viewport when the rig follows a
+ * node anywhere inside the world. Because the focus is free to move within the
+ * world, adding the world half-extents is what keeps the floor edge off-screen
+ * in every follow position, not only at the centre.
  */
 export function backdropHalfExtents(options: {
   bounds: RuntimeWorldBounds;
@@ -845,38 +1045,21 @@ export function backdropHalfExtents(options: {
   pitchDegrees: number;
   yawDegrees: number;
   zoom: number;
-  backdropY: number;
   overshoot?: number;
 }): { halfX: number; halfZ: number } {
-  const pitch = options.pitchDegrees * DEGREES_TO_RADIANS;
-  const sinPitch = Math.sin(pitch);
-  const cotPitch = Math.cos(pitch) / sinPitch;
-  const yaw = options.yawDegrees * DEGREES_TO_RADIANS;
-  const sinYaw = Math.sin(yaw);
-  const cosYaw = Math.cos(yaw);
-
-  const frustum = orthographicBounds({
+  const frustum = perspectiveFrustum({
     bounds: options.bounds,
     aspect: options.aspect,
     pitchDegrees: options.pitchDegrees,
     yawDegrees: options.yawDegrees,
     zoom: options.zoom,
   });
-  const halfWidth = (frustum.right - frustum.left) / 2;
-  const halfHeight = (frustum.top - frustum.bottom) / 2;
-
-  const deltaY = options.backdropY - options.bounds.min.y;
-  const baseX = Math.abs(deltaY * cotPitch * sinYaw);
-  const baseZ = Math.abs(deltaY * cotPitch * cosYaw);
-  const cornerX = halfWidth * Math.abs(cosYaw) + (halfHeight / sinPitch) * Math.abs(sinYaw);
-  const cornerZ = halfWidth * Math.abs(sinYaw) + (halfHeight / sinPitch) * Math.abs(cosYaw);
-
   const overshoot = options.overshoot ?? 1;
   const halfWorldX = (options.bounds.max.x - options.bounds.min.x) / 2;
   const halfWorldZ = (options.bounds.max.z - options.bounds.min.z) / 2;
   return {
-    halfX: halfWorldX + (baseX + cornerX) * overshoot,
-    halfZ: halfWorldZ + (baseZ + cornerZ) * overshoot,
+    halfX: halfWorldX + frustum.footprintHalfX * overshoot,
+    halfZ: halfWorldZ + frustum.footprintHalfZ * overshoot,
   };
 }
 
@@ -1424,43 +1607,48 @@ export function createThreeRuntime(options: {
   cameraRig.position.copy(cameraFocus);
   scene.add(cameraRig);
 
-  const camera = new OrthographicCamera(-1, 1, 1, -1, 0.1, 100);
+  const camera = new PerspectiveCamera(RENDER_CAMERA.fovMaxDegrees, 1, RENDER_CAMERA.minNear, 100);
   // Fixed child of the rig: offset up/back along the (rig-local) view axis and
-  // pitched down. The rig's yaw rotates the whole assembly.
+  // pitched down. The rig's yaw rotates the whole assembly. The offset distance
+  // is yaw-independent (`reframe` derives it from the worst-case fit and it only
+  // changes with aspect/zoom), so rotating is a pure orbit. The FOV is what
+  // changes per yaw to preserve the orthographic composition.
   cameraRig.add(camera);
 
   // Canvas aspect, updated on resize; defaults to square before any layout.
   let cameraAspect = 1;
 
   /**
-   * Recompute the camera's local offset/rotation from the rig state. Switching to
-   * a perspective camera would change only this function and the frustum helper.
+   * Apply the rig's rotation, then reframe the perspective frustum. The camera is
+   * a fixed local child of the rig; only `rightX/rightY/rightZ`-equivalent yaw on
+   * the rig and the pitch-down rotation on the camera are set here. The camera's
+   * local offset is written by {@link reframe} because it depends on the fit.
    */
   function applyCameraTransform(): void {
-    const pitch = pitchDegrees * DEGREES_TO_RADIANS;
     cameraRig.rotation.y = yawDegrees * DEGREES_TO_RADIANS;
-    camera.position.set(
-      0,
-      RENDER_CAMERA.distance * Math.sin(pitch),
-      RENDER_CAMERA.distance * Math.cos(pitch),
-    );
-    camera.rotation.set(-pitch, 0, 0);
+    camera.rotation.set(-pitchDegrees * DEGREES_TO_RADIANS, 0, 0);
     reframe();
   }
 
-  /** Reframe the orthographic frustum for the current rig state and aspect. */
+  /** Reframe the perspective frustum for the current rig state and aspect. */
   function reframe(): void {
-    const frustum = orthographicBounds({
+    const frustum = perspectiveFrustum({
       bounds,
       aspect: cameraAspect,
       pitchDegrees,
       yawDegrees,
       zoom,
     });
-    camera.left = frustum.left;
-    camera.right = frustum.right;
-    camera.top = frustum.top;
-    camera.bottom = frustum.bottom;
+    const pitch = pitchDegrees * DEGREES_TO_RADIANS;
+    camera.position.set(
+      0,
+      frustum.distance * Math.sin(pitch),
+      frustum.distance * Math.cos(pitch),
+    );
+    camera.aspect = frustum.aspect;
+    camera.fov = frustum.fovDegrees;
+    camera.near = frustum.near;
+    camera.far = frustum.far;
     camera.updateProjectionMatrix();
     sizeBackdrop();
   }
@@ -1512,7 +1700,6 @@ export function createThreeRuntime(options: {
       pitchDegrees,
       yawDegrees,
       zoom,
-      backdropY: ground.position.y,
       overshoot: BACKDROP_OVERSHOOT,
     });
     ground.scale.set(extents.halfX * 2, extents.halfZ * 2, 1);
@@ -2036,10 +2223,10 @@ export function createThreeRuntime(options: {
       models: ownedTemplates.size,
       released: { ...released },
       camera: {
-        left: camera.left,
-        right: camera.right,
-        top: camera.top,
-        bottom: camera.bottom,
+        fovDegrees: camera.fov,
+        near: camera.near,
+        far: camera.far,
+        aspect: camera.aspect,
         pitchDegrees,
         yawDegrees,
         zoom,
@@ -2076,7 +2263,7 @@ export function createThreeRuntime(options: {
 
   /**
    * Size the drawing buffer and reframe the camera from the canvas' current
-   * layout size. See {@link orthographicBounds} for the projection policy.
+   * layout size. See {@link perspectiveFrustum} for the projection policy.
    */
   function resizeRenderer(): void {
     if (renderer === null) {
