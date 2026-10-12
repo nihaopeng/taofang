@@ -234,3 +234,21 @@ body {
   color: #6b5a44;
   cursor: not-allowed;
 }
+
+/*
+ * The grid-overlay toggle is a labelled control, not a square direction pad. It
+ * stands in for the future farming/placement/selection/debug mode switch; the
+ * overlay itself stays hidden until this is pressed (or G is pressed).
+ */
+.world__grid-toggle {
+  width: auto;
+  height: 2.5rem;
+  margin-top: 0.75rem;
+  padding: 0 0.9rem;
+  font-size: 0.9rem;
+}
+
+.world__grid-toggle[aria-pressed='true'] {
+  background: var(--leaf);
+  color: var(--soil);
+}

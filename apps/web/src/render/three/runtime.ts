@@ -46,9 +46,26 @@
  * `layer` ('base' | 'object') is coarse ordering only and is applied here as
  * `renderOrder`.
  *
+ * Seamless terrain + an independent grid layer (phase 9)
+ * -----------------------------------------------------
+ * Every terrain plate is exactly `cellSize` on both axes, so neighbouring cells
+ * share their edges exactly and the surface is continuous. Per-terrain
+ * differentiation never changes that horizontal footprint: it is colour/material,
+ * a FULL-footprint vertical step (path/water are recessed), and/or a smaller
+ * decoration resting ON TOP of the full-size plate (path inlay, blocked rock,
+ * water ripple). The old "dark ground shows through as grid gaps" technique is
+ * gone; grid lines are an independent `GridOverlay` layer instead.
+ *
+ * `GridOverlay` (one `LineSegments` plus one reusable marker, built once from the
+ * grid spec) is hidden by default, sits under `WorldRoot` alongside the prefab
+ * groups, and is lifted by one layer-wide `GRID_OVERLAY_LIFT` to avoid z-fighting.
+ * The lift is an overlay concern only; it is never a per-tile seam fix.
+ * `setGridOverlayVisible` / `setHighlightedCell` drive it and `inspect()` reports
+ * it as plain data.
+ *
  * Prefab registry / asset abstraction
  * -----------------------------------
- * `AppearanceId -> Prefab { group, defaultAnimation, motion?, createVisual() }`.
+ * `AppearanceId -> Prefab { group, defaultAnimation, motion?, createVisual(cellSize) }`.
  * The appearance ids below are **opaque catalogue keys** (data), not game logic:
  * the runtime never interprets them. Prefabs are built from standard Three.js
  * primitives only. Swapping to a sprite atlas / billboards / GLTF / instanced
@@ -67,14 +84,19 @@ import {
   AmbientLight,
   Box3,
   BoxGeometry,
+  BufferGeometry,
   Color,
   ConeGeometry,
   CylinderGeometry,
   DirectionalLight,
+  Float32BufferAttribute,
   Group,
   IcosahedronGeometry,
+  LineBasicMaterial,
+  LineSegments,
   Matrix4,
   Mesh,
+  MeshBasicMaterial,
   MeshStandardMaterial,
   OrthographicCamera,
   PCFSoftShadowMap,
@@ -165,8 +187,13 @@ interface Prefab {
    * child each `update`. Absent means the appearance does not move.
    */
   readonly motion?: (animation: AnimationId, nowMs: number, visual: Group) => void;
-  /** Build a fresh visual rooted at the node's feet (local origin at y = 0). */
-  createVisual(): Group;
+  /**
+   * Build a fresh visual rooted at the node's feet (local origin at y = 0).
+   * `cellSize` is the world-space edge length a terrain plate must occupy; a
+   * prefab that is not terrain ignores it. Threading it here is what makes the
+   * terrain footprint exactly the grid cell, with no per-terrain inset.
+   */
+  createVisual(cellSize: number): Group;
 }
 
 /** Plain-data snapshot of the camera rig: the only place 2.5D lives. */
@@ -238,6 +265,17 @@ export interface RenderInspection {
     renderOrder: number;
     /** Real world-space position read off the node root's `Object3D`, no inversion. */
     world: { x: number; y: number; z: number };
+    /** The node root's real scale, read off its `Object3D` (1 everywhere today). */
+    scale: { x: number; y: number; z: number };
+    /**
+     * Horizontal footprint of the node's visual, measured from the real
+     * world-space AABB the same way {@link visualTopY} measures height (the
+     * node's own authoritative transform cancels). For every terrain appearance
+     * this is exactly the grid `cellSize`, which is the "no shrink, no seams"
+     * proof: a reintroduced per-terrain inset changes this measured value.
+     */
+    footprintX: number;
+    footprintZ: number;
     /** The node root's real world rotation, read off its `Object3D`. */
     rotation: { x: number; y: number; z: number; w: number };
     /** Yaw about `+Y` (radians) extracted from {@link rotation}. */
@@ -275,6 +313,20 @@ export interface RenderInspection {
    * sorted by key. This is the batching/instancing seam made observable.
    */
   buckets: readonly { key: string; count: number }[];
+  /**
+   * State of the independent `GridOverlay` presentation layer, as plain data.
+   *
+   * `lineObjectCount`/`highlightMarkerCount` are the overlay's real child
+   * objects, so a test can prove the overlay is one line object plus one reusable
+   * marker regardless of how many tiles exist (it is never one object per tile).
+   * After `dispose` every field reads empty and every count is 0.
+   */
+  gridOverlay: {
+    visible: boolean;
+    highlightedCell: { x: number; z: number } | null;
+    lineObjectCount: number;
+    highlightMarkerCount: number;
+  };
 }
 
 /** Structural world AABB the runtime frames; deliberately not the Organizer type. */
@@ -282,6 +334,34 @@ export interface RuntimeWorldBounds {
   min: { x: number; y: number; z: number };
   max: { x: number; y: number; z: number };
 }
+
+/**
+ * Structural grid spec the runtime builds its terrain footprint and the
+ * `GridOverlay` from; deliberately not the Organizer type, but structurally the
+ * same shape so the UI can pass its view model through unchanged.
+ *
+ * `width`/`depth` are cell counts, not world units: the grid spans
+ * `origin + width * cellSize` in x (and `depth` in z).
+ */
+export interface RuntimeGridSpec {
+  origin: { x: number; y: number; z: number };
+  width: number;
+  depth: number;
+  cellSize: number;
+}
+
+/** Cell edge length used when a caller supplies no grid spec (the default grid). */
+export const DEFAULT_CELL_SIZE = 1;
+
+/**
+ * Single, layer-wide lift of the `GridOverlay` above the terrain surface so the
+ * overlay's lines do not z-fight with the plates.
+ *
+ * This is an OVERLAY LIFT, not a seam fix: it is one constant for the whole
+ * layer (never per-tile, never per-terrain) and says nothing about the terrain
+ * geometry, which stays exactly cell-sized and continuous.
+ */
+const GRID_OVERLAY_LIFT = 0.05;
 
 /** The executor surface the UI wires to the bridge. */
 export interface RenderRuntime {
@@ -313,6 +393,18 @@ export interface RenderRuntime {
   setCameraOrientation(orientation: { pitchDegrees?: number; yawDegrees?: number }): void;
   /** Set the orthographic zoom factor (clamped to the rig's limits). */
   setZoom(zoom: number): void;
+  /**
+   * Show or hide the independent `GridOverlay` layer (hidden by default). This is
+   * the layer farming / placement / selection / debug modes will switch on; those
+   * modes do not exist yet, so the UI toggle stands in for the future switch.
+   */
+  setGridOverlayVisible(visible: boolean): void;
+  /**
+   * Record (and move the reusable marker to) a highlighted grid cell, or clear it
+   * with `null`. The runtime derives the cell's world centre from the grid spec;
+   * no gameplay meaning is attached to a cell here.
+   */
+  setHighlightedCell(cell: { x: number; z: number } | null): void;
   /**
    * Resolve a normalized device coordinate (`[-1, 1]`, origin centre, `+y` up)
    * to plain pick data:
@@ -361,6 +453,9 @@ interface RuntimeNode {
   motion: Prefab['motion'];
   /** Highest local Y of the visual's meshes, relative to the node root (see {@link measureVisualTopY}). */
   visualTopY: number;
+  /** Horizontal footprint of the visual's meshes, relative to the node root (see {@link measureVisualFootprint}). */
+  footprintX: number;
+  footprintZ: number;
   /**
    * Whether this node owns the geometry/materials of `visual`.
    * Placeholder visuals are built per node and are disposed with the node; a
@@ -439,8 +534,18 @@ const FALLBACK_PIXELS_PER_UNIT = 32;
 
 const DEGREES_TO_RADIANS = Math.PI / 180;
 
-function material(colour: number): MeshStandardMaterial {
-  return new MeshStandardMaterial({ color: colour });
+function material(
+  colour: number,
+  options: { roughness?: number; metalness?: number } = {},
+): MeshStandardMaterial {
+  const entry = new MeshStandardMaterial({ color: colour });
+  if (options.roughness !== undefined) {
+    entry.roughness = options.roughness;
+  }
+  if (options.metalness !== undefined) {
+    entry.metalness = options.metalness;
+  }
+  return entry;
 }
 
 /** How many GPU resources a release pass freed. */
@@ -678,27 +783,45 @@ function createPlate(size: number, colour: number, surfaceY: number): Mesh {
   return plate;
 }
 
-function createGrassVisual(): Group {
+/**
+ * Grass: one FULL-cell plate, differentiated from other terrain by colour alone.
+ *
+ * Every terrain plate is exactly `cellSize` on both axes so neighbouring cells
+ * share their edges exactly and the surface is continuous. There is deliberately
+ * no inset and no per-terrain shrink anywhere: the old "dark ground shows through
+ * as grid gaps" technique is gone, and grid lines are now an independent
+ * presentation layer (the `GridOverlay`).
+ */
+function createGrassVisual(cellSize: number): Group {
   const group = new Group();
-  // Slightly inset so the dark ground shows through as grid gaps.
-  group.add(createPlate(0.96, 0x5cab3f, 0));
+  group.add(createPlate(cellSize, 0x5cab3f, 0));
   return group;
 }
 
-function createPathVisual(): Group {
+/**
+ * Path: a full-cell base recessed by a small vertical step, differentiated by
+ * MATERIAL ONLY.
+ *
+ * The base keeps the FULL footprint, so the step is vertical only (allowed) and
+ * path neighbours still share edges exactly. There is deliberately no raised
+ * inlay: a per-cell shrunken flat pad (the old 0.7 plate) reads as a *smaller
+ * tile*, which is precisely the artefact this layer must not produce. Richer
+ * terrain differentiation belongs to real terrain art (a texture/atlas or a
+ * continuous terrain mesh), not to a per-cell inset.
+ */
+function createPathVisual(cellSize: number): Group {
   const group = new Group();
-  // Recessed base, as before.
-  group.add(createPlate(0.98, 0xc2a76b, -0.03));
-  // Raised inset inlay. This is an OPAQUE geometry cue (a visible bevel/step)
-  // so path reads differently from grass by shape, not colour alone. No custom
-  // shader and no transparency: the depth buffer resolves it.
-  group.add(createPlate(0.7, 0xb08f4f, 0.02));
+  group.add(createPlate(cellSize, 0xc2a76b, -0.03));
   return group;
 }
 
-function createBlockedVisual(): Group {
+/**
+ * Blocked: a full-cell plate plus a rock decoration resting ON the plate. The
+ * rock is smaller, but the ground plate under it is the full cell.
+ */
+function createBlockedVisual(cellSize: number): Group {
   const group = new Group();
-  group.add(createPlate(0.96, 0x454545, 0));
+  group.add(createPlate(cellSize, 0x454545, 0));
   const rock = new Mesh(new IcosahedronGeometry(0.32, 0), material(0x757575));
   rock.position.y = 0.24;
   rock.castShadow = true;
@@ -707,15 +830,37 @@ function createBlockedVisual(): Group {
   return group;
 }
 
-function createWaterVisual(): Group {
+/**
+ * Water: a full-cell plate recessed by a small vertical step (a pond bank), plus
+ * a full-cell shallow sheen on its surface. The recess and the sheen are both
+ * full-footprint, never an inset, so water neighbours share edges exactly. Opaque
+ * on purpose: the depth buffer resolves it, not a transparent pass.
+ */
+function createWaterVisual(cellSize: number): Group {
   const group = new Group();
-  // Recessed opaque water with a lighter raised ripple patch. Opaque on purpose:
-  // the depth buffer resolves it, not a transparent pass.
-  group.add(createPlate(0.98, 0x2f6fb0, -0.06));
-  const ripple = new Mesh(new BoxGeometry(0.5, 0.06, 0.5), material(0x63a9e0));
-  ripple.position.y = -0.03;
-  ripple.receiveShadow = true;
-  group.add(ripple);
+  // Slightly shinier than the land plates: material differentiation that does
+  // not touch the horizontal footprint.
+  const pond = new Mesh(
+    new BoxGeometry(cellSize, 0.2, cellSize),
+    material(0x2f6fb0, { roughness: 0.25, metalness: 0.1 }),
+  );
+  // Top at -0.06, so the box centre is 0.1 below it: a full-footprint vertical
+  // step (a pond bank), not an inset.
+  pond.position.y = -0.16;
+  pond.receiveShadow = true;
+  group.add(pond);
+  // A FULL-cell shallow sheen, not a smaller pad: a per-cell shrunken patch reads
+  // as a shrunken tile (the same artefact the path inlay had). Because it is
+  // full-cell, neighbouring water sheens meet at their edges and the surface stays
+  // continuous.
+  const sheen = new Mesh(
+    new BoxGeometry(cellSize, 0.02, cellSize),
+    material(0x63a9e0, { roughness: 0.15, metalness: 0.05 }),
+  );
+  // Top at -0.04, i.e. 0.02 above the pond surface, so it never z-fights.
+  sheen.position.y = -0.05;
+  sheen.receiveShadow = true;
+  group.add(sheen);
   return group;
 }
 
@@ -776,6 +921,55 @@ function createFallbackVisual(): Group {
   return group;
 }
 
+/**
+ * The independent `GridOverlay` presentation layer: ONE line object plus ONE
+ * reusable cell marker, built once from the grid spec.
+ *
+ * It is deliberately not one object per tile: the cell boundaries are a single
+ * `LineSegments` geometry (a positions buffer of all boundary segments) and the
+ * highlight is a single marker mesh that is re-positioned. Farming / placement /
+ * selection / debug modes will switch this layer on; none of those modes exist
+ * yet, so it is hidden by default and the UI toggle stands in for that switch.
+ *
+ * The whole group is lifted by one layer-wide {@link GRID_OVERLAY_LIFT} in
+ * {@link createThreeRuntime}; the geometry here is authored at local y = 0.
+ */
+function buildGridOverlay(grid: RuntimeGridSpec): {
+  group: Group;
+  line: LineSegments;
+  marker: Mesh;
+} {
+  const group = new Group();
+  group.name = 'GridOverlay';
+
+  const startX = grid.origin.x;
+  const endX = grid.origin.x + grid.width * grid.cellSize;
+  const startZ = grid.origin.z;
+  const endZ = grid.origin.z + grid.depth * grid.cellSize;
+  const positions: number[] = [];
+  for (let i = 0; i <= grid.width; i += 1) {
+    const x = startX + i * grid.cellSize;
+    positions.push(x, 0, startZ, x, 0, endZ);
+  }
+  for (let i = 0; i <= grid.depth; i += 1) {
+    const z = startZ + i * grid.cellSize;
+    positions.push(startX, 0, z, endX, 0, z);
+  }
+  const geometry = new BufferGeometry();
+  geometry.setAttribute('position', new Float32BufferAttribute(positions, 3));
+  const line = new LineSegments(geometry, new LineBasicMaterial({ color: 0xffe08a }));
+  group.add(line);
+
+  const marker = new Mesh(
+    new BoxGeometry(grid.cellSize * 0.96, 0.04, grid.cellSize * 0.96),
+    new MeshBasicMaterial({ color: 0xffd23f }),
+  );
+  marker.visible = false;
+  group.add(marker);
+
+  return { group, line, marker };
+}
+
 /** Animation the placeholder prefabs rest at. Registry data, never read by runtime logic. */
 const IDLE_ANIMATION = 'idle' as AnimationId;
 
@@ -800,10 +994,11 @@ const placeholderMotion: NonNullable<Prefab['motion']> = (
   }
 };
 
-/** Reused across `measureVisualTopY` calls so the measurement does not allocate. */
+/** Reused across `measureVisualTopY`/`measureVisualFootprint` calls so measurement does not allocate. */
 const scratchParentInverse = new Matrix4();
 const scratchTransform = new Matrix4();
 const scratchBox = new Box3();
+const scratchFootprintBox = new Box3();
 
 /**
  * Highest local Y of any mesh in a visual, relative to the node root, measured
@@ -842,6 +1037,55 @@ function measureVisualTopY(visual: Object3D): number {
     top = Math.max(top, scratchBox.max.y);
   });
   return top === Number.NEGATIVE_INFINITY ? 0 : top;
+}
+
+/**
+ * Horizontal footprint (x and z extents) of a visual, measured from the real
+ * geometry and every transform in between, relative to the node root.
+ *
+ * Mirrors {@link measureVisualTopY}: each mesh's full matrix relative to the
+ * root is applied to its geometry AABB, so a nested/rotated decoration and the
+ * catalogue's `scale` on a loaded model all contribute. The node's own
+ * authoritative world transform cancels, so this is the visual's own footprint.
+ *
+ * This is the seamlessness proof: a full-cell terrain plate measures exactly the
+ * grid `cellSize` on both axes, so any per-terrain inset shows up here as a
+ * measured shrink rather than passing inspection unnoticed.
+ */
+function measureVisualFootprint(visual: Object3D): { x: number; z: number } {
+  visual.updateWorldMatrix(true, true);
+  if (visual.parent !== null) {
+    scratchParentInverse.copy(visual.parent.matrixWorld).invert();
+  } else {
+    scratchParentInverse.identity();
+  }
+  let minX = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let minZ = Number.POSITIVE_INFINITY;
+  let maxZ = Number.NEGATIVE_INFINITY;
+  visual.traverse((child) => {
+    if (!(child instanceof Mesh)) {
+      return;
+    }
+    const geometry = child.geometry;
+    if (geometry.boundingBox === null) {
+      geometry.computeBoundingBox();
+    }
+    const box = geometry.boundingBox;
+    if (box === null) {
+      return;
+    }
+    scratchTransform.multiplyMatrices(scratchParentInverse, child.matrixWorld);
+    scratchFootprintBox.copy(box).applyMatrix4(scratchTransform);
+    minX = Math.min(minX, scratchFootprintBox.min.x);
+    maxX = Math.max(maxX, scratchFootprintBox.max.x);
+    minZ = Math.min(minZ, scratchFootprintBox.min.z);
+    maxZ = Math.max(maxZ, scratchFootprintBox.max.z);
+  });
+  if (minX === Number.POSITIVE_INFINITY || minZ === Number.POSITIVE_INFINITY) {
+    return { x: 0, z: 0 };
+  }
+  return { x: maxX - minX, z: maxZ - minZ };
 }
 
 /**
@@ -980,12 +1224,26 @@ function normalizeYawDegrees(degrees: number): number {
  */
 export function createThreeRuntime(options: {
   bounds: RuntimeWorldBounds;
+  /**
+   * Grid spec the terrain footprint and the `GridOverlay` are built from. When
+   * omitted the runtime derives the default grid from `bounds` with
+   * {@link DEFAULT_CELL_SIZE}; the real client passes its view-model grid through
+   * so a non-default `cellSize`/origin is honoured.
+   */
+  grid?: RuntimeGridSpec;
   /** Injectable model loader; defaults to the real `GLTFLoader` (`loadGlbTemplate`). */
   loadModel?: ModelLoader;
   /** Injectable asset catalogue; defaults to `MODEL_CATALOGUE`. */
   catalogue?: AppearanceModelCatalogue;
 }): RenderRuntime {
   const bounds = options.bounds;
+  const cellSize = options.grid?.cellSize ?? DEFAULT_CELL_SIZE;
+  const grid: RuntimeGridSpec = options.grid ?? {
+    origin: { ...bounds.min },
+    width: Math.max(0, Math.round((bounds.max.x - bounds.min.x) / cellSize)),
+    depth: Math.max(0, Math.round((bounds.max.z - bounds.min.z) / cellSize)),
+    cellSize,
+  };
   const worldWidth = bounds.max.x - bounds.min.x;
   const worldDepth = bounds.max.z - bounds.min.z;
   const worldCenterX = (bounds.min.x + bounds.max.x) / 2;
@@ -1018,7 +1276,9 @@ export function createThreeRuntime(options: {
   // realisation swaps behind, keyed off the same bucket the ISA already implies.
   const buckets = new Map<string, Set<NodeId>>();
 
-  // Scene graph: WorldRoot -> { Terrain, WorldObjects, Actors, Effects }.
+  // Scene graph: WorldRoot -> { Terrain, WorldObjects, Actors, Effects, GridOverlay }.
+  // GridOverlay is a presentation layer, not a prefab group: `inspect().groups`
+  // counts only the four prefab groups, and the overlay is reported separately.
   const worldRoot = new Group();
   worldRoot.name = 'WorldRoot';
   const groups: Record<PrefabGroup, Group> = {
@@ -1032,6 +1292,15 @@ export function createThreeRuntime(options: {
     worldRoot.add(group);
   }
   scene.add(worldRoot);
+
+  // Independent grid-layer state (hidden by default). The group itself is built
+  // ONCE here from the grid spec and is never rebuilt per frame or per tile.
+  let gridOverlay: ReturnType<typeof buildGridOverlay> | null = buildGridOverlay(grid);
+  gridOverlay.group.position.y = groundY + GRID_OVERLAY_LIFT;
+  gridOverlay.group.visible = false;
+  worldRoot.add(gridOverlay.group);
+  let gridOverlayVisible = false;
+  let highlightedCell: { x: number; z: number } | null = null;
 
   const cameraRig = new Group();
   cameraRig.name = 'CameraRig';
@@ -1276,6 +1545,9 @@ export function createThreeRuntime(options: {
     // The shadow measurement now reads back the intent applied just above.
     const shadowFlags = measureShadowFlags(wrapper);
     node.visualTopY = measureVisualTopY(wrapper);
+    const footprint = measureVisualFootprint(wrapper);
+    node.footprintX = footprint.x;
+    node.footprintZ = footprint.z;
     node.castsShadow = shadowFlags.castsShadow;
     node.receivesShadow = shadowFlags.receivesShadow;
   }
@@ -1290,12 +1562,13 @@ export function createThreeRuntime(options: {
     const prefab = prefabFor(command.appearance);
     const asset = catalogue[command.appearance];
     const root = new Group();
-    const visual = prefab.createVisual();
+    const visual = prefab.createVisual(cellSize);
     root.add(visual);
     // Coarse draw order only; the depth buffer resolves real occlusion.
     root.renderOrder = LAYER_RENDER_ORDER[command.layer];
     groups[prefab.group].add(root);
     const shadowFlags = measureShadowFlags(visual);
+    const footprint = measureVisualFootprint(visual);
     const node: RuntimeNode = {
       root,
       visual,
@@ -1308,6 +1581,8 @@ export function createThreeRuntime(options: {
       defaultAnimation: prefab.defaultAnimation,
       motion: prefab.motion,
       visualTopY: measureVisualTopY(visual),
+      footprintX: footprint.x,
+      footprintZ: footprint.z,
       ownsVisual: true,
       modelState: asset === undefined ? 'placeholder' : 'loading',
       visualToken: 0,
@@ -1351,7 +1626,7 @@ export function createThreeRuntime(options: {
     releaseOwnedVisual(node);
     // Invalidate any in-flight load for the retired appearance.
     node.visualToken += 1;
-    node.visual = prefab.createVisual();
+    node.visual = prefab.createVisual(cellSize);
     node.ownsVisual = true;
     node.root.add(node.visual);
     if (node.group !== prefab.group) {
@@ -1363,6 +1638,9 @@ export function createThreeRuntime(options: {
     node.defaultAnimation = prefab.defaultAnimation;
     node.motion = prefab.motion;
     node.visualTopY = measureVisualTopY(node.visual);
+    const footprint = measureVisualFootprint(node.visual);
+    node.footprintX = footprint.x;
+    node.footprintZ = footprint.z;
     node.modelState = asset === undefined ? 'placeholder' : 'loading';
     node.castsShadow = shadowFlags.castsShadow;
     node.receivesShadow = shadowFlags.receivesShadow;
@@ -1546,6 +1824,9 @@ export function createThreeRuntime(options: {
         group: node.group,
         renderOrder: node.root.renderOrder,
         world: { x: worldPosition.x, y: worldPosition.y, z: worldPosition.z },
+        scale: { x: node.root.scale.x, y: node.root.scale.y, z: node.root.scale.z },
+        footprintX: node.footprintX,
+        footprintZ: node.footprintZ,
         rotation: {
           x: worldRotation.x,
           y: worldRotation.y,
@@ -1571,7 +1852,7 @@ export function createThreeRuntime(options: {
       lights: lights.length,
       ground: ground !== null,
       background: scene.background instanceof Color ? scene.background.getHex() : null,
-      groups: worldRoot.children.length,
+      groups: Object.values(groups).filter((group) => group.parent === worldRoot).length,
       shadow:
         sun === null
           ? null
@@ -1599,6 +1880,25 @@ export function createThreeRuntime(options: {
       buckets: [...buckets.entries()]
         .map(([key, set]) => ({ key, count: set.size }))
         .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)),
+      gridOverlay:
+        gridOverlay === null
+          ? {
+              visible: false,
+              highlightedCell: null,
+              lineObjectCount: 0,
+              highlightMarkerCount: 0,
+            }
+          : {
+              visible: gridOverlayVisible,
+              highlightedCell:
+                highlightedCell === null ? null : { ...highlightedCell },
+              lineObjectCount: gridOverlay.group.children.filter(
+                (child) => child instanceof LineSegments,
+              ).length,
+              highlightMarkerCount: gridOverlay.group.children.filter(
+                (child) => child instanceof Mesh,
+              ).length,
+            },
     };
   }
 
@@ -1691,11 +1991,43 @@ export function createThreeRuntime(options: {
     reframe();
   }
 
+  /** Show or hide the independent grid layer (hidden by default). */
+  function setGridOverlayVisible(visible: boolean): void {
+    if (gridOverlay === null) {
+      return;
+    }
+    gridOverlayVisible = visible;
+    gridOverlay.group.visible = visible;
+  }
+
+  /**
+   * Record a highlighted grid cell and move the single reusable marker to its
+   * world centre, or hide the marker with `null`. The cell is plain grid data; no
+   * gameplay meaning is attached to it in the runtime.
+   */
+  function setHighlightedCell(cell: { x: number; z: number } | null): void {
+    highlightedCell = cell === null ? null : { x: cell.x, z: cell.z };
+    if (gridOverlay === null) {
+      return;
+    }
+    const marker = gridOverlay.marker;
+    if (highlightedCell === null) {
+      marker.visible = false;
+      return;
+    }
+    marker.position.set(
+      grid.origin.x + (highlightedCell.x + 0.5) * grid.cellSize,
+      0,
+      grid.origin.z + (highlightedCell.z + 0.5) * grid.cellSize,
+    );
+    marker.visible = true;
+  }
+
   // Reused across picks so a drag/click loop does not allocate per query.
   const raycaster = new Raycaster();
   const pickNdc = new Vector2();
   // The mathematical ground plane at the world's floor; independent of the tile
-  // plates and their deliberate inset gaps.
+  // plates, which are full-footprint and seamless by construction.
   const groundPlane = new Plane(new Vector3(0, 1, 0), -groundY);
   const groundHit = new Vector3();
 
@@ -1776,6 +2108,20 @@ export function createThreeRuntime(options: {
       group.clear();
       worldRoot.remove(group);
     }
+    if (gridOverlay !== null) {
+      // The overlay is presentation-only but owns real GPU resources; release
+      // them rather than only detaching the group with the rest of WorldRoot.
+      worldRoot.remove(gridOverlay.group);
+      gridOverlay.line.geometry.dispose();
+      released.geometries += 1;
+      accumulateRelease(releaseMaterial(gridOverlay.line.material));
+      gridOverlay.marker.geometry.dispose();
+      released.geometries += 1;
+      accumulateRelease(releaseMaterial(gridOverlay.marker.material));
+      gridOverlay = null;
+    }
+    gridOverlayVisible = false;
+    highlightedCell = null;
     scene.remove(worldRoot);
 
     if (ground !== null) {
@@ -1826,6 +2172,8 @@ export function createThreeRuntime(options: {
     getCameraState,
     setCameraOrientation,
     setZoom,
+    setGridOverlayVisible,
+    setHighlightedCell,
     pick,
     inspect,
     dispose,

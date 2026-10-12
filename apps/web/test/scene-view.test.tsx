@@ -169,6 +169,8 @@ function createRecordingRuntime(): RecordingRuntime {
       recorder.zoomCalls.push(zoom);
       cameraState.zoom = zoom;
     },
+    setGridOverlayVisible: () => {},
+    setHighlightedCell: () => {},
     pick: (x, y) => {
       recorder.pickCalls.push({ x, y });
       return recorder.pickResult;
@@ -197,6 +199,12 @@ function createRecordingRuntime(): RecordingRuntime {
       },
       nodes: [],
       buckets: [],
+      gridOverlay: {
+        visible: false,
+        highlightedCell: null,
+        lineObjectCount: 0,
+        highlightMarkerCount: 0,
+      },
     }),
     dispose: () => {
       recorder.disposeCalls += 1;
@@ -374,7 +382,7 @@ describe('SceneView wiring', () => {
     await waitFor(() => {
       expect(recorder.mountCalls).toBe(1);
     });
-    expect(recorder.options).toEqual({ bounds: BOUNDS });
+    expect(recorder.options).toEqual({ bounds: BOUNDS, grid: GRID });
   });
 
   it('pushes transform.setTarget after the controlled actor moves', async () => {
@@ -481,7 +489,7 @@ describe('SceneView wiring', () => {
       expect(set.runtimes).toHaveLength(1);
     });
     const first = set.runtimes[0];
-    expect(first.options).toEqual({ bounds: BOUNDS });
+    expect(first.options).toEqual({ bounds: BOUNDS, grid: GRID });
     // The new world is pushed through the bridge into the first runtime.
     expect(first.frames.some((frame) => frameHasType(frame, 'node.create'))).toBe(true);
     expect(first.disposeCalls).toBe(0);
@@ -509,7 +517,7 @@ describe('SceneView wiring', () => {
     expect(first.disposeCalls).toBe(1);
 
     const second = set.runtimes[1];
-    expect(second.options).toEqual({ bounds: smallerBounds });
+    expect(second.options).toEqual({ bounds: smallerBounds, grid: GRID });
     expect(second.mountCalls).toBe(1);
     // The scene is not left doubled: the live runtime is the second one, and the
     // swap reset the bridge and re-pushed the new world (fresh `node.create`).

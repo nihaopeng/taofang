@@ -23,10 +23,12 @@
  * The runtime needs the authoritative world AABB so its orthographic frustum
  * fits the WORLD now, not a tile count. `WorldState.bounds` is that source; tiles
  * already arrive at their world positions, so nothing render-side needs the
- * gameplay grid (`WorldState.grid` has no render consumer and is not passed).
- * Until the bounds are known (`bounds === null`) the canvas renders but no
- * runtime is created. If the world reloads with different bounds, the effect
- * re-runs and a runtime for the new bounds replaces the old one.
+ * gameplay grid to place them. The grid spec IS passed, however, because the
+ * runtime builds its terrain footprint and its `GridOverlay` layer from
+ * `cellSize`/`origin`. Until the bounds/grid are known (`bounds === null`) the
+ * canvas renders but no runtime is created. If the world reloads with different
+ * bounds or grid, the effect re-runs and a runtime for the new spec replaces the
+ * old one.
  *
  * Lifecycle
  * ---------
@@ -51,15 +53,23 @@ import { useEffect, useRef } from 'react';
 import type { MutableRefObject, PointerEvent as ReactPointerEvent } from 'react';
 
 import { interact, moveTo, useWorld } from '../organizer';
-import type { BoundsViewModel } from '../organizer';
+import type { BoundsViewModel, GridViewModel } from '../organizer';
 import { controlledActorNodeId, createRenderBridge, entityIdOfNodeId } from '../render/bridge';
 import type { RenderBridge } from '../render/bridge';
 import { createThreeRuntime } from '../render/three/runtime';
 import type { RenderRuntime } from '../render/three/runtime';
 
-/** Authoritative world extent handed to the runtime factory. */
+/**
+ * Authoritative world extent and grid handed to the runtime factory.
+ *
+ * `grid` is presentation-relevant now: the runtime builds its terrain plates and
+ * its `GridOverlay` from it, so a non-default `cellSize`/origin is honoured. It is
+ * still just a world fact (the frozen grid -> world formula lives in the
+ * Organizer), not a gameplay rule.
+ */
 export interface SceneViewOptions {
   bounds: BoundsViewModel;
+  grid: GridViewModel;
 }
 
 /** One wheel notch's zoom factor. */
@@ -244,18 +254,26 @@ export function SceneView(props: {
   }
 
   const bounds = state.bounds;
-  // A stable primitive key: a stream snapshot replaces `bounds` with a fresh but
-  // equal object, and that must not tear down and rebuild the whole runtime.
+  const grid = state.grid;
+  // A stable primitive key: a stream snapshot replaces `bounds`/`grid` with fresh
+  // but equal objects, and that must not tear down and rebuild the whole runtime.
   const boundsKey =
     bounds === null
       ? null
       : `${bounds.min.x},${bounds.min.y},${bounds.min.z},${bounds.max.x},${bounds.max.y},${bounds.max.z}`;
+  const gridKey =
+    grid === null
+      ? null
+      : `${grid.origin.x},${grid.origin.y},${grid.origin.z},${grid.width},${grid.depth},${grid.cellSize}`;
+  const runtimeKey =
+    boundsKey === null || gridKey === null ? null : `${boundsKey}|${gridKey}`;
 
   useEffect(() => {
     const currentBounds = stateRef.current.bounds;
+    const currentGrid = stateRef.current.grid;
     const canvas = canvasRef.current;
     const bridge = bridgeRef.current;
-    if (boundsKey === null || currentBounds === null) {
+    if (runtimeKey === null || currentBounds === null || currentGrid === null) {
       return undefined;
     }
     if (canvas === null || bridge === null) {
@@ -263,9 +281,11 @@ export function SceneView(props: {
     }
 
     const factory = createRuntimeRef.current;
-    const options: SceneViewOptions = { bounds: currentBounds };
+    const options: SceneViewOptions = { bounds: currentBounds, grid: currentGrid };
     const runtime =
-      factory !== undefined ? factory(options) : createThreeRuntime({ bounds: currentBounds });
+      factory !== undefined
+        ? factory(options)
+        : createThreeRuntime({ bounds: currentBounds, grid: currentGrid });
 
     runtimeRef.current = runtime;
     runtime.mount(canvas);
@@ -280,7 +300,7 @@ export function SceneView(props: {
       runtimeRef.current = null;
       runtime.dispose();
     };
-  }, [boundsKey]);
+  }, [runtimeKey]);
 
   useEffect(() => {
     const runtime = runtimeRef.current;

@@ -45,6 +45,8 @@ vi.mock('../src/render/three/runtime.ts', () => ({
     }),
     setCameraOrientation: () => {},
     setZoom: () => {},
+    setGridOverlayVisible: () => {},
+    setHighlightedCell: () => {},
     pick: () => null,
     inspect: () => ({
       mounted: false,
@@ -68,6 +70,12 @@ vi.mock('../src/render/three/runtime.ts', () => ({
       },
       nodes: [],
       buckets: [],
+      gridOverlay: {
+        visible: false,
+        highlightedCell: null,
+        lineObjectCount: 1,
+        highlightMarkerCount: 1,
+      },
     }),
     dispose: () => {},
   }),

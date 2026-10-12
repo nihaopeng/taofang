@@ -40,6 +40,7 @@ import type {
 import { BRIDGE_APPEARANCES } from '../src/render/bridge.ts';
 import { asAppearanceId } from '../src/render/three/assets.ts';
 import {
+  DEFAULT_CELL_SIZE,
   KNOWN_APPEARANCES,
   RENDER_CAMERA,
   createThreeRuntime,
@@ -458,6 +459,20 @@ describe('three runtime depth and occlusion', () => {
     runtime.dispose();
   });
 
+  it('reports an exact unit scale for every node in a normal frame', () => {
+    const runtime = makeRuntime();
+    runtime.apply(makeWorldFrame());
+
+    // The bridge sends UNIT_SCALE for every node, and the runtime must not invent
+    // a per-node/per-terrain scale. Any anomalous scale would break this, and a
+    // scale is exactly what would fake a per-terrain footprint change.
+    for (const node of runtime.inspect().nodes) {
+      expect(node.scale).toEqual({ x: 1, y: 1, z: 1 });
+    }
+
+    runtime.dispose();
+  });
+
   it('resolves occlusion along the real camera view axis from real world positions', () => {
     const runtime = makeRuntime();
     runtime.apply(makeWorldFrame());
@@ -802,8 +817,8 @@ describe('three runtime buckets', () => {
   });
 });
 
-describe('three runtime terrain shape cue', () => {
-  it('gives path an opaque geometric cue beyond colour: a raised inlay taller than grass', () => {
+describe('three runtime terrain differentiation (phase 9)', () => {
+  it('differentiates path by a full-cell recessed step, never by a shrunken raised pad', () => {
     const runtime = makeRuntime();
     runtime.apply([
       createCommand('tile:0,0' as NodeId, 'base', appearanceGrass, { x: 0, y: 0, z: 0 }),
@@ -812,8 +827,202 @@ describe('three runtime terrain shape cue', () => {
 
     const grass = findNode(runtime, 'tile:0,0' as NodeId);
     const path = findNode(runtime, 'tile:1,0' as NodeId);
+
+    // The allowed cue is a VERTICAL step on a FULL-cell plate (path is paved slightly
+    // below the grass). A per-cell raised inlay (the old `cellSize * 0.7` plate) is
+    // forbidden: a shrunken flat pad inside every cell reads as a smaller tile, which
+    // is exactly the artefact phase 9 removed. This assertion also fails if such a pad
+    // is reintroduced, because the pad would raise `visualTopY` above the grass surface.
     expect(grass.visualTopY).toBeCloseTo(0, 6);
-    expect(path.visualTopY).toBeGreaterThan(grass.visualTopY);
+    expect(path.visualTopY).toBeLessThan(grass.visualTopY);
+
+    // ...and neither cue may touch the horizontal footprint, so neighbours share edges.
+    expect(grass.footprintX).toBeCloseTo(DEFAULT_CELL_SIZE, 6);
+    expect(grass.footprintZ).toBeCloseTo(DEFAULT_CELL_SIZE, 6);
+    expect(path.footprintX).toBeCloseTo(DEFAULT_CELL_SIZE, 6);
+    expect(path.footprintZ).toBeCloseTo(DEFAULT_CELL_SIZE, 6);
+
+    runtime.dispose();
+  });
+});
+
+describe('three runtime seamless terrain footprint (phase 9)', () => {
+  const TERRAIN_APPEARANCES = [
+    appearanceGrass,
+    appearancePath,
+    appearanceBlocked,
+    appearanceWater,
+  ];
+
+  it('measures every terrain plate at exactly cellSize on both axes (no inset)', () => {
+    const runtime = makeRuntime();
+    const frame: RenderFrame = TERRAIN_APPEARANCES.map((appearance, index) =>
+      createCommand(`tile:${index},0` as NodeId, 'base', appearance, {
+        x: index,
+        y: 0,
+        z: 0,
+      }),
+    );
+    runtime.apply(frame);
+
+    for (const appearance of TERRAIN_APPEARANCES) {
+      const node = runtime
+        .inspect()
+        .nodes.find((candidate) => candidate.appearance === appearance);
+      if (node === undefined) {
+        throw new Error(`terrain ${appearance} was not created`);
+      }
+      // Measured off the real geometry, never the intended value: reintroducing
+      // any per-terrain inset (the old 0.96 / 0.98 / 0.70 footprint plates) makes
+      // this fail, which is the "no shrink, no seams" proof.
+      expect(node.footprintX).toBeCloseTo(DEFAULT_CELL_SIZE, 6);
+      expect(node.footprintZ).toBeCloseTo(DEFAULT_CELL_SIZE, 6);
+    }
+
+    runtime.dispose();
+  });
+
+  it('honours a non-default grid cellSize for the terrain footprint', () => {
+    const cellSize = 2;
+    const runtime = createThreeRuntime({
+      bounds: BOUNDS,
+      grid: { origin: { x: -6, y: 0, z: -6 }, width: 6, depth: 6, cellSize },
+    });
+    runtime.apply([
+      createCommand('tile:0,0' as NodeId, 'base', appearanceGrass, { x: 0, y: 0, z: 0 }),
+      createCommand('tile:1,0' as NodeId, 'base', appearancePath, {
+        x: cellSize,
+        y: 0,
+        z: 0,
+      }),
+    ]);
+
+    for (const node of runtime.inspect().nodes) {
+      expect(node.footprintX).toBeCloseTo(cellSize, 6);
+      expect(node.footprintZ).toBeCloseTo(cellSize, 6);
+    }
+
+    runtime.dispose();
+  });
+});
+
+describe('three runtime grid overlay (phase 9)', () => {
+  /** 100 grass tiles, plus the world, so the overlay is provably not per-tile. */
+  function hundredTileFrame(): RenderFrame {
+    const frame: NodeCreateCommand[] = [];
+    for (let cellZ = 0; cellZ < 10; cellZ += 1) {
+      for (let cellX = 0; cellX < 10; cellX += 1) {
+        frame.push(
+          createCommand(
+            `tile:${cellX},${cellZ}` as NodeId,
+            'base',
+            appearanceGrass,
+            { x: cellX - 5, y: 0, z: cellZ - 5 },
+          ),
+        );
+      }
+    }
+    return frame;
+  }
+
+  it('is hidden by default and toggles visibility through the runtime API', () => {
+    const runtime = makeRuntime();
+    expect(runtime.inspect().gridOverlay.visible).toBe(false);
+
+    runtime.setGridOverlayVisible(true);
+    expect(runtime.inspect().gridOverlay.visible).toBe(true);
+
+    runtime.setGridOverlayVisible(false);
+    expect(runtime.inspect().gridOverlay.visible).toBe(false);
+
+    runtime.dispose();
+  });
+
+  it('records a highlighted cell and clears it with null', () => {
+    const runtime = makeRuntime();
+    expect(runtime.inspect().gridOverlay.highlightedCell).toBeNull();
+
+    runtime.setHighlightedCell({ x: 3, z: -2 });
+    expect(runtime.inspect().gridOverlay.highlightedCell).toEqual({ x: 3, z: -2 });
+
+    runtime.setHighlightedCell(null);
+    expect(runtime.inspect().gridOverlay.highlightedCell).toBeNull();
+
+    runtime.dispose();
+  });
+
+  it('holds exactly one line object and one marker regardless of tile count', () => {
+    const runtime = makeRuntime();
+    runtime.apply(hundredTileFrame());
+
+    // 100 terrain nodes exist, yet the overlay is still one line object plus one
+    // reusable marker: it is built from the grid spec, not from the tiles. A
+    // per-tile implementation would report 100 here.
+    expect(runtime.inspect().nodes).toHaveLength(100);
+    const overlay = runtime.inspect().gridOverlay;
+    expect(overlay.lineObjectCount).toBe(1);
+    expect(overlay.highlightMarkerCount).toBe(1);
+
+    runtime.dispose();
+  });
+
+  it('releases the overlay resources on dispose', () => {
+    const runtime = makeRuntime();
+    const geometriesBefore = runtime.inspect().released.geometries;
+
+    runtime.dispose();
+
+    const after = runtime.inspect();
+    expect(after.gridOverlay.visible).toBe(false);
+    expect(after.gridOverlay.highlightedCell).toBeNull();
+    expect(after.gridOverlay.lineObjectCount).toBe(0);
+    expect(after.gridOverlay.highlightMarkerCount).toBe(0);
+    // The line geometry and the marker geometry were actually released, not only
+    // detached with WorldRoot.
+    expect(after.released.geometries).toBeGreaterThanOrEqual(geometriesBefore + 2);
+  });
+});
+
+describe('three runtime rotation stability (phase 9)', () => {
+  it('holds a valid frustum, exact pitch, zoom, focus and an affine projection across a full yaw sweep', () => {
+    const runtime = makeRuntime();
+    const focus = runtime.inspect().camera.focus;
+    const zoom = runtime.getCameraState().zoom;
+
+    for (let yaw = 0; yaw < 360; yaw += 15) {
+      runtime.setCameraOrientation({ yawDegrees: yaw });
+      const camera = runtime.inspect().camera;
+
+      // A valid frustum at every yaw: no inverted/near-zero bounds.
+      expect(camera.left).toBeLessThan(camera.right);
+      expect(camera.bottom).toBeLessThan(camera.top);
+      // Rotation never drifts the pitch, zoom or focus.
+      expect(camera.pitchDegrees).toBe(RENDER_CAMERA.pitchDegrees);
+      expect(runtime.getCameraState().pitchDegrees).toBe(RENDER_CAMERA.pitchDegrees);
+      expect(camera.zoom).toBe(zoom);
+      expect(camera.focus).toEqual(focus);
+
+      // The projection is affine: equal NDC steps map to equal world steps on
+      // the ground, on both axes, at every yaw (a perspective camera would not).
+      const first = runtime.pick(0, 0);
+      const second = runtime.pick(0.2, 0);
+      const third = runtime.pick(0.4, 0);
+      expect(first?.kind).toBe('ground');
+      expect(second?.kind).toBe('ground');
+      expect(third?.kind).toBe('ground');
+      if (first?.kind === 'ground' && second?.kind === 'ground' && third?.kind === 'ground') {
+        expect(second.point.x - first.point.x).toBeCloseTo(third.point.x - second.point.x, 5);
+        expect(second.point.z - first.point.z).toBeCloseTo(third.point.z - second.point.z, 5);
+      }
+    }
+
+    // Explicitly pin the cardinal yaws named by the acceptance contract.
+    for (const yaw of [90, 180, 270]) {
+      runtime.setCameraOrientation({ yawDegrees: yaw });
+      const camera = runtime.inspect().camera;
+      expect(camera.pitchDegrees).toBe(RENDER_CAMERA.pitchDegrees);
+      expect(runtime.getCameraState().yawDegrees).toBe(yaw);
+    }
 
     runtime.dispose();
   });

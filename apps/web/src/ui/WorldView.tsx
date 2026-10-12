@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { loadWorld, setMovementIntent, useWorld } from '../organizer';
 import type { StreamStatus } from '../organizer';
@@ -54,6 +54,12 @@ const KEY_TO_YAW_STEP: Readonly<Record<string, number | undefined>> = {
   E: CAMERA_ROTATE_STEP_DEGREES,
 };
 
+/**
+ * Physical keys that toggle the presentation-only grid overlay. Documented as a
+ * stand-in for the future farming/placement/selection/debug mode switch.
+ */
+const GRID_TOGGLE_KEYS: ReadonlySet<string> = new Set(['g', 'G']);
+
 /** Short, user-presentable label for the realtime stream lifecycle. */
 const STREAM_LABEL: Readonly<Record<StreamStatus, string>> = {
   idle: 'Stream idle',
@@ -90,6 +96,20 @@ export function WorldView() {
   const { status, entities, controlledActorId, error, notice, streamStatus } = state;
   const runtimeRef = useRef<RenderRuntime | null>(null);
 
+  // The grid overlay is an independent presentation layer that is HIDDEN by
+  // default. This toggle stands in for the future farming/placement/selection/
+  // debug mode switch; those modes do not exist yet, so nothing else turns it on.
+  const [gridOverlayVisible, setGridOverlayVisible] = useState(false);
+  const gridOverlayVisibleRef = useRef(false);
+  const applyGridOverlayVisible = useCallback((visible: boolean) => {
+    gridOverlayVisibleRef.current = visible;
+    setGridOverlayVisible(visible);
+    runtimeRef.current?.setGridOverlayVisible(visible);
+  }, []);
+  const toggleGridOverlay = useCallback(() => {
+    applyGridOverlayVisible(!gridOverlayVisibleRef.current);
+  }, [applyGridOverlayVisible]);
+
   // Movement is only meaningful once an authoritative controlled actor exists.
   const canMove = status === 'ready' && controlledActorId !== null;
   const canMoveRef = useRef(canMove);
@@ -120,6 +140,12 @@ export function WorldView() {
     const handleKeyDown = (event: KeyboardEvent): void => {
       // Let browser/OS shortcuts through untouched.
       if (event.ctrlKey || event.metaKey || event.altKey) {
+        return;
+      }
+      if (GRID_TOGGLE_KEYS.has(event.key)) {
+        // Presentation-only: toggles the grid layer, never a gameplay intent.
+        event.preventDefault();
+        toggleGridOverlay();
         return;
       }
       const yawStep = KEY_TO_YAW_STEP[event.key];
@@ -173,7 +199,14 @@ export function WorldView() {
       window.removeEventListener('blur', handleBlur);
       controller?.releaseAll();
     };
-  }, []);
+  }, [toggleGridOverlay]);
+
+  // Keep the runtime's grid layer in sync with the presentational toggle. The
+  // runtime is created by the child `SceneView`, whose effect runs first, so when
+  // the world becomes ready this re-applies the (default hidden) state to it.
+  useEffect(() => {
+    runtimeRef.current?.setGridOverlayVisible(gridOverlayVisibleRef.current);
+  }, [state]);
 
   // The controlled entity is the one linked to the controlled actor. It is
   // derived from Organizer state; the UI invents no identity of its own.
@@ -270,6 +303,16 @@ export function WorldView() {
       <p className="world__rotate-hint" data-testid="rotate-hint">
         Rotate view: Q / E
       </p>
+
+      <button
+        className="world__control world__grid-toggle"
+        type="button"
+        aria-pressed={gridOverlayVisible}
+        data-testid="grid-toggle"
+        onClick={toggleGridOverlay}
+      >
+        Grid overlay: {gridOverlayVisible ? 'On' : 'Off'}
+      </button>
     </section>
   );
 }

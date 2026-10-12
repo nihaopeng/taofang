@@ -46,6 +46,8 @@ const mockRuntime = vi.hoisted(() => ({
   frames: [] as RenderFrame[],
   mountCalls: 0,
   yawDegrees: 0,
+  gridOverlayVisible: false,
+  gridOverlayCalls: [] as boolean[],
 }));
 
 // Replace the WebGL runtime with a recording no-op so mounting `<App />` /
@@ -72,6 +74,11 @@ vi.mock('../src/render/three/runtime.ts', () => ({
       }
     },
     setZoom: () => {},
+    setGridOverlayVisible: (visible: boolean) => {
+      mockRuntime.gridOverlayVisible = visible;
+      mockRuntime.gridOverlayCalls.push(visible);
+    },
+    setHighlightedCell: () => {},
     pick: () => null,
     inspect: () => ({
       mounted: false,
@@ -97,6 +104,12 @@ vi.mock('../src/render/three/runtime.ts', () => ({
       },
       nodes: [],
       buckets: [],
+      gridOverlay: {
+        visible: mockRuntime.gridOverlayVisible,
+        highlightedCell: null,
+        lineObjectCount: 1,
+        highlightMarkerCount: 1,
+      },
     }),
     dispose: () => {},
   }),
@@ -249,6 +262,8 @@ beforeEach(() => {
   mockRuntime.frames.length = 0;
   mockRuntime.mountCalls = 0;
   mockRuntime.yawDegrees = 0;
+  mockRuntime.gridOverlayVisible = false;
+  mockRuntime.gridOverlayCalls.length = 0;
   resetGameInfoState();
   resetGameInfoFetch();
   resetWorldState();
@@ -632,5 +647,34 @@ describe('WorldView rejected-intent notice', () => {
     render(<WorldView />);
 
     expect(screen.queryByTestId('world-notice')).toBeNull();
+  });
+});
+
+describe('WorldView grid overlay toggle', () => {
+  it('hides the grid overlay by default and toggles it with G and the control', async () => {
+    await loadValidWorld();
+
+    render(<WorldView />);
+    await waitFor(() => {
+      expect(mockRuntime.mountCalls).toBe(1);
+    });
+
+    // Default is hidden: the layer is presentation-only and stays off until a
+    // future mode (or this stand-in toggle) turns it on.
+    expect(mockRuntime.gridOverlayVisible).toBe(false);
+    const toggle = screen.getByTestId('grid-toggle');
+    expect(toggle.getAttribute('aria-pressed')).toBe('false');
+    expect(toggle.textContent).toContain('Off');
+
+    // The G key switches it on.
+    pressKey('g');
+    expect(mockRuntime.gridOverlayVisible).toBe(true);
+    expect(screen.getByTestId('grid-toggle').getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByTestId('grid-toggle').textContent).toContain('On');
+
+    // The control switches it back off, and forwards the state to the runtime.
+    fireEvent.click(screen.getByTestId('grid-toggle'));
+    expect(mockRuntime.gridOverlayVisible).toBe(false);
+    expect(screen.getByTestId('grid-toggle').getAttribute('aria-pressed')).toBe('false');
   });
 });
