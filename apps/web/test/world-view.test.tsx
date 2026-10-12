@@ -68,7 +68,7 @@ vi.mock('../src/render/three/runtime.ts', () => ({
       zoom: 1,
       focus: { x: 0, y: 0, z: 0 },
     }),
-    setCameraOrientation: (orientation: { pitchDegrees?: number; yawDegrees?: number }) => {
+    setCameraOrientation: (orientation: { yawDegrees?: number }) => {
       if (orientation.yawDegrees !== undefined) {
         mockRuntime.yawDegrees = orientation.yawDegrees;
       }

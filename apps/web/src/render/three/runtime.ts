@@ -28,21 +28,22 @@
  *
  * CameraRig (the only place "2.5D" is allowed to live)
  * ---------------------------------------------------
- * The rig owns follow + smoothing, a **constrained** pitch, free yaw, and zoom.
- * It is deliberately a **narrow-FOV perspective** camera (phase 11): the tilt and
- * the narrow FOV give a gentle near-large/far-small read without a strong
- * third-person look. Wave C makes the view a **pure orbit**: the camera DISTANCE
- * is fixed per aspect/zoom (no yaw dolly), and the FOV is derived per yaw from
- * the bounds fit so the composition is preserved while the foreshortening stays
- * constant. The world model, the Actor motion model, and the Render ISA
- * carry no projection assumption, so the rig remains the *only* module that knows
- * how the scene is projected. Yaw rotates the rig (and therefore the view); it
- * never changes the world coordinate system.
+ * The rig owns follow + smoothing, a **fixed** pitch, free yaw, and zoom. It is
+ * deliberately a **narrow-FOV perspective** camera (phase 11): the tilt and the
+ * narrow FOV give a gentle near-large/far-small read without a strong
+ * third-person look. Phase 11 Wave D makes the view a **pure orbit with an
+ * unchanging projection**: the pitch is a single fixed constant (no adjustable
+ * path), and the FOV is a fixed constant, with the camera DISTANCE fixed from
+ * the worst-case yaw fit. Neither the distance nor the projection depends on
+ * yaw, so rotating cannot dolly or zoom. The world model, the Actor motion model,
+ * and the Render ISA carry no projection assumption, so the rig remains the
+ * *only* module that knows how the scene is projected. Yaw rotates the rig (and
+ * therefore the view); it never changes the world coordinate system.
  *
  * `inspect()` exposes the rig as plain data (`pitchDegrees`, `yawDegrees`,
  * `zoom`, the honest perspective frustum — `fovDegrees`/`near`/`far`/`aspect` —
- * and the camera's world position/forward/up) so tests can assert pitch clamping,
- * yaw view changes, and zoom extent numerically.
+ * and the camera's world position/forward/up) so tests can assert the fixed
+ * pitch, yaw view changes, and zoom extent numerically.
  *
  * Layer / depth / occlusion (frozen policy)
  * ----------------------------------------
@@ -417,10 +418,11 @@ export interface RenderRuntime {
   /** Read the rig state as plain data (yaw is what camera-relative input needs). */
   getCameraState(): CameraState;
   /**
-   * Set the rig's pitch and/or yaw. Pitch is clamped to the rig's limits; yaw is
+   * Set the rig's yaw. Pitch is a fixed composition constant and is deliberately
+   * NOT settable here (see {@link RENDER_CAMERA.pitchDegrees}); yaw is
    * normalised to `[0, 360)`. Rotating the rig never changes world coordinates.
    */
-  setCameraOrientation(orientation: { pitchDegrees?: number; yawDegrees?: number }): void;
+  setCameraOrientation(orientation: { yawDegrees?: number }): void;
   /** Set the perspective zoom factor (clamped to the rig's limits). */
   setZoom(zoom: number): void;
   /**
@@ -515,29 +517,28 @@ interface RuntimeNode {
 
 /** Camera stance, frozen by Main. Exported so projection tests share one source. */
 export const RENDER_CAMERA = {
-  /** Default downward pitch from the horizontal, in degrees. */
-  pitchDegrees: 58,
-  /** Pitch constraint: below this the world reads as a flat top-down map. */
-  minPitchDegrees: 20,
-  /** Pitch constraint: at/above this the camera is effectively level. */
-  maxPitchDegrees: 80,
   /**
-   * Widest vertical field of view, in degrees. Deliberately narrow (phase 11)
+   * The camera's fixed downward pitch from the horizontal, in degrees.
+   *
+   * This is a single FIXED composition constant, intentionally NOT adjustable:
+   * there is no pitch input in the UI and `setCameraOrientation` has no pitch
+   * field, so the view can never tilt. It is still reported in `inspect().camera`
+   * for tests and debugging.
+   */
+  pitchDegrees: 58,
+  /**
+   * The fixed vertical field of view, in degrees. Deliberately narrow (phase 11)
    * so the projected near/far size difference stays gentle.
    *
-   * Wave C: the FOV is no longer fixed. The camera DISTANCE is fixed (once per
-   * aspect/zoom) from the WORST-case yaw fit at this FOV; the per-yaw FOV is then
-   * derived from the same fit so the composition is preserved exactly while
-   * perspective strength (which depends on distance only) stays constant. See
-   * {@link perspectiveFrustum}.
+   * Wave D: this is a CONSTANT. Wave C derived it per yaw to keep the world's
+   * projected bounding box inside the frame, but a per-yaw FOV is a per-yaw
+   * zoom: a fixed-size object appeared ~38% larger at axis-aligned yaws than at
+   * the diagonals (the reported "map pulls farther away then closer" defect).
+   * The fit now uses this fixed FOV and instead places the camera at the
+   * WORST-CASE yaw distance, so the projection is completely constant while
+   * rotating (see {@link perspectiveFrustum}).
    */
-  fovMaxDegrees: 28,
-  /**
-   * Narrowest vertical field of view, in degrees. A guard for degenerate
-   * bounds/aspect fits; for the shipped world shapes the derived FOV stays
-   * around 20 (axis-aligned) to 28 (diagonal) and this never binds.
-   */
-  fovMinDegrees: 15,
+  fovDegrees: 28,
   /**
    * Minimum near clip distance, in world units. `near` is otherwise derived from
    * the geometry (see {@link perspectiveFrustum}); this only guards a positive
@@ -785,78 +786,8 @@ function yawFromRotation(rotation: Quaternion): number {
 }
 
 /**
- * Perspective frustum plus the visible ground footprint that frame the world's
- * ground rectangle for the rig's current pitch/yaw/zoom and a canvas aspect.
- *
- * Wave C (phase 11): the rig is a **pure orbit with constant foreshortening**.
- *
- * - The camera basis (right/up/forward) and the symmetric bounds fit are the
- *   phase-10 orthographic fit: the world bounds' XZ footprint (at ground level)
- *   is projected onto the camera's right/up axes, `verticalHeadroom` keeps tall
- *   props off the clip edge, and `framingMargin` pushes both axes past the tight
- *   fit so the fit-driving corner lands at `|ndc| = 1 / framingMargin` AT THE
- *   FOCUS PLANE — the same composition the orthographic rig produced.
- * - The camera DISTANCE is fixed for a given aspect/zoom, from the fit at the
- *   WORST yaw and the widest FOV
- *   (`distance = worstCaseFit(aspect, zoom) / tan(fovMax / 2)`). It does NOT
- *   depend on yaw, so rotating is a pure orbit with no dolly.
- * - The FOV is derived per yaw from the same fit
- *   (`fov(yaw) = 2 * atan(fit(yaw, aspect, zoom) / distance)`), clamped to
- *   `[fovMin, fovMax]`. The fit fixes the apparent size of the world, while
- *   perspective strength is set by the fixed DISTANCE, so the floor's
- *   foreshortening does not breathe with yaw. This is the honest perspective
- *   analogue of the orthographic rig's per-yaw frustum fit.
- * - `zoom` is a DOLLY: `distance` is inversely proportional to zoom while the
- *   derived FOV is zoom-invariant. A dolly does change perspective strength (a
- *   farther camera foreshortens less), which is expected for an explicit zoom
- *   action; at any single zoom the pure-orbit property is exact.
- * - `near` is derived from the geometry, not a close constant. The camera may
- *   follow anywhere inside the world, so a conservative world radius (the bounds
- *   diagonal) is subtracted from the distance, leaving `nearClearance` as
- *   margin. It is additionally clamped below the nearest VISIBLE ground depth so
- *   the backdrop can never be clipped on-screen. `far` is derived from the
- *   visible ground footprint (1.2x the farthest viewport ground corner plus 1),
- *   so terrain and backdrop stay inside the frustum.
- */
-
-/** The symmetric half-height the rig must show to frame `bounds` at one yaw. */
-function fittedHalfHeight(
-  bounds: RuntimeWorldBounds,
-  aspect: number,
-  pitchDegrees: number,
-  yawDegrees: number,
-  zoom: number,
-): number {
-  const pitch = pitchDegrees * DEGREES_TO_RADIANS;
-  const yaw = yawDegrees * DEGREES_TO_RADIANS;
-  const sinPitch = Math.sin(pitch);
-  const sinYaw = Math.sin(yaw);
-  const cosYaw = Math.cos(yaw);
-  const rightX = cosYaw;
-  const rightZ = -sinYaw;
-  const upX = -sinPitch * sinYaw;
-  const upZ = -sinPitch * cosYaw;
-  const halfWidthWorld = (bounds.max.x - bounds.min.x) / 2;
-  const halfDepthWorld = (bounds.max.z - bounds.min.z) / 2;
-  let extentRight = 0;
-  let extentUp = 0;
-  for (const signX of [-1, 1]) {
-    for (const signZ of [-1, 1]) {
-      const dx = signX * halfWidthWorld;
-      const dz = signZ * halfDepthWorld;
-      extentRight = Math.max(extentRight, Math.abs(dx * rightX + dz * rightZ));
-      extentUp = Math.max(extentUp, Math.abs(dx * upX + dz * upZ));
-    }
-  }
-  const vertical = extentUp + RENDER_CAMERA.verticalHeadroom;
-  // Tight, aspect-preserving bounds fit, then a symmetric framing margin on both
-  // axes so the world silhouette keeps clear of the viewport edge at every yaw.
-  // Dividing by `zoom` keeps a larger zoom closer.
-  return (Math.max(vertical, extentRight / aspect) / zoom) * RENDER_CAMERA.framingMargin;
-}
-
-/**
- * The largest {@link fittedHalfHeight} over every yaw, computed in closed form.
+ * The largest symmetric half-height the rig must show to frame `bounds` over
+ * EVERY yaw, computed in closed form (the Wave-C closed form, retained).
  *
  * `max_theta max(f(theta), g(theta)) = max(max_theta f, max_theta g)`, and over a
  * full turn those two projected extents attain `sin(pitch) * diag + headroom`
@@ -879,17 +810,61 @@ function worstCaseFittedHalfHeight(
   return (Math.max(vertical, horizontal) / zoom) * RENDER_CAMERA.framingMargin;
 }
 
-/** The fixed orbit distance for an aspect/zoom: worst-case fit at the widest FOV. */
+/**
+ * The fixed orbit distance for an aspect/zoom: the WORST-case yaw fit at the
+ * fixed FOV. It is the same at every yaw (and therefore at every `yawDegrees` the
+ * rig can take), so rotating is a pure orbit and the projection never changes.
+ */
 function orbitDistance(
   bounds: RuntimeWorldBounds,
   aspect: number,
   pitchDegrees: number,
   zoom: number,
 ): number {
-  const tanHalfFovMax = Math.tan((RENDER_CAMERA.fovMaxDegrees * DEGREES_TO_RADIANS) / 2);
-  return worstCaseFittedHalfHeight(bounds, aspect, pitchDegrees, zoom) / tanHalfFovMax;
+  const tanHalfFov = Math.tan((RENDER_CAMERA.fovDegrees * DEGREES_TO_RADIANS) / 2);
+  return worstCaseFittedHalfHeight(bounds, aspect, pitchDegrees, zoom) / tanHalfFov;
 }
 
+/**
+ * Perspective frustum plus the visible ground footprint that frame the world's
+ * ground rectangle for the rig's current pitch/yaw/zoom and a canvas aspect.
+ *
+ * Phase 11 Wave D: the rig is a **pure orbit with a completely constant
+ * projection**.
+ *
+ * - The camera basis (right/up/forward) and the symmetric bounds fit are the
+ *   phase-10 orthographic fit: the world bounds' XZ footprint (at ground level)
+ *   is projected onto the camera's right/up axes, `verticalHeadroom` keeps tall
+ *   props off the clip edge, and `framingMargin` pushes both axes past the tight
+ *   fit.
+ * - The FOV is a FIXED constant (`RENDER_CAMERA.fovDegrees`). The camera
+ *   DISTANCE is fixed from the WORST-case yaw fit at that FOV
+ *   (`distance = worstCaseFittedHalfHeight(bounds, aspect, pitch, zoom) /
+ *   tan(fov / 2)`), so it does NOT depend on yaw. Rotating is therefore a pure
+ *   orbit with an unchanging projection: FOV, distance, the camera's rig-local
+ *   offset (orbit radius/height), near and far are all yaw-invariant, and no
+ *   object changes apparent size.
+ * - `zoom` is a DOLLY: `distance` is inversely proportional to zoom while the
+ *   FOV is zoom-invariant. A dolly does change perspective strength (a farther
+ *   camera foreshortens less), which is expected for an explicit zoom action; at
+ *   any single zoom the pure-orbit property is exact.
+ * - `near` is derived from the geometry, not a close constant. The camera may
+ *   follow anywhere inside the world, so a conservative world radius (the bounds
+ *   diagonal) is subtracted from the distance, leaving `nearClearance` as
+ *   margin. It is additionally clamped below the nearest VISIBLE ground depth so
+ *   the backdrop can never be clipped on-screen. `far` is derived from the
+ *   visible ground footprint (1.2x the farthest viewport ground corner plus 1),
+ *   so terrain and backdrop stay inside the frustum.
+ *
+ * Honest consequence of the fixed FOV: the world's projected OUTLINE still
+ * varies with yaw, because a square world seen edge-on subtends a narrower width
+ * than the same square seen corner-on. That is inherent to rotating a square and
+ * is NOT zoom pumping: object scale at the focus plane is constant (a fixed-size
+ * segment projects to a yaw-invariant NDC length). The fit uses the WORST-case
+ * yaw (the box diagonal), so the axis-aligned yaws simply carry more margin. The
+ * only levers that would flatten the outline are a wider FOV / farther camera or
+ * a 90-degree-stepped yaw; never a per-yaw FOV.
+ */
 export function perspectiveFrustum(options: {
   bounds: RuntimeWorldBounds;
   aspect: number;
@@ -933,23 +908,13 @@ export function perspectiveFrustum(options: {
   const aspect = options.aspect > 0 ? options.aspect : 1;
   const zoom = options.zoom > 0 ? options.zoom : 1;
 
-  const fitted = fittedHalfHeight(
-    options.bounds,
-    aspect,
-    options.pitchDegrees,
-    options.yawDegrees,
-    zoom,
-  );
   const distance = orbitDistance(options.bounds, aspect, options.pitchDegrees, zoom);
-  const requiredFovDegrees = (2 * Math.atan(fitted / distance)) / DEGREES_TO_RADIANS;
-  const fovDegrees = clamp(
-    requiredFovDegrees,
-    RENDER_CAMERA.fovMinDegrees,
-    RENDER_CAMERA.fovMaxDegrees,
-  );
+  // The FOV is a fixed constant: it does NOT depend on `yawDegrees`. Together
+  // with the yaw-independent distance, this is what makes the whole projection
+  // constant during a rotation.
+  const fovDegrees = RENDER_CAMERA.fovDegrees;
   const tanHalfFov = Math.tan((fovDegrees * DEGREES_TO_RADIANS) / 2);
-  // Visible half-height at the focus plane. Equals the fitted value unless the
-  // `fovMin` guard widened the view.
+  // Visible half-height at the focus plane. Constant across yaw.
   const halfHeight = distance * tanHalfFov;
   const halfWidth = halfHeight * aspect;
 
@@ -961,11 +926,11 @@ export function perspectiveFrustum(options: {
   const camZ = distance * cosPitch * cosYaw;
 
   // Project the four viewport corners onto the ground plane. For the rig's
-  // pitch/fov clamps every ray points below the horizon, so the footprint is a
-  // finite trapezoid; `footprintHalfX/Z` are measured from the focus,
-  // `maxDepth` is the farthest camera-to-corner distance used for `far`, and
-  // `minDepth` is the nearest VISIBLE ground distance used to keep the near
-  // plane from clipping the backdrop on-screen.
+  // fixed pitch and fixed FOV every ray points below the horizon (pitch 58 >
+  // fov/2 = 14), so the footprint is a finite trapezoid; `footprintHalfX/Z` are
+  // measured from the focus, `maxDepth` is the farthest camera-to-corner
+  // distance used for `far`, and `minDepth` is the nearest VISIBLE ground
+  // distance used to keep the near plane from clipping the backdrop on-screen.
   let footprintHalfX = 0;
   let footprintHalfZ = 0;
   let maxDepth = 0;
@@ -978,7 +943,7 @@ export function perspectiveFrustum(options: {
       const dirZ = forwardZ + rightZ * (u * tanHalfFov * aspect) + upZ * (v * tanHalfFov);
       if (dirY >= -1e-9) {
         // A ray at/above the horizon never meets the ground: the footprint is
-        // unbounded. Cannot happen for the rig's clamps (pitch >= 20 > fov/2),
+        // unbounded. Cannot happen for the fixed rig (pitch 58 > fov/2 = 14),
         // but keep the guard so a future FOV/pitch change cannot produce NaN.
         parallelToGround = true;
         continue;
@@ -1599,20 +1564,27 @@ export function createThreeRuntime(options: {
   cameraRig.name = 'CameraRig';
 
   // Rig state. `cameraFocus` is the world point the rig is centred on (also the
-  // smooth-follow target); the camera itself is a fixed local child.
-  let pitchDegrees: number = RENDER_CAMERA.pitchDegrees;
+  // smooth-follow target); the camera itself is a fixed local child. The pitch is
+  // a fixed composition constant (see {@link RENDER_CAMERA.pitchDegrees}): it is
+  // deliberately not a mutable rig state, so there is no way to tilt at runtime.
+  const pitchDegrees = RENDER_CAMERA.pitchDegrees;
   let yawDegrees = 0;
   let zoom = 1;
   const cameraFocus = new Vector3(worldCenterX, groundY, worldCenterZ);
   cameraRig.position.copy(cameraFocus);
   scene.add(cameraRig);
 
-  const camera = new PerspectiveCamera(RENDER_CAMERA.fovMaxDegrees, 1, RENDER_CAMERA.minNear, 100);
+  const camera = new PerspectiveCamera(
+    RENDER_CAMERA.fovDegrees,
+    1,
+    RENDER_CAMERA.minNear,
+    100,
+  );
   // Fixed child of the rig: offset up/back along the (rig-local) view axis and
   // pitched down. The rig's yaw rotates the whole assembly. The offset distance
-  // is yaw-independent (`reframe` derives it from the worst-case fit and it only
-  // changes with aspect/zoom), so rotating is a pure orbit. The FOV is what
-  // changes per yaw to preserve the orthographic composition.
+  // is yaw-independent (`reframe` derives it from the worst-case yaw fit and it
+  // only changes with aspect/zoom), and the FOV is a fixed constant, so rotating
+  // is a pure orbit with an unchanging projection.
   cameraRig.add(camera);
 
   // Canvas aspect, updated on resize; defaults to square before any layout.
@@ -2328,17 +2300,12 @@ export function createThreeRuntime(options: {
     };
   }
 
-  function setCameraOrientation(orientation: {
-    pitchDegrees?: number;
-    yawDegrees?: number;
-  }): void {
-    if (orientation.pitchDegrees !== undefined) {
-      pitchDegrees = clamp(
-        orientation.pitchDegrees,
-        RENDER_CAMERA.minPitchDegrees,
-        RENDER_CAMERA.maxPitchDegrees,
-      );
-    }
+  /**
+   * Set the rig's yaw. Pitch is a fixed composition constant and is deliberately
+   * NOT settable (see {@link RENDER_CAMERA.pitchDegrees}); yaw is normalised to
+   * `[0, 360)`. Rotating the rig never changes world coordinates.
+   */
+  function setCameraOrientation(orientation: { yawDegrees?: number }): void {
     if (orientation.yawDegrees !== undefined) {
       yawDegrees = normalizeYawDegrees(orientation.yawDegrees);
     }

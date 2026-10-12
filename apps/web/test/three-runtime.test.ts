@@ -602,18 +602,19 @@ describe('three runtime camera rig', () => {
     runtime.dispose();
   });
 
-  it('clamps pitch into the constrained range', () => {
+  it('locks the pitch as a fixed constant with no adjustable path', () => {
     const runtime = makeRuntime();
 
-    runtime.setCameraOrientation({ pitchDegrees: 5 });
-    expect(runtime.getCameraState().pitchDegrees).toBe(RENDER_CAMERA.minPitchDegrees);
+    // The default stance reports the fixed pitch through both accessors.
+    expect(runtime.getCameraState().pitchDegrees).toBe(RENDER_CAMERA.pitchDegrees);
+    expect(runtime.inspect().camera.pitchDegrees).toBe(RENDER_CAMERA.pitchDegrees);
 
-    runtime.setCameraOrientation({ pitchDegrees: 120 });
-    expect(runtime.getCameraState().pitchDegrees).toBe(RENDER_CAMERA.maxPitchDegrees);
-
-    runtime.setCameraOrientation({ pitchDegrees: 45 });
-    expect(runtime.getCameraState().pitchDegrees).toBe(45);
-    expect(runtime.inspect().camera.pitchDegrees).toBe(45);
+    // A yaw change (the only orientation field that exists) never drifts the
+    // pitch, and there is no runtime way to set it otherwise.
+    runtime.setCameraOrientation({ yawDegrees: 123 });
+    expect(runtime.getCameraState().pitchDegrees).toBe(RENDER_CAMERA.pitchDegrees);
+    expect(runtime.inspect().camera.pitchDegrees).toBe(RENDER_CAMERA.pitchDegrees);
+    expect(runtime.getCameraState().yawDegrees).toBe(123);
 
     runtime.dispose();
   });
@@ -772,18 +773,16 @@ describe('three runtime lifecycle', () => {
     const runtime = makeRuntime();
     const { camera } = runtime.inspect();
 
-    // Phase 11 Wave C: a pure orbit with constant foreshortening. `inspect()`
-    // must describe the frustum it actually uses, and the derived FOV sits in
-    // the documented [fovMin, fovMax] band (narrower than fovMax at axis yaws).
+    // Phase 11 Wave D: a pure orbit with a completely constant projection.
+    // `inspect()` must describe the frustum it actually uses, and the FOV is a
+    // fixed constant, not the per-yaw derivation Wave C used.
     expect(camera.near).toBeGreaterThan(0);
     expect(camera.far).toBeGreaterThan(camera.near);
     expect(camera.aspect).toBe(1);
-    expect(camera.fovDegrees).toBeGreaterThanOrEqual(RENDER_CAMERA.fovMinDegrees);
-    expect(camera.fovDegrees).toBeLessThanOrEqual(RENDER_CAMERA.fovMaxDegrees);
-    expect(camera.fovDegrees).toBeLessThan(RENDER_CAMERA.fovMaxDegrees);
+    expect(camera.fovDegrees).toBe(RENDER_CAMERA.fovDegrees);
 
     // The camera distance is fixed by the WORST-CASE yaw fit (the box diagonal)
-    // at the widest FOV, so rotating cannot dolly it.
+    // at the fixed FOV, so rotating cannot dolly it.
     const diagonal = Math.hypot(
       (BOUNDS.max.x - BOUNDS.min.x) / 2,
       (BOUNDS.max.z - BOUNDS.min.z) / 2,
@@ -794,17 +793,16 @@ describe('three runtime lifecycle', () => {
         diagonal,
       ) * RENDER_CAMERA.framingMargin;
     const expectedDistance =
-      worstHalfHeight / Math.tan((RENDER_CAMERA.fovMaxDegrees * Math.PI) / 360);
+      worstHalfHeight / Math.tan((RENDER_CAMERA.fovDegrees * Math.PI) / 360);
     const distance = Math.hypot(camera.position.x, camera.position.y, camera.position.z);
     expect(distance).toBeCloseTo(expectedDistance, 6);
 
-    // At yaw 0 the fit is axis-aligned, so the derived FOV makes exactly the
-    // (12/2)*sin(58) + 1 headroom, times margin, half-height visible at the fixed
-    // distance.
-    const expectedHalfHeight =
-      ((12 / 2) * Math.sin((58 * Math.PI) / 180) + 1) * RENDER_CAMERA.framingMargin;
+    // The visible focus-plane half-height is the WORST-CASE fit itself, because
+    // the fixed FOV and the worst-case distance cancel (distance * tan(fov/2) =
+    // worstHalfHeight). At the axis-aligned yaws the world then sits further
+    // inside the frame; it never grows with yaw.
     expect(distance * Math.tan((camera.fovDegrees * Math.PI) / 360)).toBeCloseTo(
-      expectedHalfHeight,
+      worstHalfHeight,
       6,
     );
 
@@ -823,9 +821,9 @@ describe('three runtime lifecycle', () => {
       yawDegrees: 0,
       zoom: 1,
     });
-    expect(expected.fovDegrees).toBeCloseTo(camera.fovDegrees, 12);
-    expect(expected.halfHeight).toBeCloseTo(expectedHalfHeight, 6);
-    expect(expected.halfWidth).toBeCloseTo(expectedHalfHeight, 6);
+    expect(expected.fovDegrees).toBe(camera.fovDegrees);
+    expect(expected.halfHeight).toBeCloseTo(worstHalfHeight, 6);
+    expect(expected.halfWidth).toBeCloseTo(worstHalfHeight, 6);
     expect(camera.near).toBe(expected.near);
     expect(camera.far).toBe(expected.far);
     expect(camera.aspect).toBe(expected.aspect);
@@ -837,8 +835,8 @@ describe('three runtime lifecycle', () => {
   it('grows the vertical extent to fit a world wider than the canvas aspect, keeping scale uniform', () => {
     // A portrait canvas (aspect 0.5): the aspect-derived half-width would crop
     // the 12-wide world, so the single uniform half-height grows until
-    // halfWidth matches the full world width. The framing margin then scales
-    // both axes together, and the distance follows from the fit.
+    // halfWidth matches the full world width at the worst yaw. The framing margin
+    // then scales both axes together, and the fixed-FOV distance follows.
     const frustum = perspectiveFrustum({
       bounds: BOUNDS,
       aspect: 0.5,
@@ -847,11 +845,6 @@ describe('three runtime lifecycle', () => {
       zoom: 1,
     });
     const framing = RENDER_CAMERA.framingMargin;
-    expect(frustum.halfHeight).toBeCloseTo(12 * framing, 6);
-    expect(frustum.halfWidth).toBeCloseTo(6 * framing, 6);
-    expect(frustum.halfWidth / frustum.halfHeight).toBeCloseTo(0.5, 6);
-    // A different canvas aspect changes the fixed distance (the fit scales), not
-    // the per-yaw FOV mechanism.
     const diagonal = Math.hypot(
       (BOUNDS.max.x - BOUNDS.min.x) / 2,
       (BOUNDS.max.z - BOUNDS.min.z) / 2,
@@ -861,8 +854,16 @@ describe('three runtime lifecycle', () => {
         diagonal * Math.sin((58 * Math.PI) / 180) + RENDER_CAMERA.verticalHeadroom,
         diagonal / 0.5,
       ) * framing;
+    // The focus-plane half-height is the WORST-CASE fit (not the axis-aligned
+    // fit Wave C derived): the FOV is fixed and the distance carries the fit.
+    expect(frustum.halfHeight).toBeCloseTo(worstHalfHeight, 6);
+    expect(frustum.halfWidth).toBeCloseTo(worstHalfHeight * 0.5, 6);
+    expect(frustum.halfWidth / frustum.halfHeight).toBeCloseTo(0.5, 6);
+    expect(frustum.fovDegrees).toBe(RENDER_CAMERA.fovDegrees);
+    // A different canvas aspect changes the fixed distance (the fit scales), not
+    // the FOV mechanism.
     expect(frustum.distance).toBeCloseTo(
-      worstHalfHeight / Math.tan((RENDER_CAMERA.fovMaxDegrees * Math.PI) / 360),
+      worstHalfHeight / Math.tan((RENDER_CAMERA.fovDegrees * Math.PI) / 360),
       6,
     );
   });
@@ -1104,22 +1105,30 @@ describe('three runtime grid overlay (phase 9)', () => {
 });
 
 describe('three runtime rotation stability (phase 11: perspective)', () => {
-  it('holds a valid perspective frustum, exact pitch, zoom, focus and real foreshortening across a full yaw sweep', () => {
+  it('holds a valid perspective frustum, exact pitch, zoom, focus and a yaw-constant projection across a full yaw sweep', () => {
     const runtime = makeRuntime();
     const focus = runtime.inspect().camera.focus;
     const zoom = runtime.getCameraState().zoom;
-    let orbitDistance: number | null = null;
-    let orbitHeight: number | null = null;
+    // Baseline the yaw-invariant projection at yaw 0, then require every other
+    // yaw to match it exactly.
+    const baseline = runtime.inspect().camera;
+    const orbitDistance = Math.hypot(
+      baseline.position.x - baseline.focus.x,
+      baseline.position.y - baseline.focus.y,
+      baseline.position.z - baseline.focus.z,
+    );
+    const orbitHeight = baseline.position.y - baseline.focus.y;
+    const orbitNear = baseline.near;
+    const orbitFar = baseline.far;
 
     for (let yaw = 0; yaw < 360; yaw += 15) {
       runtime.setCameraOrientation({ yawDegrees: yaw });
       const camera = runtime.inspect().camera;
 
       // A valid, honest perspective frustum at every yaw (phase 11 replaced the
-      // ortho left/right/top/bottom fields). The derived FOV varies per yaw
-      // inside the documented band; it is NOT fixed any more.
-      expect(camera.fovDegrees).toBeGreaterThanOrEqual(RENDER_CAMERA.fovMinDegrees);
-      expect(camera.fovDegrees).toBeLessThanOrEqual(RENDER_CAMERA.fovMaxDegrees);
+      // ortho left/right/top/bottom fields). Wave D holds the FOV at a fixed
+      // constant: it does NOT vary per yaw.
+      expect(camera.fovDegrees).toBe(RENDER_CAMERA.fovDegrees);
       expect(camera.near).toBeGreaterThan(0);
       expect(camera.far).toBeGreaterThan(camera.near);
       expect(camera.aspect).toBe(1);
@@ -1129,21 +1138,19 @@ describe('three runtime rotation stability (phase 11: perspective)', () => {
       expect(camera.zoom).toBe(zoom);
       expect(camera.focus).toEqual(focus);
 
-      // Wave C pure orbit: the camera's radius and height about the focus are
-      // identical at every yaw (the FOV absorbs the fit, not the distance).
+      // Wave D pure orbit with a constant projection: the camera's radius and
+      // height about the focus, and the near/far clip distances, are identical
+      // at every yaw. The fixed FOV means nothing absorbs the fit per yaw.
       const offset = {
         x: camera.position.x - camera.focus.x,
         y: camera.position.y - camera.focus.y,
         z: camera.position.z - camera.focus.z,
       };
       const distance = Math.hypot(offset.x, offset.y, offset.z);
-      if (orbitDistance === null || orbitHeight === null) {
-        orbitDistance = distance;
-        orbitHeight = offset.y;
-      } else {
-        expect(distance).toBeCloseTo(orbitDistance, 9);
-        expect(offset.y).toBeCloseTo(orbitHeight, 9);
-      }
+      expect(distance).toBeCloseTo(orbitDistance, 9);
+      expect(offset.y).toBeCloseTo(orbitHeight, 9);
+      expect(camera.near).toBeCloseTo(orbitNear, 9);
+      expect(camera.far).toBeCloseTo(orbitFar, 9);
 
       // Phase 11 deliberately gives up "the projection is affine". Across the
       // view (vertical NDC), equal NDC steps map to LARGER world steps farther

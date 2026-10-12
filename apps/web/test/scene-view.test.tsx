@@ -108,7 +108,7 @@ interface RecordingRuntime {
   mountCalls: number;
   disposeCalls: number;
   zoomCalls: number[];
-  orientationCalls: { pitchDegrees?: number; yawDegrees?: number }[];
+  orientationCalls: { yawDegrees?: number }[];
   pickCalls: { x: number; y: number }[];
   /** Result the injected `pick` returns; default `null`. */
   pickResult: RenderPick;
@@ -158,9 +158,6 @@ function createRecordingRuntime(): RecordingRuntime {
     getCameraState: () => ({ ...cameraState, focus: { ...cameraState.focus } }),
     setCameraOrientation: (orientation) => {
       recorder.orientationCalls.push({ ...orientation });
-      if (orientation.pitchDegrees !== undefined) {
-        cameraState.pitchDegrees = orientation.pitchDegrees;
-      }
       if (orientation.yawDegrees !== undefined) {
         cameraState.yawDegrees = orientation.yawDegrees;
       }
@@ -617,9 +614,10 @@ describe('SceneView mouse-first interaction', () => {
     const last = recorder.orientationCalls.at(-1);
     // Drag input policy (phase 11): a rightward drag makes the world rotate
     // counter-clockwise from above, which is a DECREASE of the rig yaw
-    // (yaw -= 60px * 0.3deg). Pitch is unchanged (58 -> 70, still in range).
+    // (yaw -= 60px * 0.3deg). Pitch is FIXED (58) and is not an input at all, so
+    // a vertical drag component never tilts the view.
     expect(last?.yawDegrees).toBeCloseTo(-18, 6);
-    expect(last?.pitchDegrees).toBeCloseTo(70, 6);
+    expect(recorder.runtime.getCameraState().pitchDegrees).toBe(CAMERA_STATE.pitchDegrees);
     // A drag must never pick or emit.
     expect(recorder.pickCalls).toHaveLength(0);
     expect(requests).toHaveLength(0);

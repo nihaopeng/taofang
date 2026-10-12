@@ -14,12 +14,17 @@
  * 1. Near/far edge relationship, per camera type. The projected screen lengths of
  *    a parallel near/far pair of terrain boundary edges are compared:
  *      - orthographic (this wave): the ratio is exactly 1 (within 1e-9);
- *      - perspective (Wave C): the near edge is STABLY longer (a documented
+ *      - perspective (Wave D): the near edge is STABLY longer (a documented
  *        lower bound > 1 at every yaw, not merely `!=`), and the ratio stays in
- *        a tight band around its own reference. Wave C also asserts the camera
- *        DISTANCE and HEIGHT are constant across the yaw sweep, i.e. the view is
- *        a pure orbit with no dolly, which is what makes the perspective
- *        strength (distance-driven) stable.
+ *        a tight band around its own reference. The band is a GEOMETRIC,
+ *        FOV-independent effect (see the constant below), so it survives the
+ *        Wave-D fixed-FOV change.
+ *    Wave D also asserts the projection is COMPLETELY constant across the yaw
+ *    sweep: `fovDegrees`, `near`, `far`, the camera DISTANCE, the camera HEIGHT
+ *    and the NDC length of a fixed-size segment at the focus plane are all
+ *    identical at every yaw. That is the "no zoom pumping" guarantee: Wave C's
+ *    per-yaw FOV was a per-yaw zoom and made a fixed-size object change apparent
+ *    size while rotating.
  *    The measurement self-calibrates first: the world->NDC projection is
  *    reconstructed from `inspect().camera` and validated against the runtime's
  *    own `pick()` at several NDC points. The reported calibration error is what
@@ -85,15 +90,18 @@ const ORTHO_RATIO_TOLERANCE = 1e-9;
  */
 const PERSPECTIVE_MIN_NEAR_FAR_RATIO = 1.02;
 /**
- * Phase-11 Wave C acceptance band around the measured near/far ratio reference.
+ * Phase-11 perspective acceptance band around the measured near/far ratio
+ * reference.
  *
  * This tolerance is a SMOKE CHECK, not the structural guarantee. The guarantees
  * that actually catch a regression are asserted exactly elsewhere in this file:
- * the camera distance and height are CONSTANT across the whole yaw sweep
- * ({@link ORBIT_CONSTANCE_TOLERANCE}, 1e-9), the projection self-calibrates
- * against the runtime's own `pick()`, the near edge is strictly longer than the
- * far edge at every yaw, and the terrain footprint/boundary/scale errors are all
- * exactly 0. Those pin a pure orbit independently of any ratio band.
+ * the camera FOV, near, far, distance and height are CONSTANT across the whole
+ * yaw sweep ({@link ORBIT_CONSTANCE_TOLERANCE} / {@link PROJECTION_CONSTANCE_TOLERANCE},
+ * 1e-9), a fixed-size focus-plane segment projects to a yaw-invariant NDC length,
+ * the projection self-calibrates against the runtime's own `pick()`, the near
+ * edge is strictly longer than the far edge at every yaw, and the terrain
+ * footprint/boundary/scale errors are all exactly 0. Those pin a constant
+ * projection independently of any ratio band.
  *
  * Why the ratio band can never be ~2% (do NOT "tighten" this by mistake):
  * (a) The residual near/far variation is GEOMETRIC and yaw-dependent. With the
@@ -114,10 +122,22 @@ const PERSPECTIVE_MIN_NEAR_FAR_RATIO = 1.02;
  */
 const PERSPECTIVE_RATIO_REFERENCE_TOLERANCE = 0.04;
 /**
- * Wave C orbit assertion: the camera distance and height must be CONSTANT across
- * the whole yaw sweep (no yaw dolly), to within floating-point noise.
+ * Wave D orbit/projection assertion: the camera FOV, near, far, distance and
+ * height must be CONSTANT across the whole yaw sweep (a pure orbit with no dolly
+ * and no FOV pumping), to within floating-point noise.
  */
 const ORBIT_CONSTANCE_TOLERANCE = 1e-9;
+/** Same float-noise tolerance for the fixed projection fields (fov/near/far). */
+const PROJECTION_CONSTANCE_TOLERANCE = 1e-9;
+/**
+ * Half-length (world units) of the fixed-size segment whose NDC length is
+ * measured at the focus plane. A real world segment of constant size is the
+ * direct "no zoom pumping" probe: if the projection is constant while the rig
+ * rotates, its projected screen length is constant too.
+ */
+const FOCUS_SEGMENT_HALF_LENGTH = 1;
+/** Tolerance for the fixed-size segment's yaw-invariant NDC length. */
+const FOCUS_SEGMENT_NDC_TOLERANCE = 1e-9;
 /** World-space tolerance for the reconstructed-vs-pick ground point. */
 const CALIBRATION_WORLD_TOLERANCE = 1e-6;
 /** NDC tolerance for the reconstruction round-trip. */
@@ -563,6 +583,62 @@ function assertTerrainOnly(runtime: RenderRuntime): void {
 
 type NearFarAxis = NearFar['axis'];
 
+/** The four ground-level corners of the framed world footprint. */
+function worldGroundCorners(): Vec3[] {
+  const corners: Vec3[] = [];
+  for (const x of [BOUNDS.min.x, BOUNDS.max.x]) {
+    for (const z of [BOUNDS.min.z, BOUNDS.max.z]) {
+      corners.push({ x, y: GRID.origin.y, z });
+    }
+  }
+  return corners;
+}
+
+/**
+ * NDC length of a fixed-size world segment centred on the focus and lying along
+ * the camera's right axis. Because the projection is constant while rotating, a
+ * segment of constant world size must keep a constant screen size; a per-yaw FOV
+ * (Wave C) would make it grow/shrink — the "zoom pumping" defect.
+ *
+ * This is computed from {@link projectToNdc}, the same reconstructed projection
+ * the harness self-calibrates against the runtime's `pick()`.
+ */
+function fixedFocusSegmentNdc(view: CameraView): number {
+  const half = scale(view.right, FOCUS_SEGMENT_HALF_LENGTH);
+  const a = projectToNdc(add(view.camera.focus, half), view);
+  const b = projectToNdc(sub(view.camera.focus, half), view);
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+/**
+ * Largest `|ndc|` over the framed world's ground corners: how much of the
+ * half-frame the world's projected outline occupies. `< 1` means the whole
+ * silhouette is inside the viewport with the framing margin to spare. It is
+ * yaw-dependent (a square world subtends differently edge-on vs corner-on) and
+ * that is GEOMETRIC, not zoom pumping: object scale at the focus plane is held
+ * constant by {@link fixedFocusSegmentNdc}.
+ */
+function frameUtilisation(view: CameraView): number {
+  let maxNdc = 0;
+  for (const corner of worldGroundCorners()) {
+    const ndc = projectToNdc(corner, view);
+    maxNdc = Math.max(maxNdc, Math.abs(ndc.x), Math.abs(ndc.y));
+  }
+  return maxNdc;
+}
+
+/** Yaw class for the framing-utilisation report: axis-aligned vs diagonal. */
+function yawClass(yaw: number): 'axis' | 'diagonal' | 'other' {
+  const mod = ((yaw % 90) + 90) % 90;
+  if (mod === 0) {
+    return 'axis';
+  }
+  if (mod === 45) {
+    return 'diagonal';
+  }
+  return 'other';
+}
+
 interface BaselineRow {
   readonly yaw: number;
   readonly kind: CameraView['kind'];
@@ -574,6 +650,17 @@ interface BaselineRow {
   readonly distance: number;
   /** Camera height above the focus plane. */
   readonly height: number;
+  /** Vertical FOV actually applied to the camera, in degrees. */
+  readonly fovDegrees: number;
+  /** Near clip plane, in world units. */
+  readonly near: number;
+  /** Far clip plane, in world units. */
+  readonly far: number;
+  /** NDC length of the fixed-size focus-plane segment (no zoom pumping). */
+  readonly focusSegmentNdc: number;
+  /** Largest `|ndc|` over the world ground corners (frame utilisation, < 1). */
+  readonly frameUtilisation: number;
+  readonly yawClass: 'axis' | 'diagonal' | 'other';
   readonly groundError: number;
   readonly roundTripError: number;
   readonly footprintError: number;
@@ -612,12 +699,19 @@ function sweepScene(appearanceAt: AppearancePicker): BaselineRow[] {
         expect(nearFar.near.length).toBeGreaterThan(nearFar.far.length);
       }
 
-      // Wave C pure orbit: the camera distance from the focus and its height must
-      // be identical at every yaw (the FOV, not the distance, absorbs the fit).
+      // Wave D constant projection: the camera distance from the focus and its
+      // height must be identical at every yaw, and the projection fields must be
+      // identical too (no per-yaw FOV). The world segment of a fixed world size
+      // must therefore keep a constant screen size, and the world still fits.
       const focusOffset = sub(camera.position, camera.focus);
       const distance = Math.hypot(focusOffset.x, focusOffset.y, focusOffset.z);
       const height = focusOffset.y;
       expect(distance).toBeGreaterThan(0);
+      const focusSegmentNdc = fixedFocusSegmentNdc(view);
+      const utilisation = frameUtilisation(view);
+      // The world silhouette never touches the viewport edge; the framing margin
+      // leaves air around it. (`< 1` is the strict-inside guarantee.)
+      expect(utilisation).toBeLessThanOrEqual(1 + GEOMETRY_TOLERANCE);
 
       // Rules 2-4: geometry is camera-independent, asserted at every yaw anyway.
       const boundaryError = maxBoundaryError(runtime);
@@ -636,6 +730,12 @@ function sweepScene(appearanceAt: AppearancePicker): BaselineRow[] {
         farLength: nearFar.far.length,
         distance,
         height,
+        fovDegrees: camera.fovDegrees ?? 0,
+        near: camera.near ?? 0,
+        far: camera.far ?? 0,
+        focusSegmentNdc,
+        frameUtilisation: utilisation,
+        yawClass: yawClass(yaw),
         groundError: calibration.maxGroundError,
         roundTripError: calibration.maxRoundTripError,
         footprintError,
@@ -657,6 +757,19 @@ interface BaselineSummary {
   readonly distanceMax: number;
   readonly heightMin: number;
   readonly heightMax: number;
+  readonly fovMin: number;
+  readonly fovMax: number;
+  readonly nearMin: number;
+  readonly nearMax: number;
+  readonly farMin: number;
+  readonly farMax: number;
+  readonly focusSegmentNdcMin: number;
+  readonly focusSegmentNdcMax: number;
+  /** Max frame utilisation over axis-aligned yaws (0/90/180/270). */
+  readonly axisUtilisation: number;
+  /** Max frame utilisation over diagonal yaws (45/135/225/315). */
+  readonly diagonalUtilisation: number;
+  readonly maxFrameUtilisation: number;
   readonly maxGroundError: number;
   readonly maxRoundTripError: number;
   readonly maxFootprintError: number;
@@ -664,10 +777,23 @@ interface BaselineSummary {
   readonly maxScaleError: number;
 }
 
+function maxOver(
+  rows: readonly BaselineRow[],
+  select: (row: BaselineRow) => number,
+  filter: (row: BaselineRow) => boolean = () => true,
+): number {
+  const values = rows.filter(filter).map(select);
+  return values.length === 0 ? 0 : Math.max(...values);
+}
+
 function summarize(rows: readonly BaselineRow[]): BaselineSummary {
   const ratios = rows.map((row) => row.ratio);
   const distances = rows.map((row) => row.distance);
   const heights = rows.map((row) => row.height);
+  const fovs = rows.map((row) => row.fovDegrees);
+  const nears = rows.map((row) => row.near);
+  const fars = rows.map((row) => row.far);
+  const segments = rows.map((row) => row.focusSegmentNdc);
   return {
     kind: rows[0]?.kind ?? 'orthographic',
     ratioMin: Math.min(...ratios),
@@ -676,6 +802,25 @@ function summarize(rows: readonly BaselineRow[]): BaselineSummary {
     distanceMax: Math.max(...distances),
     heightMin: Math.min(...heights),
     heightMax: Math.max(...heights),
+    fovMin: Math.min(...fovs),
+    fovMax: Math.max(...fovs),
+    nearMin: Math.min(...nears),
+    nearMax: Math.max(...nears),
+    farMin: Math.min(...fars),
+    farMax: Math.max(...fars),
+    focusSegmentNdcMin: Math.min(...segments),
+    focusSegmentNdcMax: Math.max(...segments),
+    axisUtilisation: maxOver(
+      rows,
+      (row) => row.frameUtilisation,
+      (row) => row.yawClass === 'axis',
+    ),
+    diagonalUtilisation: maxOver(
+      rows,
+      (row) => row.frameUtilisation,
+      (row) => row.yawClass === 'diagonal',
+    ),
+    maxFrameUtilisation: maxOver(rows, (row) => row.frameUtilisation),
     maxGroundError: Math.max(...rows.map((row) => row.groundError)),
     maxRoundTripError: Math.max(...rows.map((row) => row.roundTripError)),
     maxFootprintError: Math.max(...rows.map((row) => row.footprintError)),
@@ -695,6 +840,11 @@ function formatRows(label: string, rows: readonly BaselineRow[]): string {
     'far len'.padStart(12),
     'cam distance'.padStart(13),
     'cam height'.padStart(11),
+    'fov'.padStart(8),
+    'near'.padStart(10),
+    'far'.padStart(12),
+    'seg ndc'.padStart(11),
+    'frame util'.padStart(11),
     'calib world'.padStart(13),
     'calib ndc'.padStart(12),
     'footprint err'.padStart(15),
@@ -712,6 +862,11 @@ function formatRows(label: string, rows: readonly BaselineRow[]): string {
       row.farLength.toFixed(9).padStart(12),
       row.distance.toFixed(9).padStart(13),
       row.height.toFixed(9).padStart(11),
+      row.fovDegrees.toFixed(9).padStart(8),
+      row.near.toFixed(9).padStart(10),
+      row.far.toFixed(9).padStart(12),
+      row.focusSegmentNdc.toFixed(12).padStart(11),
+      row.frameUtilisation.toFixed(9).padStart(11),
       row.groundError.toExponential(3).padStart(13),
       row.roundTripError.toExponential(3).padStart(12),
       row.footprintError.toExponential(3).padStart(15),
@@ -729,10 +884,13 @@ function assertSummary(label: string, summary: BaselineSummary): void {
     expect(summary.ratioMin).toBeGreaterThanOrEqual(1 - ORTHO_RATIO_TOLERANCE);
     expect(summary.ratioMax).toBeLessThanOrEqual(1 + ORTHO_RATIO_TOLERANCE);
   } else {
-    // Rule 1 (perspective): stably longer at every yaw. Wave C fixes the camera
-    // distance, so the residual near/far variation is geometric (world edges)
-    // and must sit in a tight, documented band around its own reference; the
-    // distance and height must be exactly constant (pure orbit, no dolly).
+    // Rule 1 (perspective): stably longer at every yaw. The residual near/far
+    // variation is GEOMETRIC and FOV-independent (the compared parallel world
+    // edges are 6.36 apart in depth at the axis yaws but 4.50 at the diagonals,
+    // so the axis ratio is inherently larger). It must therefore sit in a tight,
+    // documented band around its own reference. Separately, the projection is
+    // COMPLETELY constant: FOV, near, far, distance and height do not move while
+    // rotating (Wave D), which is what actually pins "no zoom pumping".
     expect(summary.ratioMin).toBeGreaterThanOrEqual(PERSPECTIVE_MIN_NEAR_FAR_RATIO);
     const reference = (summary.ratioMin + summary.ratioMax) / 2;
     expect(summary.ratioMax - reference).toBeLessThanOrEqual(
@@ -747,13 +905,39 @@ function assertSummary(label: string, summary: BaselineSummary): void {
     expect(summary.heightMax - summary.heightMin).toBeLessThanOrEqual(
       ORBIT_CONSTANCE_TOLERANCE,
     );
+    // Wave D: the whole projection is fixed across the sweep.
+    expect(summary.fovMax - summary.fovMin).toBeLessThanOrEqual(
+      PROJECTION_CONSTANCE_TOLERANCE,
+    );
+    expect(summary.nearMax - summary.nearMin).toBeLessThanOrEqual(
+      PROJECTION_CONSTANCE_TOLERANCE,
+    );
+    expect(summary.farMax - summary.farMin).toBeLessThanOrEqual(
+      PROJECTION_CONSTANCE_TOLERANCE,
+    );
+    // ...and a fixed-size world segment keeps a constant screen size: the direct
+    // "no zoom pumping" guarantee.
+    expect(summary.focusSegmentNdcMax - summary.focusSegmentNdcMin).toBeLessThanOrEqual(
+      FOCUS_SEGMENT_NDC_TOLERANCE,
+    );
   }
+  // The world's projected ground outline still fits inside the viewport at every
+  // yaw (framing margin), even though its utilisation varies as the square world
+  // turns edge-on vs corner-on.
+  expect(summary.maxFrameUtilisation).toBeLessThanOrEqual(1 + GEOMETRY_TOLERANCE);
+  expect(summary.axisUtilisation).toBeGreaterThan(0);
+  expect(summary.diagonalUtilisation).toBeGreaterThan(0);
   expect(summary.maxGroundError).toBeLessThanOrEqual(CALIBRATION_WORLD_TOLERANCE);
   expect(summary.maxRoundTripError).toBeLessThanOrEqual(CALIBRATION_NDC_TOLERANCE);
   expect(summary.maxFootprintError).toBeLessThanOrEqual(GEOMETRY_TOLERANCE);
   expect(summary.maxBoundaryError).toBeLessThanOrEqual(GEOMETRY_TOLERANCE);
   expect(summary.maxScaleError).toBe(0);
   console.log(`[terrain-regression] ${label} summary: ${JSON.stringify(summary)}`);
+  console.log(
+    `[terrain-regression] ${label} frame utilisation: axis ${summary.axisUtilisation.toFixed(6)}` +
+      ` | diagonal ${summary.diagonalUtilisation.toFixed(6)}` +
+      ` | max ${summary.maxFrameUtilisation.toFixed(6)}`,
+  );
 }
 
 describe('Phase-11 minimal terrain regression scene', () => {

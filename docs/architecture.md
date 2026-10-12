@@ -287,30 +287,40 @@ false world-space boundary that reads as a tapering trapezoid — 73% of the flo
 - `inspect().camera` must describe a perspective frustum honestly (e.g. fov/near/far) instead of ortho
   left/right/top/bottom, so tests assert what the renderer actually uses.
 
-### Final rig parameters (Wave C outcome, measured)
+### Final rig parameters (Wave D outcome, measured)
 
-- **Camera**: `PerspectiveCamera`, pitch 58 (fixed), roll 0, yaw free, orthographic shadow camera unchanged.
-- **Orbit radius is FIXED** at `distance = worstCaseFit / tan(fovMax / 2)` with `fovMax = 28` and
+- **Camera**: `PerspectiveCamera`, pitch 58 (**fixed**, no adjustable path: `setCameraOrientation` accepts
+  yaw only and the pitch is reported but never set), roll 0, yaw free, orthographic shadow camera unchanged.
+- **FOV is a FIXED constant**: 28 degrees at every yaw. Wave C derived the FOV per yaw (20.2854..28.0000)
+  to keep the world's projected bounding box inside the frame; a per-yaw FOV is a per-yaw **zoom**, so a
+  fixed-size object appeared ~38% larger at axis-aligned yaws than at the diagonals (the reported "map pulls
+  farther away then closer" defect). Wave D removes it.
+- **Orbit radius is FIXED** at `distance = worstCaseFit / tan(fov / 2)` with `fov = 28` and
   `worstCaseFit = max(extentUp + verticalHeadroom, extentRight / aspect) * framingMargin` taken as the exact
   maximum over yaw (closed form, not sampled). At aspect 1 / zoom 1 that is **40.839126**, constant across the
-  whole yaw sweep to 7e-15 (verified).
-- **The per-yaw fit is expressed as the FOV, not as a dolly**: `fov(yaw) = 2*atan(fit(yaw)/distance)`,
-  clamped to `[15, 28]`; measured **20.2854 (axis-aligned) .. 28.0000 (diagonal)**. This is the perspective
-  analog of the old orthographic per-yaw frustum fit, and it is the reason the camera no longer moves while
-  rotating.
-- **Zoom is a DOLLY** (`distance = base / zoom`) while the derived FOV is zoom-invariant; a dolly does change
+  whole yaw sweep to ~1e-14 (verified). FOV, near, far, distance and height are all yaw-invariant, i.e. a pure
+  orbit with a completely unchanging projection; no object changes apparent size while rotating.
+- **Honest consequence**: the world's projected *outline* still varies with yaw (a square world subtends a
+  wider width corner-on than edge-on). That is geometric and is NOT zoom pumping — a fixed-size segment at the
+  focus plane projects to a constant NDC length at every yaw (`0.1964186`). Frame utilisation is **0.639005 at
+  axis-aligned yaws vs 0.833333 (= 1 / framingMargin) at the diagonals**, so the axis-aligned yaws simply carry
+  extra margin. The only levers that would flatten the outline are a wider FOV / farther camera or a
+  90-degree-stepped yaw; never a per-yaw FOV.
+- **Zoom is a DOLLY** (`distance = base / zoom`) while the FOV is zoom-invariant; a dolly does change
   foreshortening, which is acceptable because it is an explicit user action and the orbit is exactly constant
   at any single zoom. Verified at zoom 0.25 / 1 / 8.
 - **`near` is derived from the geometry**, not a small constant: `max(0.5, distance - worldRadius - 1)`
   (18.762 = full bounds diagonal, so a follow focus anywhere in the world is covered), further clamped below
   the nearest visible ground-corner depth. At default that is **21.0775** (was 0.1, which wasted depth
-  precision); the tightest case is max zoom where `near = 0.5` with ~4.18 clearance.
+  precision); it is now constant across yaw as well. The tightest case is max zoom where `near = 0.5` with
+  ~4.18 clearance.
 - **Residual ratio variation is geometric, not a defect**: the selected near/far edge pair is 12*cos(pitch) =
   6.36 apart in depth at axis-aligned yaws and 12*cos(pitch)*cos45 = 4.50 at the diagonals, and the ratio is
   FOV-independent, so no FOV can flatten it (only a much larger distance would, and that abandons the
-  composition). The harness therefore asserts the STRUCTURAL properties exactly (constant distance/height at
-  1e-9, calibration against `pick()`, near strictly > far, footprint/boundary/scale exactly 0) and treats the
-  ratio band (`|ratio - 1.133279| <= 0.04`, measured span 0.071) as a smoke check only.
+  composition). The harness therefore asserts the STRUCTURAL properties exactly (FOV/near/far/distance/height
+  constant at 1e-9, a fixed-size focus-plane segment's NDC length constant at 1e-9, calibration against
+  `pick()`, near strictly > far, footprint/boundary/scale exactly 0) and treats the ratio band
+  (`|ratio - 1.133279| <= 0.04`, measured span 0.071) as a smoke check only.
 
 ## Phase 8 frozen design — GLB asset pipeline + mouse-first input
 

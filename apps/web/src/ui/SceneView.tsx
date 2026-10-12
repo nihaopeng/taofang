@@ -84,7 +84,7 @@ const CLICK_MOVE_THRESHOLD_PX = 5;
 /** Maximum press duration (ms) for a press to count as a click. */
 const CLICK_TIME_THRESHOLD_MS = 350;
 
-/** Rig degrees rotated per pixel of drag (yaw and pitch). */
+/** Rig degrees rotated per pixel of horizontal drag (yaw only; pitch is fixed). */
 const DRAG_DEGREES_PER_PIXEL = 0.3;
 
 /** In-flight pointer gesture. `null` when no button is down. */
@@ -93,7 +93,6 @@ interface PointerGesture {
   startX: number;
   startY: number;
   lastX: number;
-  lastY: number;
   startTime: number;
   dragging: boolean;
 }
@@ -170,7 +169,6 @@ export function SceneView(props: {
       startX: event.clientX,
       startY: event.clientY,
       lastX: event.clientX,
-      lastY: event.clientY,
       startTime: Date.now(),
       dragging: false,
     };
@@ -182,9 +180,7 @@ export function SceneView(props: {
       return;
     }
     let dx = event.clientX - pointer.lastX;
-    let dy = event.clientY - pointer.lastY;
     pointer.lastX = event.clientX;
-    pointer.lastY = event.clientY;
 
     const travelled = Math.hypot(
       event.clientX - pointer.startX,
@@ -199,7 +195,6 @@ export function SceneView(props: {
       // Apply the whole travel so far so crossing the threshold does not skip the
       // rotation the user already intended.
       dx = event.clientX - pointer.startX;
-      dy = event.clientY - pointer.startY;
     }
 
     const runtime = runtimeRef.current;
@@ -215,9 +210,11 @@ export function SceneView(props: {
       // untouched); only the input-to-yaw sign is negated here, so a rightward
       // drag DECREASES yawDegrees. Camera-relative movement follows the rig yaw
       // automatically and is unaffected.
+      //
+      // Pitch is a FIXED composition constant and is deliberately not part of
+      // `setCameraOrientation`: a vertical drag never tilts the view, so there is
+      // no up/down rotation.
       yawDegrees: camera.yawDegrees - dx * DRAG_DEGREES_PER_PIXEL,
-      // `setCameraOrientation` clamps pitch to the rig's 20-80 range.
-      pitchDegrees: camera.pitchDegrees + dy * DRAG_DEGREES_PER_PIXEL,
     });
   }
 
