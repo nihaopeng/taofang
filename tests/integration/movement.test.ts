@@ -42,7 +42,9 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 
 import {
   getWorldState,
+  interact,
   loadWorld,
+  moveTo,
   resetWorldEventSource,
   resetWorldFetch,
   resetWorldState,
@@ -454,6 +456,147 @@ describe('vertical slice: continuous 3D movement over the realtime stream', () =
         body: JSON.stringify({ direction: 'east' }),
       });
       expect(legacy.status).toBe(404);
+    }
+  });
+});
+
+describe('phase 8: mouse-first intents (moveTo / interact) over the real chain', () => {
+  it('walks to a clicked world point and STOPS there (moveTo is a steering goal)', async () => {
+    useRealServer();
+    await loadWorld();
+
+    // A goal on a clear straight line west/north of the spawn (the water block and
+    // tree-2's AABB are both avoided).
+    const target = { x: -2, y: 0, z: 2 };
+    await moveTo(target);
+    await tick(40);
+
+    const arrived = actorPosition();
+    expect(approx(arrived.x, target.x)).toBe(true);
+    expect(approx(arrived.z, target.z)).toBe(true);
+    expect(arrived.y).toBe(0);
+
+    // Arrival clears the goal: further ticks emit nothing at all.
+    const before = lastBatches.length;
+    await tick(5);
+    expect(lastBatches.slice(before).every((batch) => batch.events.length === 0)).toBe(true);
+  });
+
+  it('does not teleport: an unreachable goal stops against the obstacle', async () => {
+    useRealServer();
+    await loadWorld();
+
+    // The water block spans x in [-2,0], z in [-2,0]; aim at its centre from the east.
+    await moveTo({ x: -1, y: 0, z: -1 });
+    await tick(60);
+
+    const stopped = actorPosition();
+    // Never inside the water AABB: the circle must stay clear of x <= 0 / z <= 0.
+    expect(stopped.x).toBeGreaterThanOrEqual(-0.35 - 1e-9);
+    expect(stopped.z).toBeGreaterThanOrEqual(-0.35 - 1e-9);
+    // ...and it did NOT arrive at the goal centre.
+    expect(Math.hypot(stopped.x - -1, stopped.z - -1)).toBeGreaterThan(0.7);
+  });
+
+  it('faces an in-range entity it is asked to interact with, and reports a rejection for a far one', async () => {
+    useRealServer();
+    await loadWorld();
+
+    // tree-1 sits at (1.5, 0, -0.5); the spawn is (0.5, 0, 0.5) -> distance ~1.414 < INTERACTION_RANGE (1.5)
+    await interact('tree-1');
+    await settle();
+
+    let state = getWorldState();
+    expect(state.notice).toBeNull();
+    const rotation = state.entities.find((e) => e.actorId === state.controlledActorId)?.rotation;
+    expect(rotation).toBeDefined();
+    // facing = atan2(dx, dz) with dz < 0 and dx > 0 -> a positive yaw of 3*PI/4
+    const yaw = 2 * Math.atan2(rotation?.y ?? 0, rotation?.w ?? 1);
+    expect(approx(yaw, (3 * Math.PI) / 4, 1e-6)).toBe(true);
+    // the interaction does not move the actor
+    expect(actorPosition()).toEqual({ x: 0.5, y: 0, z: 0.5 });
+
+    // tree-2 is ~2.236 away -> out of range -> the server rejects with 409 and the
+    // client surfaces a NOTICE; a rejected intent must not become a broken world.
+    await interact('tree-2');
+    await settle();
+    state = getWorldState();
+    expect(state.notice).toBe('Too far away.');
+    expect(state.status).toBe('ready');
+    expect(state.error).toBeNull();
+
+    // an unknown target is a 404 and reads as "gone", still without breaking the world
+    await interact('ghost-entity');
+    await settle();
+    state = getWorldState();
+    expect(state.notice).toBe('That is gone.');
+    expect(state.status).toBe('ready');
+    expect(state.error).toBeNull();
+
+    // Regression the review caught: clicking the controlled actor's OWN node is a
+    // `not-interactable` rejection at distance 0. The notice must come from the server's
+    // reason-carrying message, NOT from blanket-mapping every 409 to the out-of-range text.
+    await interact('entity-1');
+    await settle();
+    state = getWorldState();
+    expect(state.notice).toBe('Nothing to do with that.');
+    expect(state.notice).not.toBe('Too far away.');
+    expect(state.status).toBe('ready');
+    expect(state.error).toBeNull();
+
+    // a later successful intent clears the notice
+    await setMovementIntent({ x: 1, z: 0 });
+    await settle();
+    expect(getWorldState().notice).toBeNull();
+  });
+
+  it('rejects a rejectable interact at the transport level with 409 CONFLICT', async () => {
+    const response = await fetch(new URL(COMMAND_PATH, baseUrl), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ type: 'actor.interact', targetEntityId: 'tree-2' }),
+    });
+    expect(response.status).toBe(409);
+    const payload = (await response.json()) as { error: { code: string; message: string } };
+    expect(payload.error.code).toBe('CONFLICT');
+    // The 409 message is player-facing contract text (the client displays it verbatim), so it is
+    // the frozen phrase, NOT the raw reason token.
+    expect(payload.error.message).toBe('Too far away.');
+
+    // ...and the other rejection reason has its own phrase, so the UI can never show
+    // "too far away" for a target that is zero units away.
+    const own = await fetch(new URL(COMMAND_PATH, baseUrl), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ type: 'actor.interact', targetEntityId: 'entity-1' }),
+    });
+    expect(own.status).toBe(409);
+    const ownPayload = (await own.json()) as { error: { code: string; message: string } };
+    expect(ownPayload.error.code).toBe('CONFLICT');
+    expect(ownPayload.error.message).toBe('Nothing to do with that.');
+
+    const missing = await fetch(new URL(COMMAND_PATH, baseUrl), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ type: 'actor.interact', targetEntityId: 'ghost-entity' }),
+    });
+    expect(missing.status).toBe(404);
+  });
+
+  it('keeps presentation data off the wire: a command carrying camera/NDC fields is a 400', async () => {
+    for (const body of [
+      { type: 'actor.moveTo', target: { x: 1, y: 0, z: 1 }, camera: { yaw: 30 } },
+      { type: 'actor.moveTo', target: { x: 1, y: 0, z: 1 }, ndc: [0.1, -0.2] },
+      { type: 'actor.moveTo', target: { x: 1, y: 0, z: 1 }, screen: { x: 120, y: 80 } },
+      { type: 'actor.interact', targetEntityId: 'tree-1', ray: { origin: [0, 0, 0] } },
+      { type: 'actor.interact', targetEntityId: 'tree-1', viewport: { width: 800, height: 300 } },
+    ]) {
+      const response = await fetch(new URL(COMMAND_PATH, baseUrl), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      expect(response.status).toBe(400);
     }
   });
 });

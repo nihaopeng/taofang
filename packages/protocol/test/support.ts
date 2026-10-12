@@ -6,7 +6,9 @@ import type {
   EntityState,
   GameEventBatch,
   GridSpec,
+  InteractCommand,
   MoveIntentCommand,
+  MoveToCommand,
   Quat,
   TileState,
   Transform,
@@ -34,7 +36,7 @@ export function captureParseError(fn: () => unknown): ProtocolParseError {
 export const validGameInfo = {
   gameName: 'Starvalley',
   serverVersion: '0.1.0',
-  protocolVersion: 6,
+  protocolVersion: 7,
   serverTime: '2025-01-02T03:04:05.000Z',
 };
 
@@ -100,6 +102,16 @@ export const phase6WorldSnapshot = {
 export const validMoveIntentCommand: MoveIntentCommand = {
   type: 'actor.moveIntent',
   movement: { x: 1, z: 0 },
+};
+
+export const validMoveToCommand: MoveToCommand = {
+  type: 'actor.moveTo',
+  target: { x: 4.5, y: 0, z: -2.25 },
+};
+
+export const validInteractCommand: InteractCommand = {
+  type: 'actor.interact',
+  targetEntityId: parseEntityId('entity-1'),
 };
 
 export const validEntitySpawnedEvent: EntitySpawnedEvent = {

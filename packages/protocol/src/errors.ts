@@ -6,11 +6,23 @@
  * job, not Protocol's.
  */
 
-/** Machine-readable error codes carried in `ProtocolError`. */
+/**
+ * Machine-readable error codes carried in `ProtocolError`.
+ *
+ * `CONFLICT` means the request itself was well-formed and valid, but it is
+ * **illegal against the CURRENT world state** — e.g. an interaction target that
+ * is out of range or not interactable. It must be distinguishable from a
+ * malformed payload (`BAD_REQUEST`) and, crucially, from "accepted but nothing
+ * happened": a refused-but-valid request currently yields an empty `events`
+ * delta in `GameEventBatch`, which cannot express the difference. No event is
+ * introduced for this; it stays on the existing error path. Mapping a code to a
+ * transport status (409 for `CONFLICT`) is Router's job, not Protocol's.
+ */
 export type ProtocolErrorCode =
   | 'BAD_REQUEST'
   | 'NOT_FOUND'
   | 'METHOD_NOT_ALLOWED'
+  | 'CONFLICT'
   | 'INTERNAL_ERROR';
 
 /** Serialized error payload for any failed request. */

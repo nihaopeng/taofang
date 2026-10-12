@@ -11,6 +11,10 @@ const HTTP_STATUS_BY_ERROR_CODE: Record<ProtocolErrorCode, number> = {
   BAD_REQUEST: 400,
   NOT_FOUND: 404,
   METHOD_NOT_ALLOWED: 405,
+  // A well-formed request that is illegal against the CURRENT world state
+  // (e.g. an interaction target out of range or not interactable). Distinct
+  // from BAD_REQUEST (malformed) and from "accepted, nothing happened".
+  CONFLICT: 409,
   INTERNAL_ERROR: 500,
 };
 

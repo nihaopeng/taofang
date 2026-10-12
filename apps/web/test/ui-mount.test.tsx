@@ -45,6 +45,7 @@ vi.mock('../src/render/three/runtime.ts', () => ({
     }),
     setCameraOrientation: () => {},
     setZoom: () => {},
+    pick: () => null,
     inspect: () => ({
       mounted: false,
       lights: 0,

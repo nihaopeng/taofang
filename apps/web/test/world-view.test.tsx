@@ -26,6 +26,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   getWorldState,
   loadWorld,
+  moveTo,
   resetGameInfoFetch,
   resetGameInfoState,
   resetWorldEventSource,
@@ -71,6 +72,7 @@ vi.mock('../src/render/three/runtime.ts', () => ({
       }
     },
     setZoom: () => {},
+    pick: () => null,
     inspect: () => ({
       mounted: false,
       lights: 0,
@@ -78,6 +80,8 @@ vi.mock('../src/render/three/runtime.ts', () => ({
       background: null,
       groups: 0,
       shadow: null,
+      models: 0,
+      released: { geometries: 0, materials: 0, textures: 0 },
       camera: {
         left: 0,
         right: 0,
@@ -587,5 +591,46 @@ describe('App mount', () => {
     await screen.findByTestId('controlled-actor-info');
     expect(worldCalls).toBe(1);
     expect(getWorldState().status).toBe('ready');
+  });
+});
+
+describe('WorldView rejected-intent notice', () => {
+  it('surfaces a rejected intent as a transient status line, not a broken-world error', async () => {
+    await loadValidWorld();
+
+    // Every write is refused as a valid-but-conflicting intent (409). The
+    // body is the canonical `ProtocolError`; the Organizer surfaces its
+    // `message` verbatim rather than inferring a reason from the status alone.
+    setWorldFetch(async (_url, init) => {
+      if (init?.method === 'POST') {
+        return fakeResponse(
+          { error: { code: 'CONFLICT', message: 'Too far away.' } },
+          { ok: false, status: 409 },
+        );
+      }
+      return fakeResponse(VALID_WORLD_RESPONSE);
+    });
+
+    render(<WorldView />);
+    await act(async () => {
+      await moveTo({ x: 100, y: 0, z: 100 });
+    });
+
+    const notice = await screen.findByTestId('world-notice');
+    expect(notice.getAttribute('role')).toBe('status');
+    expect(notice.textContent).toBe('Too far away.');
+
+    // A refusal must not read as a broken world: no error alert, status ready.
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(getWorldState().notice).toBe('Too far away.');
+    expect(getWorldState().status).toBe('ready');
+    expect(getWorldState().error).toBeNull();
+  });
+
+  it('does not render a notice line when there is none', async () => {
+    await loadValidWorld();
+    render(<WorldView />);
+
+    expect(screen.queryByTestId('world-notice')).toBeNull();
   });
 });

@@ -22,7 +22,9 @@ import type { GameEvent } from '@starvalley/protocol';
 
 import {
   getWorldState,
+  interact,
   loadWorld,
+  moveTo,
   resetWorldEventSource,
   resetWorldFetch,
   resetWorldState,
@@ -678,6 +680,7 @@ describe('realtime stream lifecycle', () => {
     expect(state.entities).toEqual([]);
     expect(state.controlledActorId).toBeNull();
     expect(state.error).toBeNull();
+    expect(state.notice).toBeNull();
   });
 
   it('resetWorldState cancels a pending reconnect', async () => {
@@ -877,6 +880,253 @@ describe('setMovementIntent', () => {
   });
 });
 
+describe('moveTo / interact intents', () => {
+  const rejected = (status: number, code: string, message = 'refused'): Response =>
+    fakeResponse({ error: { code, message } }, { ok: false, status });
+
+  it('moveTo posts exactly { type, target } with no extra keys and moves nothing locally', async () => {
+    await loadValidWorld();
+
+    const requests: Array<{
+      url: string;
+      method: string | undefined;
+      body: Record<string, unknown>;
+    }> = [];
+    setWorldFetch(async (url, init) => {
+      requests.push({
+        url,
+        method: init?.method,
+        body: JSON.parse(init?.body as string) as Record<string, unknown>,
+      });
+      return fakeResponse(commandResponse([]));
+    });
+
+    await expect(moveTo({ x: 4.5, y: 0, z: -2.25 })).resolves.toBeUndefined();
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0].url).toBe(COMMAND_PATH);
+    expect(requests[0].method).toBe('POST');
+    // Deep-equal and exactly two top-level keys: no actor id, no extra field.
+    expect(requests[0].body).toEqual({
+      type: 'actor.moveTo',
+      target: { x: 4.5, y: 0, z: -2.25 },
+    });
+    expect(Object.keys(requests[0].body)).toEqual(['type', 'target']);
+    expect(Object.keys(requests[0].body.target as object)).toEqual(['x', 'y', 'z']);
+    for (const forbidden of [
+      'actorId',
+      'playerId',
+      'position',
+      'camera',
+      'ndcX',
+      'ndcY',
+      'screenX',
+      'screenY',
+      'pointer',
+      'ray',
+    ]) {
+      expect(forbidden in requests[0].body).toBe(false);
+    }
+    // No prediction: an empty ack (the server accepted but nothing moved) leaves
+    // the authoritative position untouched.
+    expect(entity(getWorldState(), 'entity-a').position).toEqual({ x: 3, y: 0, z: 4 });
+    expect(getWorldState().notice).toBeNull();
+  });
+
+  it('interact posts exactly { type, targetEntityId } with no extra keys and changes nothing locally', async () => {
+    await loadValidWorld();
+
+    const requests: Array<{ url: string; method: string | undefined; body: Record<string, unknown> }> =
+      [];
+    setWorldFetch(async (url, init) => {
+      requests.push({
+        url,
+        method: init?.method,
+        body: JSON.parse(init?.body as string) as Record<string, unknown>,
+      });
+      return fakeResponse(commandResponse([]));
+    });
+
+    await expect(interact('entity-b')).resolves.toBeUndefined();
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0].url).toBe(COMMAND_PATH);
+    expect(requests[0].method).toBe('POST');
+    expect(requests[0].body).toEqual({ type: 'actor.interact', targetEntityId: 'entity-b' });
+    expect(Object.keys(requests[0].body)).toEqual(['type', 'targetEntityId']);
+    expect('actorId' in requests[0].body).toBe(false);
+    expect('playerId' in requests[0].body).toBe(false);
+    expect(entity(getWorldState(), 'entity-b').position).toEqual({ x: 1, y: 0, z: 2 });
+  });
+
+  it('a 409 CONFLICT rejection sets a short notice and does NOT flip status to error', async () => {
+    await loadValidWorld();
+    expect(getWorldState().status).toBe('ready');
+    setWorldFetch(async () => rejected(409, 'CONFLICT', 'Too far away.'));
+
+    await moveTo({ x: 100, y: 0, z: 100 });
+
+    const state = getWorldState();
+    expect(state.notice).toBe('Too far away.');
+    expect(state.notice).not.toBeNull();
+    // A rejected intent is not a broken world: the previous status is preserved.
+    expect(state.status).toBe('ready');
+    expect(state.status).not.toBe('error');
+    expect(state.error).toBeNull();
+    // And no entity moved locally.
+    expect(entity(state, 'entity-a').position).toEqual({ x: 3, y: 0, z: 4 });
+  });
+
+  it('a 409 whose body carries a non-interactable reason surfaces THAT message, not a blanket conflict', async () => {
+    await loadValidWorld();
+    // Clicking the controlled actor's own node is a `not-interactable`
+    // rejection: a 409 CONFLICT, but a target zero units away. The server
+    // authors a short reason; the client must surface it instead of flattening
+    // every 409 to "Too far away.". This is the regression the status-only
+    // mapping missed.
+    setWorldFetch(async () =>
+      rejected(409, 'CONFLICT', 'That cannot be interacted with.'),
+    );
+
+    await interact('entity-a');
+
+    const state = getWorldState();
+    expect(state.notice).toBe('That cannot be interacted with.');
+    expect(state.notice).not.toBe('Too far away.');
+    expect(state.status).toBe('ready');
+    expect(state.error).toBeNull();
+  });
+
+  it('a 409 whose body carries the out-of-range reason surfaces "Too far away."', async () => {
+    await loadValidWorld();
+    setWorldFetch(async () => rejected(409, 'CONFLICT', 'Too far away.'));
+
+    await moveTo({ x: 100, y: 0, z: 100 });
+
+    const state = getWorldState();
+    expect(state.notice).toBe('Too far away.');
+    expect(state.status).toBe('ready');
+    expect(state.error).toBeNull();
+  });
+
+  it('a 409 with an unparseable/absent error body falls back to a generic notice', async () => {
+    await loadValidWorld();
+    const unparseable = {
+      ok: false,
+      status: 409,
+      json: async (): Promise<unknown> => {
+        throw new SyntaxError('Unexpected end of JSON input');
+      },
+    };
+    setWorldFetch(async () => unparseable as unknown as Response);
+
+    await moveTo({ x: 100, y: 0, z: 100 });
+
+    const state = getWorldState();
+    expect(state.notice).toBe('Could not do that.');
+    expect(state.status).toBe('ready');
+    expect(state.status).not.toBe('error');
+    expect(state.error).toBeNull();
+  });
+
+  it('a 404 NOT_FOUND rejection sets a "gone" notice with status unchanged', async () => {
+    await loadValidWorld();
+    setWorldFetch(async () => rejected(404, 'NOT_FOUND'));
+
+    await interact('entity-b');
+
+    const state = getWorldState();
+    expect(state.notice).toBe('That is gone.');
+    expect(state.status).toBe('ready');
+    expect(state.status).not.toBe('error');
+    expect(state.error).toBeNull();
+    expect(entity(state, 'entity-b').position).toEqual({ x: 1, y: 0, z: 2 });
+  });
+
+  it('maps any other failure to a generic notice without touching status/error', async () => {
+    await loadValidWorld();
+    setWorldFetch(async () => {
+      throw new TypeError('Failed to fetch');
+    });
+
+    await interact('entity-b');
+
+    const state = getWorldState();
+    expect(state.notice).toBe('Could not do that.');
+    expect(state.status).toBe('ready');
+    expect(state.error).toBeNull();
+  });
+
+  it('a following successful intent clears the notice', async () => {
+    await loadValidWorld();
+    setWorldFetch(async () => rejected(409, 'CONFLICT', 'Too far away.'));
+    await moveTo({ x: 100, y: 0, z: 100 });
+    expect(getWorldState().notice).toBe('Too far away.');
+
+    setWorldFetch(async () =>
+      fakeResponse(commandResponse([transformChanged('entity-a', { x: 5, y: 0, z: 5 })])),
+    );
+    await moveTo({ x: 5, y: 0, z: 5 });
+
+    const state = getWorldState();
+    expect(state.notice).toBeNull();
+    expect(entity(state, 'entity-a').position).toEqual({ x: 5, y: 0, z: 5 });
+  });
+
+  it('a successful movement intent also clears the notice', async () => {
+    await loadValidWorld();
+    setWorldFetch(async () => rejected(409, 'CONFLICT', 'Too far away.'));
+    await interact('entity-b');
+    expect(getWorldState().notice).toBe('Too far away.');
+
+    setWorldFetch(async () => fakeResponse(commandResponse([])));
+    await setMovementIntent({ x: 0, z: 0 });
+
+    expect(getWorldState().notice).toBeNull();
+  });
+
+  it('resetWorldState clears a pending notice', async () => {
+    await loadValidWorld();
+    setWorldFetch(async () => rejected(409, 'CONFLICT', 'Too far away.'));
+    await moveTo({ x: 100, y: 0, z: 100 });
+    expect(getWorldState().notice).toBe('Too far away.');
+
+    resetWorldState();
+
+    expect(getWorldState().notice).toBeNull();
+    expect(getWorldState().status).toBe('idle');
+  });
+
+  it('is a safe no-op before any world is loaded', async () => {
+    let calls = 0;
+    setWorldFetch(async () => {
+      calls += 1;
+      return fakeResponse(commandResponse([]));
+    });
+
+    await expect(moveTo({ x: 1, y: 0, z: 1 })).resolves.toBeUndefined();
+    await expect(interact('entity-b')).resolves.toBeUndefined();
+
+    expect(calls).toBe(0);
+    expect(getWorldState().status).toBe('idle');
+  });
+
+  it('rejects an empty interact target locally without a request', async () => {
+    await loadValidWorld();
+    let calls = 0;
+    setWorldFetch(async () => {
+      calls += 1;
+      return fakeResponse(commandResponse([]));
+    });
+
+    await expect(interact('')).resolves.toBeUndefined();
+
+    expect(calls).toBe(0);
+    expect(getWorldState().notice).toBe('Could not do that.');
+    expect(getWorldState().status).toBe('ready');
+  });
+});
+
 describe('event applier seam', () => {
   it('ignores an unknown event type at runtime without throwing or changing state', async () => {
     // The transport's Protocol guard rejects an unknown event `type` before it
@@ -932,6 +1182,7 @@ describe('world store identity and subscription', () => {
     expect(state.tiles).toEqual([]);
     expect(state.entities).toEqual([]);
     expect(state.controlledActorId).toBeNull();
+    expect(state.notice).toBeNull();
   });
 
   it('unsubscribe stops notifications', async () => {

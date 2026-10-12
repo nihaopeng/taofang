@@ -24,7 +24,7 @@ describe('protocol constants', () => {
     expect(STREAM_PATH).toBe('/api/stream');
   });
 
-  it('exposes the phase-7 protocol version (continuous 3D world / grid split)', () => {
-    expect(PROTOCOL_VERSION).toBe(6);
+  it('exposes the phase-8 protocol version (two new intents; GLB + mouse-first input)', () => {
+    expect(PROTOCOL_VERSION).toBe(7);
   });
 });

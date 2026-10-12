@@ -79,8 +79,9 @@ export const ROUTES: readonly RouteDefinition[] = [
       // Router validates the command envelope (including the `type`
       // discriminant) and forwards it verbatim. It never switches on
       // `command.type` and never applies movement/world rules: the returned
-      // batch is the Manager's authoritative delta, and an empty `events`
-      // array is a refusal.
+      // batch is the Manager's authoritative delta. For a MOVEMENT command an
+      // empty `events` array signals a refusal (e.g. collision/bounds); a
+      // refused INTERACTION instead throws and is surfaced as a 409.
       const command = parseGameCommand(body);
       const batch: GameEventBatch = world.submitIntent({ actorId, command });
       return { status: 200, body: batch };

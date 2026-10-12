@@ -14,11 +14,20 @@ export {
   DEFAULT_ACTOR_RADIUS,
   DEFAULT_ACTOR_SPEED,
   DEFAULT_WORLD_MAP,
+  INTERACTABLE_BY_ENTITY_KIND,
+  INTERACTION_RANGE,
+  InteractionRejectedError,
   TICK_RATE_HZ,
   UnknownActorError,
+  UnknownEntityError,
   WALKABILITY_BY_TERRAIN,
   cellCentre,
   cellOf,
   createWorldManager,
+  distanceXZ,
 } from './world-manager.ts';
-export type { CreateWorldManagerDeps, WorldManager } from './world-manager.ts';
+export type {
+  CreateWorldManagerDeps,
+  InteractionRejectionReason,
+  WorldManager,
+} from './world-manager.ts';

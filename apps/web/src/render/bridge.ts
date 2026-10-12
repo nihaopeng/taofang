@@ -177,6 +177,27 @@ function entityNodeId(entityId: string): NodeId {
   return `entity:${entityId}` as NodeId;
 }
 
+/** The namespace prefix that marks a render node id as an entity node. */
+const ENTITY_NODE_PREFIX = 'entity:';
+
+/**
+ * Map a render `NodeId` back to the game `entityId` it was derived from, or
+ * `null` when the node is not an entity node (e.g. a tile).
+ *
+ * The bridge owns the `entity:<entityId>` convention, so this mapping lives here:
+ * the runtime hands back an opaque `NodeId` from `pick()`, and the UI — which may
+ * not import the game protocol — turns it into an interact intent through this
+ * function.
+ */
+export function entityIdOfNodeId(nodeId: NodeId): string | null {
+  const raw = String(nodeId);
+  if (!raw.startsWith(ENTITY_NODE_PREFIX)) {
+    return null;
+  }
+  const entityId = raw.slice(ENTITY_NODE_PREFIX.length);
+  return entityId.length > 0 ? entityId : null;
+}
+
 /** Key for the internal tile bookkeeping; the cell coordinate is the tile's identity. */
 function tileKey(cellX: number, cellZ: number): string {
   return `${cellX},${cellZ}`;

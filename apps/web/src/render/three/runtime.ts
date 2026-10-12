@@ -65,6 +65,7 @@
 
 import {
   AmbientLight,
+  Box3,
   BoxGeometry,
   Color,
   ConeGeometry,
@@ -72,18 +73,29 @@ import {
   DirectionalLight,
   Group,
   IcosahedronGeometry,
+  Matrix4,
   Mesh,
   MeshStandardMaterial,
   OrthographicCamera,
   PCFSoftShadowMap,
+  Plane,
   PlaneGeometry,
   Quaternion,
+  Raycaster,
   Scene,
+  SkinnedMesh,
   SphereGeometry,
+  Texture,
+  Vector2,
   Vector3,
   WebGLRenderer,
 } from 'three';
 import type { Light, Material, Object3D } from 'three';
+// `three/examples/jsm/*` is importable here (and only here) under the lint
+// boundary. The default loader is the real GLTFLoader; tests inject a loader so
+// they never touch the network, and a checked-in fixture exercises this path.
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { clone as cloneSkinned } from 'three/examples/jsm/utils/SkeletonUtils.js';
 import type {
   AnimationId,
   AppearanceId,
@@ -93,8 +105,45 @@ import type {
   RenderTransform,
 } from '@starvalley/render-protocol';
 
+import { MODEL_CATALOGUE } from './assets';
+import type { AppearanceModelCatalogue, ModelAsset } from './assets';
+
 /** Scene group a prefab's nodes are parented to. */
 export type PrefabGroup = 'Terrain' | 'WorldObjects' | 'Actors' | 'Effects';
+
+/**
+ * How a node's visual is currently realised.
+ *
+ * `placeholder` also covers "no asset configured" (the catalogue has no entry),
+ * so the placeholder is always a valid, visible state. `loading`/`failed` keep the
+ * placeholder on screen: a missing or slow asset must never blank a node.
+ */
+export type ModelState = 'placeholder' | 'loading' | 'loaded' | 'failed';
+
+/**
+ * Resolves a GLB URL to a parsed template `Object3D`.
+ *
+ * Injected so tests never touch the network. The default is the real
+ * `GLTFLoader` (see `loadGlbTemplate`); the runtime caches one parse per URL and
+ * clones per node.
+ */
+export type ModelLoader = (url: string) => Promise<Object3D>;
+
+/**
+ * Plain-data result of `pick(ndcX, ndcY)`: a registered node visual, the
+ * mathematical ground plane, or nothing.
+ *
+ * It returns no Three.js object and no camera/ray data, because none of those may
+ * ever reach a command. `nodeId` is the runtime's own opaque id; mapping it to
+ * game identity is the bridge's job, not the runtime's.
+ */
+export type RenderPick =
+  | { readonly kind: 'node'; readonly nodeId: NodeId }
+  | {
+      readonly kind: 'ground';
+      readonly point: { readonly x: number; readonly y: number; readonly z: number };
+    }
+  | null;
 
 /**
  * A runtime-internal description of how one appearance is realised.
@@ -151,6 +200,14 @@ export interface RenderInspection {
   groups: number;
   /** Sun shadow configuration, or `null` once the light rig has been released. */
   shadow: { sunCasts: boolean; mapWidth: number; mapHeight: number } | null;
+  /** Number of GLB templates currently parsed and cached (0 after `dispose`). */
+  models: number;
+  /**
+   * GPU resources released so far (geometry/material/texture). Non-decreasing
+   * across a runtime's life; lets a test prove `dispose()` actually released the
+   * loaded model rather than only forgetting it.
+   */
+  released: { geometries: number; materials: number; textures: number };
   /** The camera rig state and the orthographic frustum it produces. */
   camera: {
     left: number;
@@ -195,8 +252,21 @@ export interface RenderInspection {
     visualY: number;
     /** Placeholder motion roll on the visual child (0 at rest). */
     visualRoll: number;
-    /** Highest local Y of any mesh in the visual subtree, measured from geometry. */
+    /**
+     * Highest local Y of any mesh in the node's visual subtree, relative to the
+     * node root, with the visual's own scale/anchor and every nested transform
+     * applied. This is the visual's real height above its feet, so it includes a
+     * catalogue `scale`/`yOffset` on a loaded model.
+     */
     visualTopY: number;
+    /** How this node's visual is realised: placeholder, loading, loaded, or failed. */
+    model: ModelState;
+    /**
+     * Plain-data identity of the skeleton driving this node's visual, or `null`
+     * for a non-skinned visual. Two node clones with independent skeletons have
+     * different ids; a plain (non-skeleton-aware) clone shares the template's.
+     */
+    skeletonId: string | null;
     castsShadow: boolean;
     receivesShadow: boolean;
   }[];
@@ -243,6 +313,25 @@ export interface RenderRuntime {
   setCameraOrientation(orientation: { pitchDegrees?: number; yawDegrees?: number }): void;
   /** Set the orthographic zoom factor (clamped to the rig's limits). */
   setZoom(zoom: number): void;
+  /**
+   * Resolve a normalized device coordinate (`[-1, 1]`, origin centre, `+y` up)
+   * to plain pick data:
+   *
+   * 1. a registered `object`-layer node visual under the ray ->
+   *    `{ kind: 'node', nodeId }` (terrain `base` plates are the visible ground
+   *    and are never nodes here);
+   * 2. otherwise the mathematical ground plane (`y = bounds.min.y`) ->
+   *    `{ kind: 'ground', point }`;
+   * 3. otherwise `null`.
+   *
+   * A ground hit outside `bounds` returns `null`: there is no clamping and no
+   * gameplay rule here. Node visuals win over the ground even when the ground is
+   * closer, so a click on a tall prop never falls through to a move intent.
+   *
+   * This is a runtime QUERY, not an ISA primitive: it needs the camera matrix,
+   * which is exactly why it can never leave the client.
+   */
+  pick(ndcX: number, ndcY: number): RenderPick;
   /** Snapshot the runtime as plain data. Works without `mount`. */
   inspect(): RenderInspection;
   /**
@@ -270,8 +359,25 @@ interface RuntimeNode {
   defaultAnimation: AnimationId;
   /** Placeholder motion for this node's prefab, or `undefined`. */
   motion: Prefab['motion'];
-  /** Highest local Y of the visual's meshes, measured from real geometry. */
+  /** Highest local Y of the visual's meshes, relative to the node root (see {@link measureVisualTopY}). */
   visualTopY: number;
+  /**
+   * Whether this node owns the geometry/materials of `visual`.
+   * Placeholder visuals are built per node and are disposed with the node; a
+   * loaded GLB clone shares the cached template's resources and must NOT be
+   * disposed when the node is destroyed (that would free resources a sibling is
+   * still drawing). Template resources are released once in `dispose()`.
+   */
+  ownsVisual: boolean;
+  /** How the visual is realised (placeholder always renders until a model swaps in). */
+  modelState: ModelState;
+  /** Bumped whenever `visual` is replaced; invalidates a stale in-flight load. */
+  visualToken: number;
+  /**
+   * Prefab-declared shadow intent (captured from the placeholder at
+   * create/setAppearance). A swapped model re-applies this intent to its meshes
+   * rather than measuring the imported clone, whose flags default to false.
+   */
   castsShadow: boolean;
   receivesShadow: boolean;
   /** Authoritative interpolation target, or `null` when the node is settled. */
@@ -337,24 +443,146 @@ function material(colour: number): MeshStandardMaterial {
   return new MeshStandardMaterial({ color: colour });
 }
 
-function disposeMaterial(materialOrList: Material | Material[]): void {
-  if (Array.isArray(materialOrList)) {
-    for (const entry of materialOrList) {
-      entry.dispose();
-    }
-    return;
-  }
-  materialOrList.dispose();
+/** How many GPU resources a release pass freed. */
+interface ReleaseCounts {
+  geometries: number;
+  materials: number;
+  textures: number;
 }
 
-/** Recursively release the geometries/materials of a node's visual subtree. */
-function disposeObject(object: Object3D): void {
+function emptyReleaseCounts(): ReleaseCounts {
+  return { geometries: 0, materials: 0, textures: 0 };
+}
+
+/** Release a material (or list) and every texture it references. */
+function releaseMaterial(materialOrList: Material | Material[]): ReleaseCounts {
+  const counts = emptyReleaseCounts();
+  const list = Array.isArray(materialOrList) ? materialOrList : [materialOrList];
+  for (const entry of list) {
+    // Release textures referenced by the material before the material itself.
+    // Iterating own enumerable values covers `map`/`normalMap`/`emissiveMap`/...
+    // without hardcoding a texture-slot list that a future asset could exceed.
+    for (const value of Object.values(entry)) {
+      if (value instanceof Texture) {
+        value.dispose();
+        counts.textures += 1;
+      }
+    }
+    entry.dispose();
+    counts.materials += 1;
+  }
+  return counts;
+}
+
+/**
+ * Recursively release a subtree's GPU resources: every mesh geometry, material
+ * and material-referenced texture.
+ *
+ * Returns counts so `inspect()` can prove disposal actually happened. Callers
+ * must only pass a subtree the runtime OWNS. A loaded GLB clone shares its
+ * geometry/materials with the cached template (and with sibling clones), so
+ * releasing a clone would free resources another node is still drawing; model
+ * resources are released once, from the template, in `dispose()`.
+ */
+function releaseObject(object: Object3D): ReleaseCounts {
+  const counts = emptyReleaseCounts();
   object.traverse((child) => {
     if (child instanceof Mesh) {
       child.geometry.dispose();
-      disposeMaterial(child.material);
+      counts.geometries += 1;
+      const materialCounts = releaseMaterial(child.material);
+      counts.materials += materialCounts.materials;
+      counts.textures += materialCounts.textures;
     }
   });
+  return counts;
+}
+
+/**
+ * Material policy: **opaque or `alphaTest` only**.
+ *
+ * A blended material (`transparent === true`) needs a uniform back-to-front
+ * y-sorted transparent pass, which does not exist yet. Allowing one would let a
+ * model draw in arbitrary order and corrupt the depth-buffer occlusion guarantee.
+ * A blended material is therefore coerced into an alpha-tested cutout: keep the
+ * diffuse/alpha map, set `transparent = false`, raise `alphaTest` above zero so
+ * the cutout still discards, and keep depth writes on. This runs ONCE per parsed
+ * template, so every clone shares the coerced material.
+ *
+ * The coercion is reported once per coerced material: an artist who authored a
+ * real blend gets a warning naming the material and the asset it came from,
+ * so a silently-opaque result is discoverable.
+ *
+ * @param source the asset URL the template was parsed from, for the report.
+ */
+function applyOpaqueMaterialPolicy(root: Object3D, source: string): void {
+  const coerced = new Set<Material>();
+  root.traverse((child) => {
+    if (!(child instanceof Mesh)) {
+      return;
+    }
+    const list = Array.isArray(child.material) ? child.material : [child.material];
+    for (const entry of list) {
+      if (entry.transparent === true && !coerced.has(entry)) {
+        coerced.add(entry);
+        entry.transparent = false;
+        entry.alphaTest = Math.max(entry.alphaTest, 0.5);
+        entry.depthWrite = true;
+        entry.needsUpdate = true;
+        console.warn(
+          `[render] material "${entry.name || '(unnamed)'}" in "${source}" was authored transparent but coerced to opaque alphaTest=${entry.alphaTest}; blended transparency has no y-sorted pass yet`,
+        );
+      }
+    }
+  });
+}
+
+/** Whether a template contains a skinned mesh (choose the clone routine). */
+function hasSkinnedMesh(root: Object3D): boolean {
+  let skinned = false;
+  root.traverse((child) => {
+    if (child instanceof SkinnedMesh) {
+      skinned = true;
+    }
+  });
+  return skinned;
+}
+
+/**
+ * Clone a parsed template for one node. A skinned template needs
+ * `SkeletonUtils.clone` (it rebinds the skeleton); anything else uses the cheap
+ * `Object3D.clone(true)`. Geometry and material are shared with the template by
+ * design, so N nodes cost one parse and one set of GPU resources.
+ */
+function cloneTemplate(template: Object3D): Object3D {
+  return hasSkinnedMesh(template) ? cloneSkinned(template) : template.clone(true);
+}
+
+/** Apply the catalogue's presentation fixes to a freshly cloned model visual. */
+function applyAssetFixes(visual: Group, asset: ModelAsset): void {
+  if (asset.scale !== undefined) {
+    visual.scale.set(asset.scale.x, asset.scale.y, asset.scale.z);
+  }
+  if (asset.yawRadians !== undefined) {
+    visual.rotation.y = asset.yawRadians;
+  }
+  if (asset.yOffset !== undefined) {
+    visual.position.y = asset.yOffset;
+  }
+}
+
+/**
+ * Production model loader: the real `GLTFLoader`, one parse per call.
+ *
+ * Extension point: DRACO / KTX2 decoder registration belongs HERE, on the loader
+ * instance before `loadAsync` (e.g. `loader.setDRACOLoader(...)` /
+ * `loader.setKTX2Loader(...)`). A decoder also owns a worker pool that
+ * `dispose()` cannot release, so adding one would need a runtime-level teardown.
+ */
+export async function loadGlbTemplate(url: string): Promise<Object3D> {
+  const loader = new GLTFLoader();
+  const gltf = await loader.loadAsync(url);
+  return gltf.scene;
 }
 
 /** Bucket key for the per-`(layer, appearance)` index. */
@@ -572,30 +800,56 @@ const placeholderMotion: NonNullable<Prefab['motion']> = (
   }
 };
 
+/** Reused across `measureVisualTopY` calls so the measurement does not allocate. */
+const scratchParentInverse = new Matrix4();
+const scratchTransform = new Matrix4();
+const scratchBox = new Box3();
+
 /**
- * Highest local Y of any mesh in a visual, measured from the real geometry.
+ * Highest local Y of any mesh in a visual, relative to the node root, measured
+ * from the real geometry and every transform in between.
+ *
  * The registry carries no `height` metadata, so this is the single source of
- * truth for how tall a realisation actually is.
+ * truth for how tall a realisation actually is. Measuring with each mesh's full
+ * matrix relative to the root (instead of naively adding `child.position.y`)
+ * means a nested or rotated mesh, and the catalogue's `scale`/`yawRadians`/
+ * `yOffset` on the model wrapper, all contribute. The node's own authoritative
+ * world transform cancels, so the result is the visual's height above its feet
+ * and does not go stale when the node later moves.
  */
 function measureVisualTopY(visual: Object3D): number {
+  visual.updateWorldMatrix(true, true);
+  if (visual.parent !== null) {
+    scratchParentInverse.copy(visual.parent.matrixWorld).invert();
+  } else {
+    scratchParentInverse.identity();
+  }
   let top = Number.NEGATIVE_INFINITY;
   visual.traverse((child) => {
-    if (child instanceof Mesh) {
-      child.geometry.computeBoundingBox();
-      const box = child.geometry.boundingBox;
-      if (box !== null) {
-        top = Math.max(top, box.max.y + child.position.y);
-      }
+    if (!(child instanceof Mesh)) {
+      return;
     }
+    const geometry = child.geometry;
+    if (geometry.boundingBox === null) {
+      geometry.computeBoundingBox();
+    }
+    const box = geometry.boundingBox;
+    if (box === null) {
+      return;
+    }
+    scratchTransform.multiplyMatrices(scratchParentInverse, child.matrixWorld);
+    scratchBox.copy(box).applyMatrix4(scratchTransform);
+    top = Math.max(top, scratchBox.max.y);
   });
   return top === Number.NEGATIVE_INFINITY ? 0 : top;
 }
 
 /**
- * Shadow flags measured from the real meshes a visual created, never from
- * registry metadata. `inspect()` therefore reports what the scene graph
- * contains: a prefab that stops setting `castShadow`/`receiveShadow` fails its
- * test.
+ * Shadow flags measured from the real meshes a placeholder visual created,
+ * never from registry metadata. This captures the prefab's declared intent once
+ * at create/`appearance.set`; `inspect()` reports it, and a model swap re-applies
+ * it (see {@link applyShadowFlags}) before measuring the loaded clone, so an
+ * imported asset with default-false flags cannot silently downgrade it.
  */
 function measureShadowFlags(visual: Object3D): {
   castsShadow: boolean;
@@ -610,6 +864,41 @@ function measureShadowFlags(visual: Object3D): {
     }
   });
   return { castsShadow, receivesShadow };
+}
+
+/**
+ * Stamp a shadow intent onto every mesh in a freshly cloned model visual.
+ *
+ * `GLTFLoader` leaves `castShadow`/`receiveShadow` at `false`, so the intent must
+ * be written onto the clone explicitly; otherwise real art renders without the
+ * shadows its placeholder cast.
+ */
+function applyShadowFlags(visual: Object3D, castsShadow: boolean, receivesShadow: boolean): void {
+  visual.traverse((child) => {
+    if (child instanceof Mesh) {
+      child.castShadow = castsShadow;
+      child.receiveShadow = receivesShadow;
+    }
+  });
+}
+
+/**
+ * Plain-data identity of the skeleton driving a visual, or `null` for a
+ * non-skinned visual.
+ *
+ * `SkeletonUtils.clone` rebinds a fresh `Skeleton` per node, while a plain
+ * `Object3D.clone(true)` shares the template's skeleton, so exposing the
+ * skeleton's uuid lets a test prove the two node clones are independent without
+ * leaking a Three object out of `inspect()`.
+ */
+function skeletonIdOf(visual: Object3D): string | null {
+  let skeletonId: string | null = null;
+  visual.traverse((child) => {
+    if (skeletonId === null && child instanceof SkinnedMesh) {
+      skeletonId = child.skeleton.uuid;
+    }
+  });
+  return skeletonId;
 }
 
 const PREFABS: Readonly<Record<string, Prefab>> = {
@@ -684,8 +973,18 @@ function normalizeYawDegrees(degrees: number): number {
  * authoritative world extent must supply it. The whole scene composition exists
  * immediately, so `apply` works before (and without) `mount`; only `mount` needs
  * a real canvas.
+ *
+ * `loadModel` and `catalogue` are the asset-pipeline seams: the default loader is
+ * the real `GLTFLoader` and the default catalogue is (deliberately) empty, so a
+ * test injects both to exercise load/clone/swap without a network.
  */
-export function createThreeRuntime(options: { bounds: RuntimeWorldBounds }): RenderRuntime {
+export function createThreeRuntime(options: {
+  bounds: RuntimeWorldBounds;
+  /** Injectable model loader; defaults to the real `GLTFLoader` (`loadGlbTemplate`). */
+  loadModel?: ModelLoader;
+  /** Injectable asset catalogue; defaults to `MODEL_CATALOGUE`. */
+  catalogue?: AppearanceModelCatalogue;
+}): RenderRuntime {
   const bounds = options.bounds;
   const worldWidth = bounds.max.x - bounds.min.x;
   const worldDepth = bounds.max.z - bounds.min.z;
@@ -693,12 +992,28 @@ export function createThreeRuntime(options: { bounds: RuntimeWorldBounds }): Ren
   const worldCenterZ = (bounds.min.z + bounds.max.z) / 2;
   const groundY = bounds.min.y;
 
+  const loadModel = options.loadModel ?? loadGlbTemplate;
+  const catalogue = options.catalogue ?? MODEL_CATALOGUE;
+  // One parse per URL. A rejected load is dropped from the cache so a later node
+  // can retry; concurrent callers share the same in-flight promise.
+  const templateCache = new Map<string, Promise<Object3D>>();
+  // Templates whose geometry/material/texture this runtime owns and releases in
+  // `dispose()`. A node's clone borrows from these.
+  const ownedTemplates = new Set<Object3D>();
+  const released: ReleaseCounts = emptyReleaseCounts();
+  // A late load resolve after dispose must not touch the scene; this flag plus a
+  // per-node token is the guard.
+  let disposed = false;
+
   const scene = new Scene();
   // Fill the whole viewport, including the area outside the finite ground plate,
   // with the page-family background instead of the WebGL default black.
   const background = new Color(SCENE_BACKGROUND_COLOUR);
   scene.background = background;
   const nodes = new Map<NodeId, RuntimeNode>();
+  // Reverse index used by `pick` to map an intersected mesh back to its node
+  // root, then to the opaque NodeId. Game identity never enters the runtime.
+  const nodeIdByRoot = new Map<Object3D, NodeId>();
   // Per-`(layer, appearance)` node index: the seam a future instanced / atlas
   // realisation swaps behind, keyed off the same bucket the ISA already implies.
   const buckets = new Map<string, Set<NodeId>>();
@@ -862,6 +1177,109 @@ export function createThreeRuntime(options: { bounds: RuntimeWorldBounds }): Ren
     positionNode(node);
   }
 
+  /** Accumulate a release pass's counts into the runtime's disposal ledger. */
+  function accumulateRelease(counts: ReleaseCounts): void {
+    released.geometries += counts.geometries;
+    released.materials += counts.materials;
+    released.textures += counts.textures;
+  }
+
+  /** Release a node-owned (placeholder) visual. A borrowed model clone is skipped. */
+  function releaseOwnedVisual(node: RuntimeNode): void {
+    if (!node.ownsVisual) {
+      return;
+    }
+    accumulateRelease(releaseObject(node.visual));
+  }
+
+  /**
+   * Resolve `url` to a parsed template, caching **one parse per URL**. Concurrent
+   * callers share the in-flight promise; a rejected load is dropped so a later
+   * node can retry. A parse that lands after `dispose()` is released immediately
+   * and never enters the scene.
+   */
+  function templateFor(url: string): Promise<Object3D> {
+    const cached = templateCache.get(url);
+    if (cached !== undefined) {
+      return cached;
+    }
+    const promise = loadModel(url).then((template) => {
+      if (disposed) {
+        accumulateRelease(releaseObject(template));
+        return template;
+      }
+      ownedTemplates.add(template);
+      // Material policy once per template, so every clone shares the coerced
+      // material (see `applyOpaqueMaterialPolicy`).
+      applyOpaqueMaterialPolicy(template, url);
+      return template;
+    });
+    templateCache.set(url, promise);
+    promise.catch(() => {
+      if (templateCache.get(url) === promise) {
+        templateCache.delete(url);
+      }
+    });
+    return promise;
+  }
+
+  /**
+   * Begin resolving a node's catalogue asset. The placeholder stays visible until
+   * the model resolves; a failure logs and keeps the placeholder. A stale resolve
+   * (node destroyed, or appearance/visual replaced while in flight) is ignored via
+   * node identity plus the node's `visualToken`.
+   */
+  function resolveModel(node: RuntimeNode, nodeId: NodeId, asset: ModelAsset): void {
+    const token = node.visualToken;
+    templateFor(asset.url)
+      .then((template) => {
+        if (disposed || nodes.get(nodeId) !== node || node.visualToken !== token) {
+          return;
+        }
+        swapInModel(node, asset, template);
+      })
+      .catch((error: unknown) => {
+        if (disposed || nodes.get(nodeId) !== node || node.visualToken !== token) {
+          return;
+        }
+        // A missing or slow asset must never blank the node: keep the placeholder.
+        node.modelState = 'failed';
+        console.error(
+          `[render] failed to load model "${asset.url}" for "${nodeId}"; keeping placeholder`,
+          error,
+        );
+      });
+  }
+
+  /** Replace a node's placeholder with a clone of the resolved template. */
+  function swapInModel(node: RuntimeNode, asset: ModelAsset, template: Object3D): void {
+    // Wrap the clone so the node's visual stays a `Group` and the catalogue's
+    // scale/orientation/anchor fixes have a single object to write to.
+    const wrapper = new Group();
+    wrapper.add(cloneTemplate(template));
+    applyAssetFixes(wrapper, asset);
+    // The prefab's placeholder declared this node's shadow intent (captured at
+    // create/appearance.set). `GLTFLoader` leaves `castShadow`/`receiveShadow`
+    // false on every fresh clone, so stamp the intent onto the loaded meshes
+    // BEFORE re-measuring; otherwise the swap would silently downgrade the node
+    // to "no shadows" and real art would render without them.
+    applyShadowFlags(wrapper, node.castsShadow, node.receivesShadow);
+    node.root.remove(node.visual);
+    releaseOwnedVisual(node);
+    node.visual = wrapper;
+    node.ownsVisual = false;
+    node.root.add(wrapper);
+    node.modelState = 'loaded';
+    node.visualToken += 1;
+    // Re-measure the geometry-derived facts off the real model visual so height
+    // and shadow accounting follow the swap instead of the retired placeholder.
+    // The shadow measurement now reads back the intent applied just above.
+    const shadowFlags = measureShadowFlags(wrapper);
+    node.visualTopY = measureVisualTopY(wrapper);
+    node.castsShadow = shadowFlags.castsShadow;
+    node.receivesShadow = shadowFlags.receivesShadow;
+  }
+
   function createNode(command: {
     nodeId: NodeId;
     layer: RenderLayer;
@@ -870,6 +1288,7 @@ export function createThreeRuntime(options: { bounds: RuntimeWorldBounds }): Ren
     visible: boolean;
   }): void {
     const prefab = prefabFor(command.appearance);
+    const asset = catalogue[command.appearance];
     const root = new Group();
     const visual = prefab.createVisual();
     root.add(visual);
@@ -889,6 +1308,9 @@ export function createThreeRuntime(options: { bounds: RuntimeWorldBounds }): Ren
       defaultAnimation: prefab.defaultAnimation,
       motion: prefab.motion,
       visualTopY: measureVisualTopY(visual),
+      ownsVisual: true,
+      modelState: asset === undefined ? 'placeholder' : 'loading',
+      visualToken: 0,
       castsShadow: shadowFlags.castsShadow,
       receivesShadow: shadowFlags.receivesShadow,
       target: null,
@@ -899,7 +1321,12 @@ export function createThreeRuntime(options: { bounds: RuntimeWorldBounds }): Ren
     root.visible = command.visible;
     applyTransform(node, command.transform);
     nodes.set(command.nodeId, node);
+    nodeIdByRoot.set(root, command.nodeId);
     addToBucket(command.layer, command.appearance, command.nodeId);
+    // Render the placeholder immediately; a resolved model swaps it in place.
+    if (asset !== undefined) {
+      resolveModel(node, command.nodeId, asset);
+    }
   }
 
   function destroyNode(nodeId: NodeId): void {
@@ -908,7 +1335,10 @@ export function createThreeRuntime(options: { bounds: RuntimeWorldBounds }): Ren
       return;
     }
     node.root.parent?.remove(node.root);
-    disposeObject(node.root);
+    // Only a node-owned placeholder is released here. A loaded model clone
+    // borrows the cached template's resources, which `dispose()` releases once.
+    releaseOwnedVisual(node);
+    nodeIdByRoot.delete(node.root);
     removeFromBucket(node.layer, node.appearance, nodeId);
     nodes.delete(nodeId);
   }
@@ -916,9 +1346,13 @@ export function createThreeRuntime(options: { bounds: RuntimeWorldBounds }): Ren
   /** Swap an existing node's appearance, moving its group if the prefab requires. */
   function setAppearance(node: RuntimeNode, nodeId: NodeId, appearance: AppearanceId): void {
     const prefab = prefabFor(appearance);
+    const asset = catalogue[appearance];
     node.root.remove(node.visual);
-    disposeObject(node.visual);
+    releaseOwnedVisual(node);
+    // Invalidate any in-flight load for the retired appearance.
+    node.visualToken += 1;
     node.visual = prefab.createVisual();
+    node.ownsVisual = true;
     node.root.add(node.visual);
     if (node.group !== prefab.group) {
       node.root.parent?.remove(node.root);
@@ -929,11 +1363,15 @@ export function createThreeRuntime(options: { bounds: RuntimeWorldBounds }): Ren
     node.defaultAnimation = prefab.defaultAnimation;
     node.motion = prefab.motion;
     node.visualTopY = measureVisualTopY(node.visual);
+    node.modelState = asset === undefined ? 'placeholder' : 'loading';
     node.castsShadow = shadowFlags.castsShadow;
     node.receivesShadow = shadowFlags.receivesShadow;
     removeFromBucket(node.layer, node.appearance, nodeId);
     addToBucket(node.layer, appearance, nodeId);
     node.appearance = appearance;
+    if (asset !== undefined) {
+      resolveModel(node, nodeId, asset);
+    }
   }
 
   function apply(frame: RenderFrame): void {
@@ -1029,6 +1467,12 @@ export function createThreeRuntime(options: { bounds: RuntimeWorldBounds }): Ren
    * node's feet anchor never moves.
    */
   function updateVisualMotion(node: RuntimeNode, nowMs: number): void {
+    if (node.modelState === 'loaded') {
+      // A loaded model carries its own clips (catalogue `idleClip`/`walkClip`) and
+      // its catalogue `yOffset` anchor; the procedural bob would fight both.
+      // Clip playback is the recorded extension point.
+      return;
+    }
     node.motion?.(node.animation, nowMs, node.visual);
   }
 
@@ -1116,6 +1560,8 @@ export function createThreeRuntime(options: { bounds: RuntimeWorldBounds }): Ren
         visualY: node.visual.position.y,
         visualRoll: node.visual.rotation.z,
         visualTopY: node.visualTopY,
+        model: node.modelState,
+        skeletonId: skeletonIdOf(node.visual),
         castsShadow: node.castsShadow,
         receivesShadow: node.receivesShadow,
       };
@@ -1134,6 +1580,8 @@ export function createThreeRuntime(options: { bounds: RuntimeWorldBounds }): Ren
               mapWidth: sun.shadow.mapSize.width,
               mapHeight: sun.shadow.mapSize.height,
             },
+      models: ownedTemplates.size,
+      released: { ...released },
       camera: {
         left: camera.left,
         right: camera.right,
@@ -1243,7 +1691,75 @@ export function createThreeRuntime(options: { bounds: RuntimeWorldBounds }): Ren
     reframe();
   }
 
+  // Reused across picks so a drag/click loop does not allocate per query.
+  const raycaster = new Raycaster();
+  const pickNdc = new Vector2();
+  // The mathematical ground plane at the world's floor; independent of the tile
+  // plates and their deliberate inset gaps.
+  const groundPlane = new Plane(new Vector3(0, 1, 0), -groundY);
+  const groundHit = new Vector3();
+
+  /** Walk an intersected object's parents to the registered node root that owns it. */
+  function nodeIdForObject(object: Object3D): NodeId | null {
+    let current: Object3D | null = object;
+    while (current !== null) {
+      const nodeId = nodeIdByRoot.get(current);
+      if (nodeId !== undefined) {
+        return nodeId;
+      }
+      current = current.parent;
+    }
+    return null;
+  }
+
+  function pick(ndcX: number, ndcY: number): RenderPick {
+    // The camera is a child of the rig; refresh the scene graph's matrices before
+    // reading the camera's world matrix in `setFromCamera`.
+    scene.updateMatrixWorld(true);
+    pickNdc.set(ndcX, ndcY);
+    raycaster.setFromCamera(pickNdc, camera);
+
+    // 1. Registered node visuals win outright, even over a nearer ground hit, so
+    //    a click on a prop never falls through to a move intent. Only the
+    //    `object` layer is pickable: terrain plates live in `base` and ARE the
+    //    visible ground, so raycasting them would shadow the mathematical-plane
+    //    pick and a ground click could never produce a move intent.
+    const roots: Object3D[] = [];
+    for (const node of nodes.values()) {
+      if (node.layer === 'object' && node.root.visible) {
+        roots.push(node.root);
+      }
+    }
+    const nodeHits = raycaster.intersectObjects(roots, true);
+    if (nodeHits.length > 0) {
+      const hitNodeId = nodeIdForObject(nodeHits[0].object);
+      if (hitNodeId !== null) {
+        return { kind: 'node', nodeId: hitNodeId };
+      }
+    }
+
+    // 2. Otherwise the mathematical ground plane.
+    const hit = raycaster.ray.intersectPlane(groundPlane, groundHit);
+    if (hit === null) {
+      return null;
+    }
+    if (
+      hit.x < bounds.min.x ||
+      hit.x > bounds.max.x ||
+      hit.z < bounds.min.z ||
+      hit.z > bounds.max.z
+    ) {
+      // Outside the world: no clamping, no gameplay rule, no intent.
+      return null;
+    }
+    return { kind: 'ground', point: { x: hit.x, y: hit.y, z: hit.z } };
+  }
+
   function dispose(): void {
+    // Mark disposed first: an in-flight load that resolves after this point is
+    // released immediately and can never add to the scene.
+    disposed = true;
+
     if (frameHandle !== null) {
       globalThis.cancelAnimationFrame(frameHandle);
       frameHandle = null;
@@ -1265,7 +1781,7 @@ export function createThreeRuntime(options: { bounds: RuntimeWorldBounds }): Ren
     if (ground !== null) {
       scene.remove(ground);
       ground.geometry.dispose();
-      disposeMaterial(ground.material);
+      accumulateRelease(releaseMaterial(ground.material));
       ground = null;
     }
 
@@ -1280,6 +1796,15 @@ export function createThreeRuntime(options: { bounds: RuntimeWorldBounds }): Ren
       sun = null;
     }
     scene.remove(lightsGroup);
+
+    // Release every cached model template once: their geometry/material/texture
+    // is shared by all node clones, which is exactly why this happens here and
+    // not in `destroyNode`.
+    for (const template of ownedTemplates) {
+      accumulateRelease(releaseObject(template));
+    }
+    ownedTemplates.clear();
+    templateCache.clear();
 
     scene.remove(cameraRig);
     scene.background = null;
@@ -1301,6 +1826,7 @@ export function createThreeRuntime(options: { bounds: RuntimeWorldBounds }): Ren
     getCameraState,
     setCameraOrientation,
     setZoom,
+    pick,
     inspect,
     dispose,
   };

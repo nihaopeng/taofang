@@ -58,12 +58,22 @@ export type {
 export {
   isGameCommand,
   isGameEventBatch,
+  isInteractCommand,
   isMoveIntentCommand,
+  isMoveToCommand,
   parseGameCommand,
   parseGameEventBatch,
+  parseInteractCommand,
   parseMoveIntentCommand,
+  parseMoveToCommand,
 } from './command.ts';
-export type { GameCommand, GameEventBatch, MoveIntentCommand } from './command.ts';
+export type {
+  GameCommand,
+  GameEventBatch,
+  InteractCommand,
+  MoveIntentCommand,
+  MoveToCommand,
+} from './command.ts';
 
 export {
   isGameInfo,

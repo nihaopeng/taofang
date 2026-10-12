@@ -48,11 +48,11 @@
  */
 
 import { useEffect, useRef } from 'react';
-import type { MutableRefObject } from 'react';
+import type { MutableRefObject, PointerEvent as ReactPointerEvent } from 'react';
 
-import { useWorld } from '../organizer';
+import { interact, moveTo, useWorld } from '../organizer';
 import type { BoundsViewModel } from '../organizer';
-import { controlledActorNodeId, createRenderBridge } from '../render/bridge';
+import { controlledActorNodeId, createRenderBridge, entityIdOfNodeId } from '../render/bridge';
 import type { RenderBridge } from '../render/bridge';
 import { createThreeRuntime } from '../render/three/runtime';
 import type { RenderRuntime } from '../render/three/runtime';
@@ -64,6 +64,47 @@ export interface SceneViewOptions {
 
 /** One wheel notch's zoom factor. */
 const WHEEL_ZOOM_FACTOR = 1.1;
+
+/**
+ * Maximum pointer travel (px) for a press to count as a click. Below this a
+ * press is a click; above it, a drag that rotates the rig.
+ */
+const CLICK_MOVE_THRESHOLD_PX = 5;
+
+/** Maximum press duration (ms) for a press to count as a click. */
+const CLICK_TIME_THRESHOLD_MS = 350;
+
+/** Rig degrees rotated per pixel of drag (yaw and pitch). */
+const DRAG_DEGREES_PER_PIXEL = 0.3;
+
+/** In-flight pointer gesture. `null` when no button is down. */
+interface PointerGesture {
+  pointerId: number;
+  startX: number;
+  startY: number;
+  lastX: number;
+  lastY: number;
+  startTime: number;
+  dragging: boolean;
+}
+
+/**
+ * Convert a client coordinate to NDC (`[-1, 1]`, origin at the canvas centre,
+ * `+y` up) for the canvas' current rect. The rect origin matters: a canvas that
+ * is not at the page origin must not be treated as if it were.
+ */
+function toNdc(
+  canvas: HTMLCanvasElement,
+  event: { clientX: number; clientY: number },
+): { x: number; y: number } {
+  const rect = canvas.getBoundingClientRect();
+  const width = rect.width > 0 ? rect.width : 1;
+  const height = rect.height > 0 ? rect.height : 1;
+  return {
+    x: ((event.clientX - rect.left) / width) * 2 - 1,
+    y: -(((event.clientY - rect.top) / height) * 2 - 1),
+  };
+}
 
 export function SceneView(props: {
   createRuntime?: (options: SceneViewOptions) => RenderRuntime;
@@ -79,6 +120,112 @@ export function SceneView(props: {
   const internalRuntimeRef = useRef<RenderRuntime | null>(null);
   const runtimeRef = externalRuntimeRef ?? internalRuntimeRef;
   const bridgeRef = useRef<RenderBridge | null>(null);
+  const pointerRef = useRef<PointerGesture | null>(null);
+
+  /**
+   * Turn a completed click into a world-space gameplay intent. The pick is plain
+   * data; the bridge maps a node id to a game entity id, and the Organizer owns
+   * the command. No screen/NDC/camera value ever reaches a command.
+   */
+  function handleClick(event: { clientX: number; clientY: number }): void {
+    const canvas = canvasRef.current;
+    const runtime = runtimeRef.current;
+    if (canvas === null || runtime === null) {
+      return;
+    }
+    const ndc = toNdc(canvas, event);
+    const hit = runtime.pick(ndc.x, ndc.y);
+    if (hit === null) {
+      return;
+    }
+    if (hit.kind === 'node') {
+      const entityId = entityIdOfNodeId(hit.nodeId);
+      if (entityId !== null) {
+        void interact(entityId);
+      }
+      return;
+    }
+    void moveTo(hit.point);
+  }
+
+  function handlePointerDown(event: ReactPointerEvent<HTMLCanvasElement>): void {
+    // Only the primary button starts a camera/interaction gesture.
+    if (event.pointerType === 'mouse' && event.button !== 0) {
+      return;
+    }
+    const canvas = canvasRef.current;
+    canvas?.setPointerCapture?.(event.pointerId);
+    pointerRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      lastX: event.clientX,
+      lastY: event.clientY,
+      startTime: Date.now(),
+      dragging: false,
+    };
+  }
+
+  function handlePointerMove(event: ReactPointerEvent<HTMLCanvasElement>): void {
+    const pointer = pointerRef.current;
+    if (pointer === null || pointer.pointerId !== event.pointerId) {
+      return;
+    }
+    let dx = event.clientX - pointer.lastX;
+    let dy = event.clientY - pointer.lastY;
+    pointer.lastX = event.clientX;
+    pointer.lastY = event.clientY;
+
+    const travelled = Math.hypot(
+      event.clientX - pointer.startX,
+      event.clientY - pointer.startY,
+    );
+    if (!pointer.dragging) {
+      if (travelled <= CLICK_MOVE_THRESHOLD_PX) {
+        // Still a candidate click: never rotate the camera on a click.
+        return;
+      }
+      pointer.dragging = true;
+      // Apply the whole travel so far so crossing the threshold does not skip the
+      // rotation the user already intended.
+      dx = event.clientX - pointer.startX;
+      dy = event.clientY - pointer.startY;
+    }
+
+    const runtime = runtimeRef.current;
+    if (runtime === null) {
+      return;
+    }
+    const camera = runtime.getCameraState();
+    runtime.setCameraOrientation({
+      yawDegrees: camera.yawDegrees + dx * DRAG_DEGREES_PER_PIXEL,
+      // `setCameraOrientation` clamps pitch to the rig's 20-80 range.
+      pitchDegrees: camera.pitchDegrees + dy * DRAG_DEGREES_PER_PIXEL,
+    });
+  }
+
+  function endPointer(event: ReactPointerEvent<HTMLCanvasElement>): void {
+    const pointer = pointerRef.current;
+    if (pointer === null || pointer.pointerId !== event.pointerId) {
+      return;
+    }
+    pointerRef.current = null;
+    canvasRef.current?.releasePointerCapture?.(event.pointerId);
+    const travelled = Math.hypot(
+      event.clientX - pointer.startX,
+      event.clientY - pointer.startY,
+    );
+    const elapsed = Date.now() - pointer.startTime;
+    const isClick =
+      !pointer.dragging &&
+      travelled <= CLICK_MOVE_THRESHOLD_PX &&
+      elapsed <= CLICK_TIME_THRESHOLD_MS;
+    if (!isClick) {
+      // A drag (or a long press) never emits an intent.
+      return;
+    }
+    handleClick(event);
+  }
 
   const state = useWorld();
   // Latest state for the mount effect, which must not re-run on every change.
@@ -153,6 +300,12 @@ export function SceneView(props: {
       ref={canvasRef}
       className="scene-view__canvas"
       data-testid="scene-canvas"
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={endPointer}
+      onPointerCancel={() => {
+        pointerRef.current = null;
+      }}
       onWheel={(event) => {
         const runtime = runtimeRef.current;
         if (runtime === null) {

@@ -18,11 +18,21 @@ describe('toProtocolError', () => {
       'BAD_REQUEST',
       'NOT_FOUND',
       'METHOD_NOT_ALLOWED',
+      'CONFLICT',
       'INTERNAL_ERROR',
     ];
     for (const code of codes) {
       expect(toProtocolError(code, 'x')).toEqual({ error: { code, message: 'x' } });
     }
+  });
+
+  it('round-trips the new CONFLICT code (valid request, illegal against current state)', () => {
+    const payload = toProtocolError('CONFLICT', 'target out of range');
+    expect(payload.error.code).toBe('CONFLICT');
+    expect(payload).toEqual({ error: { code: 'CONFLICT', message: 'target out of range' } });
+    // The `ProtocolParseError` code slot is typed as `ProtocolErrorCode`, so
+    // `CONFLICT` must be accepted there too (the "guard" side of the vocabulary).
+    expect(new ProtocolParseError('conflict', 'CONFLICT').code).toBe('CONFLICT');
   });
 });
 

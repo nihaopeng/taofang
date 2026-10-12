@@ -35,16 +35,38 @@
  * never trusted with one). Requests are serialised with a single in-flight slot
  * and latest-wins coalescing so rapid input cannot storm the network.
  *
+ * ## One-shot intents (`moveTo` / `interact`)
+ *
+ * `moveTo({ x, y, z })` and `interact(entityId)` post the canonical
+ * `actor.moveTo` / `actor.interact` commands. Both take **world-space gameplay
+ * data only**: the store never sees a camera, NDC, pointer coordinate or ray,
+ * and it sends no actor id and no position. Neither changes any local position;
+ * only a validated snapshot or event batch moves an entity (no prediction).
+ *
+ * A *rejected* intent (the server refuses a well-formed request because it is
+ * illegal against the current world state, `CONFLICT`/409, or names a gone
+ * target, `NOT_FOUND`/404) is surfaced through `WorldState.notice` — a short,
+ * user-presentable string. The reason is read from the canonical `ProtocolError`
+ * body (the machine-readable `code` plus the server-authored `message`), not from
+ * the status alone, so an out-of-range and a non-interactable 409 stay
+ * distinguishable. It deliberately does **not** touch `status` or `error`: a
+ * rejected intent is not a broken world, and flipping `status` here
+ * was exactly the phase-7 bug that gated movement. `notice` clears on the next
+ * successful intent and on `resetWorldState()`.
+ *
  * Terrain is **static**: no event carries it, so `tiles`/`grid`/`bounds` are only
  * ever replaced by a fresh snapshot and are carried over reference-identically by
  * the event applier. `terrain` stays an opaque string; walkability is an
  * authoritative Manager rule, so the store derives no collision rule of its own.
  */
 
-import { parseWorldStreamMessage } from '@starvalley/protocol';
+import { parseEntityId, parseWorldStreamMessage } from '@starvalley/protocol';
 import type {
+  EntityId,
   GameEvent,
+  InteractCommand,
   MoveIntentCommand,
+  MoveToCommand,
   WorldSnapshot,
   WorldStreamMessage,
 } from '@starvalley/protocol';
@@ -95,9 +117,20 @@ export interface WorldState {
   controlledActorId: string | null;
   /** User-presentable message; never a raw error/response object. */
   error: string | null;
+  /**
+   * Short, user-presentable message for a *rejected intent* (e.g. out of range),
+   * or `null`. Never used for a broken world: a rejection leaves `status`/`error`
+   * untouched so movement stays usable. Cleared by the next successful intent
+   * and by `resetWorldState()`.
+   */
+  notice: string | null;
 }
 
 type Listener = (state: WorldState) => void;
+
+/** Short, non-technical messages for a rejected intent (see `WorldState.notice`). */
+const NOTICE_NOT_FOUND = 'That is gone.';
+const NOTICE_GENERIC = 'Could not do that.';
 
 /** Shared empty lists so idle/loading states are reference-stable. */
 const NO_TILES: readonly TileViewModel[] = Object.freeze([]);
@@ -114,6 +147,7 @@ const IDLE_STATE: WorldState = {
   entities: NO_ENTITIES,
   controlledActorId: null,
   error: null,
+  notice: null,
 };
 
 /**
@@ -249,6 +283,7 @@ async function runLoad(requestGeneration: number): Promise<void> {
     entities: NO_ENTITIES,
     controlledActorId: null,
     error: null,
+    notice: null,
   });
 
   try {
@@ -272,6 +307,7 @@ async function runLoad(requestGeneration: number): Promise<void> {
       entities: NO_ENTITIES,
       controlledActorId: null,
       error: describeApiError(error, 'Something went wrong while loading the world.'),
+      notice: null,
     });
   }
 }
@@ -297,6 +333,7 @@ function fromSnapshot(
     entities: toEntityViewModels(snapshot.entities),
     controlledActorId: snapshot.controlledActorId,
     error,
+    notice: null,
   };
 }
 
@@ -559,6 +596,10 @@ async function performIntent(
       return;
     }
     applyEvents(batch.events);
+    if (loopGeneration !== generation) {
+      return;
+    }
+    clearNotice();
   } catch (error) {
     if (loopGeneration !== generation) {
       return;
@@ -582,6 +623,129 @@ function toMoveErrorMessage(error: unknown): string {
     return 'That actor could not be found.';
   }
   return describeApiError(error, 'Something went wrong while sending movement.');
+}
+
+// --- One-shot intents: moveTo / interact -----------------------------------
+
+/**
+ * UI intent: "steer the actor I control toward this world-space point".
+ *
+ * The store builds and posts exactly `{ type: 'actor.moveTo', target }`. `target`
+ * is a continuous world-space position; the server decides whether the goal is
+ * legal (in bounds / reachable) and integrates toward it. Picking that point
+ * from a pointer is the UI/runtime's job (raycast + ground plane): the Organizer
+ * never sees a camera, NDC value, pointer coordinate or ray, and never clamps.
+ *
+ * It changes no client position (no prediction) and, like `setMovementIntent`,
+ * is a safe no-op before a controlled actor exists. A rejected goal sets
+ * `notice` only — it never flips `status` or `error`. Never rejects.
+ */
+export function moveTo(target: { x: number; y: number; z: number }): Promise<void> {
+  if (state.controlledActorId === null) {
+    return Promise.resolve();
+  }
+  // Copy only the contract fields so a stray runtime key cannot reach the wire.
+  const command: MoveToCommand = {
+    type: 'actor.moveTo',
+    target: { x: target.x, y: target.y, z: target.z },
+  };
+  return submitPlayerIntent(command);
+}
+
+/**
+ * UI intent: "interact with this world entity".
+ *
+ * The store builds and posts exactly `{ type: 'actor.interact', targetEntityId }`.
+ * The Manager validates existence, range and interactability; today the only
+ * observed effect is an authoritative `transform.changed` (face + stop), which is
+ * reconciled like any other event. Any refusal is surfaced through `notice`, never
+ * by corrupting a position locally. Never rejects.
+ */
+export function interact(targetEntityId: string): Promise<void> {
+  if (state.controlledActorId === null) {
+    return Promise.resolve();
+  }
+  // The public API takes a plain string; the canonical Protocol guard is what
+  // turns it into the branded `EntityId` the wire contract requires. An empty id
+  // can never be sent, so it is rejected locally as a generic notice.
+  let entityId: EntityId;
+  try {
+    entityId = parseEntityId(targetEntityId);
+  } catch {
+    setNotice(NOTICE_GENERIC);
+    return Promise.resolve();
+  }
+  const command: InteractCommand = { type: 'actor.interact', targetEntityId: entityId };
+  return submitPlayerIntent(command);
+}
+
+/**
+ * Submit a one-shot player intent and reconcile its outcome.
+ *
+ * Success applies the authoritative event delta (which is the only thing that may
+ * move anything) and clears any stale `notice`. A rejection carries no events and
+ * must not be treated as a broken world: it maps to a short `notice` while
+ * `status`/`error` are left exactly as they were.
+ */
+async function submitPlayerIntent(command: MoveToCommand | InteractCommand): Promise<void> {
+  const intentGeneration = generation;
+  try {
+    const batch = await submitCommand(command);
+    if (intentGeneration !== generation) {
+      return;
+    }
+    applyEvents(batch.events);
+    if (intentGeneration !== generation) {
+      return;
+    }
+    clearNotice();
+  } catch (error) {
+    if (intentGeneration !== generation) {
+      return;
+    }
+    setNotice(toIntentNotice(error));
+  }
+}
+
+/**
+ * Map a one-shot intent failure to a short, user-presentable `notice`.
+ *
+ * The *reason* is taken from the canonical `ProtocolError` body, never from the
+ * HTTP status alone: a `409 CONFLICT` is a well-formed request that is illegal
+ * against the current world state, which covers several distinct refusals (out of
+ * range, non-interactable, ...). The server authors a short, user-presentable
+ * `message` for exactly that case, so it is surfaced verbatim. When the body is
+ * missing/unparseable, or the status is neither 404 nor 409, fall back to a
+ * generic, non-technical phrase.
+ *
+ * - `CONFLICT` (409): the server's message, else the generic phrase.
+ * - `NOT_FOUND` (404): "That is gone."
+ * - Anything else: the generic phrase.
+ */
+function toIntentNotice(error: unknown): string {
+  if (error instanceof ApiError && error.kind === 'status') {
+    if (error.status === 409) {
+      const message = error.serverMessage;
+      return message !== undefined && message.length > 0 ? message : NOTICE_GENERIC;
+    }
+    if (error.status === 404) {
+      return NOTICE_NOT_FOUND;
+    }
+  }
+  return NOTICE_GENERIC;
+}
+
+/** Set `notice`, preserving every other field reference-identically when unchanged. */
+function setNotice(next: string | null): void {
+  if (state.notice === next) {
+    return;
+  }
+  setState({ ...state, notice: next });
+}
+
+/** Clear a stale notice after a successful intent (no-op when already clear). */
+function clearNotice(): void {
+  setNotice(null);
 }
 
 // --- Event reconciliation --------------------------------------------------

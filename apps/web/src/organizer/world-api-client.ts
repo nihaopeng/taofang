@@ -25,7 +25,7 @@ import {
   parseGameEventBatch,
   parseGetWorldResponse,
 } from '@starvalley/protocol';
-import type { GameEventBatch, MoveIntentCommand, WorldSnapshot } from '@starvalley/protocol';
+import type { GameCommand, GameEventBatch, WorldSnapshot } from '@starvalley/protocol';
 
 import { defaultFetch, parseContract, requestJson, resolveApiUrl } from './transport';
 import type { FetchLike } from './transport';
@@ -72,15 +72,16 @@ export async function fetchWorld(): Promise<WorldSnapshot> {
 }
 
 /**
- * Send a movement intent and validate the authoritative event delta.
+ * Send a gameplay command and validate the authoritative event delta.
  *
- * The command is built by the store from the requested `{ x, z }` movement only;
- * the actor is resolved server-side from transport context, so this adapter must
- * not add an actor/player field, and the client never sends a position. Resolves
- * the Protocol `GameEventBatch` (not the raw response). Rejects only with
+ * The command is a canonical Protocol `GameCommand` (`actor.moveIntent`,
+ * `actor.moveTo` or `actor.interact`) built by the store from world-space intent
+ * only; the actor is resolved server-side from transport context, so this adapter
+ * must not add an actor/player field, and the client never sends a position.
+ * Resolves the Protocol `GameEventBatch` (not the raw response). Rejects only with
  * `ApiError`.
  */
-export async function submitCommand(command: MoveIntentCommand): Promise<GameEventBatch> {
+export async function submitCommand(command: GameCommand): Promise<GameEventBatch> {
   const payload = await requestJson(fetchImpl, resolveCommandUrl(), {
     method: 'POST',
     headers: { Accept: 'application/json', 'Content-Type': 'application/json' },

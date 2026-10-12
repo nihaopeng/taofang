@@ -87,7 +87,7 @@ function formatCoordinate(value: number): string {
  */
 export function WorldView() {
   const state = useWorld();
-  const { status, entities, controlledActorId, error, streamStatus } = state;
+  const { status, entities, controlledActorId, error, notice, streamStatus } = state;
   const runtimeRef = useRef<RenderRuntime | null>(null);
 
   // Movement is only meaningful once an authoritative controlled actor exists.
@@ -195,6 +195,19 @@ export function WorldView() {
       >
         {STREAM_LABEL[streamStatus]}
       </p>
+
+      {/*
+        A REJECTED intent (out of range / not interactable / target gone) is a
+        short, transient message, not a broken-world error: the Organizer keeps
+        `status`/`error` untouched, and clears `notice` on the next successful
+        intent. It is deliberately not rendered inside the `role="alert"` error
+        block, so a refusal never reads as a broken connection.
+      */}
+      {notice !== null ? (
+        <p className="world__notice" role="status" data-testid="world-notice">
+          {notice}
+        </p>
+      ) : null}
 
       {controlledEntity !== null ? (
         <p className="world__actor-info" data-testid="controlled-actor-info">

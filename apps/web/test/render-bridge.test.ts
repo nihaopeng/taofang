@@ -13,13 +13,14 @@
 
 import { describe, expect, it } from 'vitest';
 
-import type { RenderCommand, RenderFrame } from '@starvalley/render-protocol';
+import type { NodeId, RenderCommand, RenderFrame } from '@starvalley/render-protocol';
 
 import type { WorldState } from '../src/organizer/index.ts';
 import {
   BRIDGE_TERRAINS,
   FALLBACK_APPEARANCE,
   createRenderBridge,
+  entityIdOfNodeId,
 } from '../src/render/bridge.ts';
 
 type Entity = WorldState['entities'][number];
@@ -61,6 +62,7 @@ function makeState(
     entities,
     controlledActorId: null,
     error: null,
+    notice: null,
     ...overrides,
   };
 }
@@ -619,5 +621,25 @@ describe('render bridge tile/entity id namespacing', () => {
     expect(ids).toContain('tile:3,4');
     expect(ids).toContain('entity:tile:3,4');
     expect(new Set(ids).size).toBe(ids.length);
+  });
+});
+
+describe('bridge node id -> entityId mapping', () => {
+  it('maps the namespaced node id of an entity back to its entity id', () => {
+    // This is the direction the app actually uses: `runtime.pick()` hands back
+    // an opaque `NodeId`, and the UI turns it into an entity intent through here.
+    expect(entityIdOfNodeId('entity:entity-42' as NodeId)).toBe('entity-42');
+  });
+
+  it('is lossless for an entity id that itself looks like a tile id', () => {
+    // The `entity:` prefix is what disambiguates, so the mapping is lossless
+    // even when an entity id contains a colon.
+    expect(entityIdOfNodeId('entity:tile:3,4' as NodeId)).toBe('tile:3,4');
+  });
+
+  it('maps a non-entity node id to null', () => {
+    expect(entityIdOfNodeId('tile:0,0' as NodeId)).toBeNull();
+    expect(entityIdOfNodeId('ground' as NodeId)).toBeNull();
+    expect(entityIdOfNodeId('entity:' as NodeId)).toBeNull();
   });
 });

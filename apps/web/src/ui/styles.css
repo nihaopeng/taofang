@@ -151,6 +151,13 @@ body {
   color: var(--danger);
 }
 
+/* A rejected intent (e.g. "Too far away.") is transient and non-fatal. */
+.world__notice {
+  margin: 0 0 0.75rem;
+  color: var(--sky);
+  font-size: 0.85rem;
+}
+
 .world__actor-coords {
   color: #b9a583;
   font-variant-numeric: tabular-nums;

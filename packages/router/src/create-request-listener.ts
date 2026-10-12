@@ -6,7 +6,7 @@ import type {
   ProtocolErrorCode,
   WorldStreamMessage,
 } from '@starvalley/protocol';
-import { UnknownActorError } from '@starvalley/manager';
+import { InteractionRejectedError, UnknownActorError, UnknownEntityError } from '@starvalley/manager';
 import type { GameInfoManager, WorldManager } from '@starvalley/manager';
 import { mapErrorCodeToStatus, protocolErrorBody } from './http-errors.ts';
 import { allowedMethods, findRoute, isKnownPath } from './routes.ts';
@@ -330,6 +330,26 @@ async function handleStream(
   });
 }
 
+/**
+ * Player-facing notice for a refused interaction.
+ *
+ * Unlike the other error messages (which are developer-facing diagnostics),
+ * this text is rendered verbatim by the client when it receives the 409, so it
+ * is deliberately phrased as something a player should read. Keep the reasons
+ * aligned with Manager's `InteractionRejectionReason`; an unrecognised reason
+ * falls back to a generic conflict phrase rather than leaking the raw value.
+ */
+function interactionConflictMessage(reason: InteractionRejectedError['reason']): string {
+  switch (reason) {
+    case 'out-of-range':
+      return 'Too far away.';
+    case 'not-interactable':
+      return 'Nothing to do with that.';
+    default:
+      return 'That cannot be done.';
+  }
+}
+
 async function handleRequest(
   deps: RouterDependencies,
   request: IncomingMessage,
@@ -395,6 +415,22 @@ async function handleRequest(
       // The resolved actor does not exist in the world. The actor id is safe to
       // name: it came from Transport, not from the client body.
       sendProtocolError(response, 'NOT_FOUND', `Unknown actor: ${error.actorId}`);
+      return;
+    }
+    if (error instanceof UnknownEntityError) {
+      // A command named a world entity that does not exist. The id came from
+      // the (validated) command body, so echoing it back is safe.
+      sendProtocolError(response, 'NOT_FOUND', `Unknown entity: ${error.entityId}`);
+      return;
+    }
+    if (error instanceof InteractionRejectedError) {
+      // The request was well-formed and the target exists, but it is illegal
+      // against the current world state (out of range / not interactable).
+      // 409 is deliberately distinct from a 400 and from an empty delta, so
+      // the client can surface a precise notice instead of "nothing happened".
+      // The message is shown to the player for this case, hence the user-facing
+      // phrasing; every other error message here stays developer-facing.
+      sendProtocolError(response, 'CONFLICT', interactionConflictMessage(error.reason));
       return;
     }
     // Log server-side; never leak the message/stack to the client. This also

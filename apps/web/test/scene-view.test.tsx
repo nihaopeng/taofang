@@ -10,7 +10,7 @@
  */
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   loadWorld,
@@ -28,6 +28,7 @@ import type { RenderFrame } from '../src/render/bridge.ts';
 import type {
   CameraState,
   RenderInspection,
+  RenderPick,
   RenderRuntime,
 } from '../src/render/three/runtime.ts';
 import { SceneView } from '../src/ui/SceneView.tsx';
@@ -107,6 +108,10 @@ interface RecordingRuntime {
   mountCalls: number;
   disposeCalls: number;
   zoomCalls: number[];
+  orientationCalls: { pitchDegrees?: number; yawDegrees?: number }[];
+  pickCalls: { x: number; y: number }[];
+  /** Result the injected `pick` returns; default `null`. */
+  pickResult: RenderPick;
   options: SceneViewOptions | null;
   /** Every `setFollowTarget` argument the component passed, in order. */
   followTargets: (string | null)[];
@@ -126,12 +131,17 @@ function createRecordingRuntime(): RecordingRuntime {
     mountCalls: 0,
     disposeCalls: 0,
     zoomCalls: [],
+    orientationCalls: [],
+    pickCalls: [],
+    pickResult: null,
     options: null,
     followTargets: [],
     factory: undefined as unknown as RecordingRuntime['factory'],
     runtime: undefined as unknown as RenderRuntime,
   };
   let mounted = false;
+  // A live rig state so a drag accumulates and `getCameraState` reflects it.
+  const cameraState: CameraState = { ...CAMERA_STATE, focus: { ...CAMERA_STATE.focus } };
 
   recorder.runtime = {
     mount: () => {
@@ -145,10 +155,23 @@ function createRecordingRuntime(): RecordingRuntime {
     setFollowTarget: (nodeId) => {
       recorder.followTargets.push(nodeId);
     },
-    getCameraState: () => CAMERA_STATE,
-    setCameraOrientation: () => {},
+    getCameraState: () => ({ ...cameraState, focus: { ...cameraState.focus } }),
+    setCameraOrientation: (orientation) => {
+      recorder.orientationCalls.push({ ...orientation });
+      if (orientation.pitchDegrees !== undefined) {
+        cameraState.pitchDegrees = orientation.pitchDegrees;
+      }
+      if (orientation.yawDegrees !== undefined) {
+        cameraState.yawDegrees = orientation.yawDegrees;
+      }
+    },
     setZoom: (zoom) => {
       recorder.zoomCalls.push(zoom);
+      cameraState.zoom = zoom;
+    },
+    pick: (x, y) => {
+      recorder.pickCalls.push({ x, y });
+      return recorder.pickResult;
     },
     inspect: (): RenderInspection => ({
       mounted,
@@ -157,15 +180,17 @@ function createRecordingRuntime(): RecordingRuntime {
       background: null,
       groups: 0,
       shadow: null,
+      models: 0,
+      released: { geometries: 0, materials: 0, textures: 0 },
       camera: {
         left: 0,
         right: 0,
         top: 0,
         bottom: 0,
-        pitchDegrees: 58,
-        yawDegrees: 0,
-        zoom: 1,
-        focus: { x: 0, y: 0, z: 0 },
+        pitchDegrees: cameraState.pitchDegrees,
+        yawDegrees: cameraState.yawDegrees,
+        zoom: cameraState.zoom,
+        focus: { ...cameraState.focus },
         position: { x: 0, y: 0, z: 0 },
         forward: { x: 0, y: 0, z: -1 },
         up: { x: 0, y: 1, z: 0 },
@@ -240,6 +265,40 @@ function installWorldFetch(): void {
     }
     return fakeResponse(VALID_WORLD_RESPONSE);
   });
+}
+
+interface CapturedRequest {
+  method: string | undefined;
+  body: unknown;
+}
+
+/** Capture POST bodies (Organizer intents) while still serving the snapshot. */
+function captureWorldFetch(requests: CapturedRequest[]): void {
+  setWorldFetch(async (_url, init) => {
+    if (init?.method === 'POST') {
+      requests.push({
+        method: init.method,
+        body: typeof init.body === 'string' ? JSON.parse(init.body) : undefined,
+      });
+      return fakeResponse(MOVE_RESPONSE);
+    }
+    return fakeResponse(VALID_WORLD_RESPONSE);
+  });
+}
+
+/** A fixed canvas rect so client -> NDC conversion is deterministic under jsdom. */
+function fixedCanvasRect(): DOMRect {
+  return {
+    x: 10,
+    y: 20,
+    left: 10,
+    top: 20,
+    width: 200,
+    height: 100,
+    right: 210,
+    bottom: 120,
+    toJSON: () => ({}),
+  } as DOMRect;
 }
 
 beforeEach(() => {
@@ -405,8 +464,9 @@ describe('SceneView wiring', () => {
     fireEvent.wheel(screen.getByTestId('scene-canvas'), { deltaY: -100 });
     expect(recorder.zoomCalls.at(-1)).toBeGreaterThan(1);
 
+    const afterZoomIn = recorder.zoomCalls.at(-1) ?? 1;
     fireEvent.wheel(screen.getByTestId('scene-canvas'), { deltaY: 100 });
-    expect(recorder.zoomCalls.at(-1)).toBeLessThan(1);
+    expect(recorder.zoomCalls.at(-1)).toBeLessThan(afterZoomIn);
   });
 
   it('tears down and re-creates the runtime exactly once when the world bounds change', async () => {
@@ -454,5 +514,125 @@ describe('SceneView wiring', () => {
     // The scene is not left doubled: the live runtime is the second one, and the
     // swap reset the bridge and re-pushed the new world (fresh `node.create`).
     expect(second.frames.some((frame) => frameHasType(frame, 'node.create'))).toBe(true);
+  });
+});
+
+describe('SceneView mouse-first interaction', () => {
+  /** Mount SceneView with a loaded world and a recording runtime. */
+  async function mountWithRuntime(
+    recorder: RecordingRuntime,
+    requests: CapturedRequest[],
+  ): Promise<HTMLElement> {
+    captureWorldFetch(requests);
+    await act(async () => {
+      await loadWorld();
+    });
+    render(<SceneView createRuntime={recorder.factory} />);
+    await waitFor(() => {
+      expect(recorder.mountCalls).toBe(1);
+    });
+    const canvas = screen.getByTestId('scene-canvas');
+    vi.spyOn(canvas, 'getBoundingClientRect').mockReturnValue(fixedCanvasRect());
+    return canvas;
+  }
+
+  it('converts a click to NDC for the canvas rect and maps a picked node to interact', async () => {
+    const recorder = createRecordingRuntime();
+    recorder.pickResult = { kind: 'node', nodeId: 'entity:entity-a' as never };
+    const requests: CapturedRequest[] = [];
+    const canvas = await mountWithRuntime(recorder, requests);
+
+    // Client (110, 70) inside rect {left:10, top:20, 200x100} -> NDC (0, 0).
+    fireEvent.pointerDown(canvas, { clientX: 110, clientY: 70, pointerId: 1, button: 0 });
+    fireEvent.pointerUp(canvas, { clientX: 110, clientY: 70, pointerId: 1, button: 0 });
+
+    await waitFor(() => {
+      expect(requests).toHaveLength(1);
+    });
+    expect(recorder.pickCalls).toHaveLength(1);
+    // NDC y can be signed zero at the centre; compare numerically.
+    expect(recorder.pickCalls[0].x).toBeCloseTo(0, 9);
+    expect(recorder.pickCalls[0].y).toBeCloseTo(0, 9);
+    // The bridge owns the nodeId<->entityId convention; the UI only forwards it.
+    expect(requests[0].body).toEqual({ type: 'actor.interact', targetEntityId: 'entity-a' });
+  });
+
+  it('maps a ground click to a world-space moveTo intent', async () => {
+    const recorder = createRecordingRuntime();
+    recorder.pickResult = { kind: 'ground', point: { x: 1.5, y: 0, z: -2.25 } };
+    const requests: CapturedRequest[] = [];
+    const canvas = await mountWithRuntime(recorder, requests);
+
+    fireEvent.pointerDown(canvas, { clientX: 110, clientY: 70, pointerId: 1, button: 0 });
+    fireEvent.pointerUp(canvas, { clientX: 110, clientY: 70, pointerId: 1, button: 0 });
+
+    await waitFor(() => {
+      expect(requests).toHaveLength(1);
+    });
+    // Only the world-space point crosses the boundary; no camera/NDC key does.
+    expect(requests[0].body).toEqual({
+      type: 'actor.moveTo',
+      target: { x: 1.5, y: 0, z: -2.25 },
+    });
+  });
+
+  it('does nothing for a click that picks nothing', async () => {
+    const recorder = createRecordingRuntime();
+    recorder.pickResult = null;
+    const requests: CapturedRequest[] = [];
+    const canvas = await mountWithRuntime(recorder, requests);
+
+    fireEvent.pointerDown(canvas, { clientX: 110, clientY: 70, pointerId: 1, button: 0 });
+    fireEvent.pointerUp(canvas, { clientX: 110, clientY: 70, pointerId: 1, button: 0 });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(requests).toHaveLength(0);
+    expect(recorder.pickCalls).toHaveLength(1);
+  });
+
+  it('rotates the rig on a drag and never emits an intent', async () => {
+    const recorder = createRecordingRuntime();
+    // If a drag wrongly clicked, this would produce an intent.
+    recorder.pickResult = { kind: 'ground', point: { x: 0, y: 0, z: 0 } };
+    const requests: CapturedRequest[] = [];
+    const canvas = await mountWithRuntime(recorder, requests);
+
+    fireEvent.pointerDown(canvas, { clientX: 100, clientY: 50, pointerId: 2, button: 0 });
+    // Travel > click threshold: this is a camera drag.
+    fireEvent.pointerMove(canvas, { clientX: 160, clientY: 90, pointerId: 2 });
+    fireEvent.pointerUp(canvas, { clientX: 160, clientY: 90, pointerId: 2, button: 0 });
+
+    await waitFor(() => {
+      expect(recorder.orientationCalls.length).toBeGreaterThan(0);
+    });
+    const last = recorder.orientationCalls.at(-1);
+    // yaw += 60px * 0.3deg, pitch += 40px * 0.3deg (58 -> 70, still clamped range).
+    expect(last?.yawDegrees).toBeCloseTo(18, 6);
+    expect(last?.pitchDegrees).toBeCloseTo(70, 6);
+    // A drag must never pick or emit.
+    expect(recorder.pickCalls).toHaveLength(0);
+    expect(requests).toHaveLength(0);
+  });
+
+  it('keeps a tiny movement within the click threshold a click, not a drag', async () => {
+    const recorder = createRecordingRuntime();
+    recorder.pickResult = { kind: 'ground', point: { x: 0, y: 0, z: 0 } };
+    const requests: CapturedRequest[] = [];
+    const canvas = await mountWithRuntime(recorder, requests);
+
+    fireEvent.pointerDown(canvas, { clientX: 110, clientY: 70, pointerId: 1, button: 0 });
+    // 3px of drift is within the 5px click threshold.
+    fireEvent.pointerMove(canvas, { clientX: 113, clientY: 72, pointerId: 1 });
+    fireEvent.pointerUp(canvas, { clientX: 113, clientY: 72, pointerId: 1, button: 0 });
+
+    await waitFor(() => {
+      expect(requests).toHaveLength(1);
+    });
+    // A click never rotates the camera.
+    expect(recorder.orientationCalls).toHaveLength(0);
+    expect(requests[0].body).toEqual({
+      type: 'actor.moveTo',
+      target: { x: 0, y: 0, z: 0 },
+    });
   });
 });

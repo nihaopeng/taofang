@@ -231,6 +231,127 @@ with the primitive contract (`submitCommand`, `EntityState`, `WorldState.entitie
 `controlledActorId`). See "Phase 4 frozen contract — primitive-driven architecture" above for the
 current surface; this section is kept only so the phase-3 history is not silently rewritten.
 
+## Phase 8 frozen design — GLB asset pipeline + mouse-first input
+
+Two presentation-side additions, then they are wired to the phase-7 continuous authoritative
+movement. Scope is deliberately presentation/input: no farming, no inventory, no NPC behaviour.
+
+### A. GLB / glTF asset route (client-only; the Game Protocol does not move)
+
+The contract is NOT touched to get real art. The existing pipeline already isolates it:
+
+```
+EntityKind / TerrainKind  (game semantics, on the wire)
+  -> bridge picks an AppearanceId      (presentation policy, client)
+  -> runtime prefab registry resolves the AppearanceId
+       -> a GLB asset, or the procedural placeholder
+```
+
+- **Asset paths, file names, model scale/orientation fixes, clip names and material tweaks live in
+a client ASSET CATALOGUE inside `apps/web/src/render`** and never on the wire. The server, the
+  Manager, the Router and the Organizer must remain unable to name an asset.
+- Loading is runtime-internal and **asynchronous**: one load per appearance, cached, and **cloned per
+  node** (`SkeletonUtils.clone` for skinned meshes, plain `clone()` otherwise) so N trees share one
+  parsed model. Everything loaded is released in `dispose()` (geometry/material/texture).
+- **The procedural prefab stays as the loading/fallback visual.** A slow asset renders the
+  placeholder; a failed load logs and keeps the placeholder — a missing asset must never break the
+  scene or produce an invisible node.
+- The loader is **injectable**, so tests never touch the network, plus a **minimal GLB fixture**
+  proves the real `GLTFLoader` path end to end (load → clone → place → dispose).
+- **Material policy for this slice: opaque or `alphaTest` only.** Blended transparency still needs
+  the (not yet built) uniform y-sorted transparent pass; a GLB with a blended material must be
+  coerced to alphaTest/opaque or reported, never silently allowed to break draw order.
+- Recorded extension points: DRACO/KTX2 decoder registration belongs where the loader is
+  configured; instancing per `(layer, appearance)` is the existing bucket index; unused
+  `RenderTransform.scale` is available for art sizing.
+
+### B. Mouse-first interaction (client presentation/input only)
+
+- **CameraRig**: drag to rotate (free yaw, pitch clamped to the existing 20-80 range) and wheel to
+  zoom (existing 0.25-8 clamp). Pointer/wheel handling lives in the UI; the rig remains the only
+  place pitch/yaw/zoom exist.
+- **Click vs drag is explicit**: a click is a pointerdown->pointerup within a small movement AND
+  time threshold. A drag must never emit an intent, and a click must never rotate the camera.
+- **The raycast is a runtime QUERY, not an ISA primitive**: `runtime.pick(ndcX, ndcY)` returns plain
+  data — `{ kind: 'node'; nodeId }`, `{ kind: 'ground'; point: Vec3 }`, or `null`. It needs the
+  camera matrix, which is exactly why it can never leave the client.
+- **Ground picking intersects the mathematical ground plane**, not the 100 tile plates (robust to
+  the deliberate inset gaps). A hit outside `WorldBounds` produces **no intent** — no client-side
+  clamping and no gameplay rule.
+- **Entity picking raycasts the registered node visuals and returns a `NodeId`**: the runtime knows
+  nothing about entities. The **bridge** owns the nodeId<->entityId convention and exposes the
+  mapping; the **UI** turns a picked node into an interact intent.
+- **The server receives world-space gameplay intents only.** No screen coordinate, NDC value, camera
+  matrix, ray/plane parameter or pointer field may appear in any command. Because the wire guards
+  match keys exactly, such a field is a `400`; a test asserts that.
+
+### C. The one contract change: two new intents
+
+```ts
+interface MoveToCommand   { type: 'actor.moveTo';   target: Vec3 }          // world-space goal
+interface InteractCommand { type: 'actor.interact'; targetEntityId: EntityId }
+type GameCommand = MoveIntentCommand | MoveToCommand | InteractCommand;    // 1 -> 3
+```
+
+- **`moveTo` is a steering goal, not a teleport.** The Manager stores it as the current movement
+  mode, integrates toward it each tick with the SAME world-space collision resolution, and clears it
+  on arrival (within an arrival radius) or when blocked. A client still cannot submit a position
+  that is applied directly, so the phase-7 anti-cheat property is preserved. With no pathfinding in
+  scope, the actor walks a straight line and stops against an obstacle rather than routing around it.
+- The direction intent and the moveTo goal **supersede each other** (exactly one current movement
+  mode); the latest input wins, so WASD interrupts a click-to-move.
+- **`interact` = "face the target, stop, and (today) nothing more".** The Manager validates that the
+  target exists, is within `INTERACTION_RANGE` of the actor, and is interactable per a per-kind rule;
+  the observed effect is the authoritative heading change plus stopping, carried by the existing
+  `transform.changed` event. No new event, and the intent is not dead code: it is the prerequisite
+  real interactions will build on.
+- **Rejected vs no-effect (design decision, flagged for veto).** Today a refusal is an empty `events`
+  array, which a client cannot distinguish from "nothing happened". Interaction needs the difference
+  (out of range / not interactable must be visible). Decision: reuse the existing transport error
+  path with ONE new code, **`CONFLICT` (409)**, meaning "valid request, illegal against the current
+  world state", and `NOT_FOUND` for an unknown target. No new event is introduced. This is additive
+  and cheap to reverse if the owner prefers silence plus a future result code.
+- `PROTOCOL_VERSION` 6 -> 7.
+
+### D. Acceptance for this phase
+
+1. Click the ground -> the actor walks to that world point continuously and stops there.
+2. Click a blocked or out-of-bounds area -> no teleport; the actor stops against the obstacle.
+3. Drag rotates the view, wheel zooms, and WASD stays camera-relative after rotating.
+4. Clicking an entity produces an interact intent; out-of-range or non-interactable is rejected
+   visibly rather than silently ignored.
+5. No command ever carries a screen/camera/ray field.
+6. A GLB can be swapped in per appearance WITHOUT touching the protocol, the Manager, the Router or
+   the Organizer.
+
+### E. Phase-8 limitations and decisions recorded after review
+
+1. **The error `message` is displayed to the player for interaction rejections.** A rejected
+   interaction is a `CONFLICT` (409) whose text the client shows verbatim, so those messages are
+   user-facing contract text (`Too far away.` / `Nothing to do with that.`). Other error messages
+   remain developer-facing. The Organizer therefore READS the error body (`code` + `message`)
+   instead of guessing a notice from the HTTP status, and the Manager docs must not claim the
+   discriminated `reason` itself reaches the client (it is server-side; the reason selects the
+   message). This keeps the wire shape unchanged: no new field, no new code.
+2. **A `moveTo` that is immediately blocked is an accepted-but-nothing-happened no-op** (200, empty
+   events, no notice): the Manager clears an unreachable goal and `CONFLICT` is deliberately limited
+   to interactions. Movement therefore has no "your request could not be honoured" signal. If that
+   becomes a UX problem, the fix is a decision about movement errors, not a client heuristic.
+3. **Real art over HTTP has never been exercised.** The only real-file test loads the fixture from a
+   `data:` URL; the `/models/*.glb` path served from Vite's `public/` (or any configured `base`) is
+   untested, and the catalogue URL is passed to the loader with no base resolution. The first real
+   asset may need a path fix.
+4. **Clips are recorded but never played.** `idleClip`/`walkClip` are catalogue data, and a loaded
+   model keeps its default pose; a real GLB will be visually static until a clip/mixer slice lands.
+   That is the gap between "a GLB can be swapped in" and "a GLB looks right".
+5. **One-shot intents are not serialised.** `moveTo`/`interact` do not use the movement loop's
+   single-in-flight slot, so two rapid clicks can resolve out of order and a late rejection can
+   overwrite a fresh notice. Low probability; revisit if rapid clicking becomes common.
+6. **The loaded-model path is only partly constrained by tests:** the shadow intent now comes from
+   the prefab (so a swap cannot downgrade it) and material coercion is reported, but the skinned
+   clone path is verified against a synthetic skinned mesh, not a real rigged GLTF, and there is no
+   DRACO/KTX2 decoding.
+
 ## Phase 7 frozen contract — continuous 3D world; the grid is an interaction layer
 
 Corrects a modelling error from phases 4-6: `Transform` was a 2D integer tile coordinate, so the

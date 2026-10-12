@@ -8,7 +8,13 @@ import {
   parseEntityId,
   parseWorldId,
 } from '@starvalley/protocol';
-import type { CellCoord, GameCommand, GridSpec, WorldSnapshot } from '@starvalley/protocol';
+import type {
+  CellCoord,
+  GameCommand,
+  GridSpec,
+  MoveToCommand,
+  WorldSnapshot,
+} from '@starvalley/protocol';
 import { QUAT_IDENTITY, yawFromQuat } from '@starvalley/math';
 
 import {
@@ -16,12 +22,17 @@ import {
   DEFAULT_ACTOR_RADIUS,
   DEFAULT_ACTOR_SPEED,
   DEFAULT_WORLD_MAP,
+  INTERACTABLE_BY_ENTITY_KIND,
+  INTERACTION_RANGE,
+  InteractionRejectedError,
   TICK_RATE_HZ,
   UnknownActorError,
+  UnknownEntityError,
   WALKABILITY_BY_TERRAIN,
   cellCentre,
   cellOf,
   createWorldManager,
+  distanceXZ,
 } from '../src/index.ts';
 
 const START = new Date('2025-01-02T03:04:05.000Z');
@@ -49,6 +60,16 @@ function fakeClock(start: Date) {
 /** Build a movement-intent command; a command deliberately carries no actor field. */
 function move(movement: { x: number; z: number }): GameCommand {
   return { type: 'actor.moveIntent', movement };
+}
+
+/** Build a world-space steering goal command. */
+function moveTo(target: { x: number; y: number; z: number }): MoveToCommand {
+  return { type: 'actor.moveTo', target };
+}
+
+/** Build an interaction command against an entity id. */
+function interact(targetEntityId: ReturnType<typeof parseEntityId>): GameCommand {
+  return { type: 'actor.interact', targetEntityId };
 }
 
 function snapshotOf(manager: ReturnType<typeof createWorldManager>): WorldSnapshot {
@@ -783,5 +804,290 @@ describe('manager instances', () => {
     expect(positionOf(b).z).toBeCloseTo(0.3, 10);
     expect(snapshotOf(a).grid.width).toBe(10);
     expect(snapshotOf(b).grid.width).toBe(3);
+  });
+});
+
+describe('moveTo steering', () => {
+  it('walks toward the goal and arrives EXACTLY on it', () => {
+    const manager = createWorldManager({ map: ALL_GRASS_5 });
+    const target = { x: 0.8, y: 0, z: 0.8 };
+    manager.submitIntent({ actorId: ACTOR_ID, command: moveTo(target) });
+
+    run(manager, 20);
+
+    expect(positionOf(manager)).toEqual(target);
+  });
+
+  it('is a steering goal, not a teleport (multiple ticks to arrive)', () => {
+    const manager = createWorldManager({ map: ALL_GRASS_5 });
+    manager.submitIntent({ actorId: ACTOR_ID, command: moveTo({ x: 0, y: 0, z: 2 }) });
+
+    manager.step(50);
+
+    expect(positionOf(manager).z).toBeCloseTo(0.15, 10);
+    expect(positionOf(manager).z).not.toBe(2);
+  });
+
+  it('steers toward a goal longer than the world and stops at the bounds', () => {
+    const manager = createWorldManager({ map: ALL_GRASS_5 });
+    const bounds = snapshotOf(manager).bounds;
+    manager.submitIntent({ actorId: ACTOR_ID, command: moveTo({ x: 100, y: 0, z: 0 }) });
+
+    run(manager, 200);
+
+    expect(positionOf(manager).x).toBeCloseTo(bounds.max.x - DEFAULT_ACTOR_RADIUS, 10);
+    // Goal consumed at the clamp: further ticks emit nothing.
+    expect(manager.step(50).events).toEqual([]);
+  });
+
+  it('ignores the goal y (movement and range are XZ)', () => {
+    const manager = createWorldManager({ map: ALL_GRASS_5 });
+    manager.submitIntent({ actorId: ACTOR_ID, command: moveTo({ x: 0, y: 999, z: 0.5 }) });
+
+    run(manager, 20);
+
+    expect(positionOf(manager)).toEqual({ x: 0, y: 0, z: 0.5 });
+  });
+
+  it('emits one transform.changed while moving and nothing once the goal is consumed', () => {
+    const clock = fakeClock(START);
+    const manager = createWorldManager({ map: ALL_GRASS_5, clock: clock.now });
+    manager.submitIntent({ actorId: ACTOR_ID, command: moveTo({ x: 0, y: 0, z: 0.15 }) });
+
+    const moving = manager.step(50);
+    expect(moving.events).toHaveLength(1);
+    expect(moving.events[0].type).toBe('transform.changed');
+
+    // Arrived exactly this tick: the mode was consumed.
+    expect(manager.step(50)).toEqual({ events: [], serverTime: START.toISOString() });
+  });
+
+  it('copies the goal so mutating the command afterwards cannot change authority', () => {
+    const manager = createWorldManager({ map: ALL_GRASS_5 });
+    const command = moveTo({ x: 0, y: 0, z: 2 });
+    manager.submitIntent({ actorId: ACTOR_ID, command });
+
+    command.target.z = 999;
+    run(manager, 30);
+
+    expect(positionOf(manager)).toEqual({ x: 0, y: 0, z: 2 });
+  });
+
+  it('does not reject an out-of-bounds/unwalkable goal (it steers and stops)', () => {
+    const manager = createWorldManager({ map: ALL_GRASS_5 });
+    expect(() =>
+      manager.submitIntent({ actorId: ACTOR_ID, command: moveTo({ x: 100, y: 0, z: 100 }) }),
+    ).not.toThrow();
+  });
+});
+
+describe('moveTo blocked / arrival rules', () => {
+  it('stops and CLEARS the mode when an obstacle blocks the goal (further ticks emit nothing)', () => {
+    const clock = fakeClock(START);
+    const manager = createWorldManager({ map: BLOCK_NORTH_3, clock: clock.now });
+    manager.submitIntent({ actorId: ACTOR_ID, command: moveTo({ x: 0, y: 0, z: -3 }) });
+
+    run(manager, 30);
+
+    const stopped = positionOf(manager);
+    expect(stopped.z).toBeCloseTo(-0.15, 10);
+    expect(stopped.z).toBeGreaterThan(-0.5); // outside the blocked cell's AABB
+
+    // The mode was cleared, so an unreachable goal does not stay pending.
+    expect(manager.step(50)).toEqual({ events: [], serverTime: START.toISOString() });
+    expect(positionOf(manager)).toEqual(stopped);
+  });
+
+  it('a moveTo into a blocking prop stops outside its footprint', () => {
+    const manager = createWorldManager({ map: PROP_NORTH_3 });
+    manager.submitIntent({ actorId: ACTOR_ID, command: moveTo({ x: 0, y: 0, z: -3 }) });
+
+    run(manager, 30);
+
+    const stopped = positionOf(manager);
+    expect(stopped.z).toBeCloseTo(-0.15, 10);
+    expect(manager.step(50).events).toEqual([]);
+  });
+});
+
+describe('one movement mode per actor', () => {
+  it('a direction intent replaces a pending moveTo goal', () => {
+    const manager = createWorldManager({ map: ALL_GRASS_5 });
+    manager.submitIntent({ actorId: ACTOR_ID, command: moveTo({ x: 0, y: 0, z: 5 }) });
+    manager.step(50); // walks +Z
+    const afterGoal = positionOf(manager);
+
+    manager.submitIntent({ actorId: ACTOR_ID, command: move({ x: 1, z: 0 }) });
+    manager.step(50);
+
+    expect(positionOf(manager).x).toBeGreaterThan(afterGoal.x);
+    expect(positionOf(manager).z).toBeCloseTo(afterGoal.z, 10);
+  });
+
+  it('a moveTo goal replaces a held direction intent', () => {
+    const manager = createWorldManager({ map: ALL_GRASS_5 });
+    manager.submitIntent({ actorId: ACTOR_ID, command: move({ x: 0, z: 1 }) });
+    manager.step(50);
+    const afterDirection = positionOf(manager);
+
+    manager.submitIntent({ actorId: ACTOR_ID, command: moveTo({ x: 0, y: 0, z: 5 }) });
+    manager.step(50);
+
+    expect(positionOf(manager).z).toBeGreaterThan(afterDirection.z);
+  });
+
+  it('a { x: 0, z: 0 } direction clears a pending moveTo goal', () => {
+    const clock = fakeClock(START);
+    const manager = createWorldManager({ map: ALL_GRASS_5, clock: clock.now });
+    manager.submitIntent({ actorId: ACTOR_ID, command: moveTo({ x: 0, y: 0, z: 5 }) });
+    const stopped = positionOf(manager);
+
+    manager.submitIntent({ actorId: ACTOR_ID, command: move({ x: 0, z: 0 }) });
+    const result = manager.step(50);
+
+    expect(result).toEqual({ events: [], serverTime: START.toISOString() });
+    expect(positionOf(manager)).toEqual(stopped);
+  });
+
+  it('a { x: 0, z: 0 } direction clears a held direction', () => {
+    const clock = fakeClock(START);
+    const manager = createWorldManager({ map: ALL_GRASS_5, clock: clock.now });
+    manager.submitIntent({ actorId: ACTOR_ID, command: move({ x: 1, z: 0 }) });
+    manager.step(50);
+    const stopped = positionOf(manager);
+
+    manager.submitIntent({ actorId: ACTOR_ID, command: move({ x: 0, z: 0 }) });
+    const result = manager.step(50);
+
+    expect(result).toEqual({ events: [], serverTime: START.toISOString() });
+    expect(positionOf(manager)).toEqual(stopped);
+  });
+
+  it('movement-command submits return an empty batch and change no world state', () => {
+    const clock = fakeClock(START);
+    const manager = createWorldManager({ map: ALL_GRASS_5, clock: clock.now });
+    const before = positionOf(manager);
+
+    const goal = manager.submitIntent({ actorId: ACTOR_ID, command: moveTo({ x: 1, y: 0, z: 1 }) });
+    const direction = manager.submitIntent({ actorId: ACTOR_ID, command: move({ x: 1, z: 0 }) });
+
+    expect(goal).toEqual({ events: [], serverTime: START.toISOString() });
+    expect(direction).toEqual({ events: [], serverTime: START.toISOString() });
+    expect(positionOf(manager)).toEqual(before);
+  });
+});
+
+describe('interaction', () => {
+  it('keeps the interactable-by-kind rule (tree true, character false)', () => {
+    expect(INTERACTABLE_BY_ENTITY_KIND).toEqual({ character: false, tree: true });
+  });
+
+  it('exposes a 1.5-unit interaction range', () => {
+    expect(INTERACTION_RANGE).toBe(1.5);
+  });
+
+  it.each([
+    { label: 'east', map: ['ggg', 'ggT', 'ggg'], yaw: Math.PI / 2 },
+    { label: 'west', map: ['ggg', 'Tgg', 'ggg'], yaw: -Math.PI / 2 },
+    { label: 'north (-Z)', map: ['gTg', 'ggg', 'ggg'], yaw: Math.PI },
+    { label: 'south (+Z)', map: ['ggg', 'ggg', 'gTg'], yaw: 0 },
+  ])(
+    'accepted on a tree in range: stops movement and faces $label',
+    ({ map, yaw }) => {
+      const clock = fakeClock(START);
+      const manager = createWorldManager({ map, clock: clock.now });
+      // Arm a held movement mode so the stop is observable.
+      manager.submitIntent({ actorId: ACTOR_ID, command: move({ x: 0, z: 1 }) });
+      const stopped = positionOf(manager);
+
+      const result = manager.submitIntent({
+        actorId: ACTOR_ID,
+        command: interact(parseEntityId('tree-1')),
+      });
+
+      expect(result.serverTime).toBe(START.toISOString());
+      expect(result.events).toHaveLength(1);
+      const [event] = result.events;
+      expect(event.type).toBe('transform.changed');
+      if (event.type === 'transform.changed') {
+        expect(event.entityId).toBe(ENTITY_ID);
+        // Position unchanged: interaction only turns and stops.
+        expect(event.transform.position).toEqual(stopped);
+        expect(yawFromQuat(event.transform.rotation)).toBeCloseTo(yaw, 10);
+      }
+      // Stopped: the pending movement mode was cleared.
+      expect(manager.step(50)).toEqual({ events: [], serverTime: START.toISOString() });
+    },
+  );
+
+  it('rejects an out-of-range tree with reason out-of-range', () => {
+    const manager = createWorldManager({
+      map: ['ggggg', 'ggggg', 'ggggT', 'ggggg', 'ggggg'],
+    });
+
+    let caught: unknown;
+    try {
+      manager.submitIntent({ actorId: ACTOR_ID, command: interact(parseEntityId('tree-1')) });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(InteractionRejectedError);
+    const error = caught as InteractionRejectedError;
+    expect(error.name).toBe('InteractionRejectedError');
+    expect(error.reason).toBe('out-of-range');
+    expect(error.entityId).toBe(parseEntityId('tree-1'));
+  });
+
+  it("rejects the actor's own character entity with reason not-interactable", () => {
+    const manager = createWorldManager();
+
+    let caught: unknown;
+    try {
+      manager.submitIntent({ actorId: ACTOR_ID, command: interact(ENTITY_ID) });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(InteractionRejectedError);
+    const error = caught as InteractionRejectedError;
+    expect(error.reason).toBe('not-interactable');
+    expect(error.entityId).toBe(ENTITY_ID);
+  });
+
+  it('throws UnknownEntityError carrying the id for an unknown target', () => {
+    const manager = createWorldManager();
+    const ghost = parseEntityId('ghost');
+
+    let caught: unknown;
+    try {
+      manager.submitIntent({ actorId: ACTOR_ID, command: interact(ghost) });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(UnknownEntityError);
+    const error = caught as UnknownEntityError;
+    expect(error.name).toBe('UnknownEntityError');
+    expect(error.entityId).toBe(ghost);
+  });
+
+  it('measures INTERACTION_RANGE in XZ, ignoring height', () => {
+    // A target directly overhead is still within reach: `y` does not count.
+    const inRangeXZButHighY = distanceXZ({ x: 0, y: 0, z: 0 }, { x: 1, y: 999, z: 0 });
+    expect(inRangeXZButHighY).toBeCloseTo(1, 10);
+    expect(inRangeXZButHighY).toBeLessThanOrEqual(INTERACTION_RANGE);
+    // Out of range in XZ stays out of range regardless of height.
+    expect(distanceXZ({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 2 })).toBeCloseTo(2, 10);
+  });
+
+  it('rejects an unknown actor before resolving the target', () => {
+    const manager = createWorldManager();
+    expect(() =>
+      manager.submitIntent({
+        actorId: parseActorId('ghost'),
+        command: interact(ENTITY_ID),
+      }),
+    ).toThrow(UnknownActorError);
   });
 });

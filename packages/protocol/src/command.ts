@@ -1,7 +1,11 @@
 import { ProtocolParseError } from './errors.ts';
 import { isGameEvent } from './event.ts';
 import type { GameEvent } from './event.ts';
+import { isEntityId } from './identity.ts';
+import type { EntityId } from './identity.ts';
 import { hasExactKeys, isFiniteNumber, isIsoUtcString, isRecord } from './internal.ts';
+import { isVec3 } from './math.ts';
+import type { Vec3 } from './math.ts';
 
 /** Allowed slack on the movement-intent magnitude (reject `|v| > 1`). */
 const MOVEMENT_MAGNITUDE_EPSILON = 1e-6;
@@ -30,13 +34,57 @@ export interface MoveIntentCommand {
 }
 
 /**
+ * Request body for `COMMAND_PATH`: "steer toward this world-space goal".
+ *
+ * `moveTo` is a **steering goal, not a teleport**: the Manager stores it as the
+ * current movement mode, integrates toward `target` each tick with the same
+ * world-space collision resolution, and clears it on arrival (within an arrival
+ * radius) or when blocked. The client is never trusted with an applied position,
+ * so the phase-7 anti-cheat property is preserved.
+ *
+ * `target` is a continuous world-space `Vec3`. Its magnitude is deliberately
+ * **not bounded**: the world is the server's business, and whether a goal is
+ * legal (in bounds / reachable) is a Manager runtime decision, not a wire
+ * invariant. `moveTo` and `moveIntent` supersede each other — exactly one
+ * current movement mode — so a direction intent interrupts a click-to-move.
+ *
+ * Carries no actor field, for the same reason as `MoveIntentCommand`: the actor
+ * is resolved from transport context.
+ */
+export interface MoveToCommand {
+  type: 'actor.moveTo';
+  target: Vec3;
+}
+
+/**
+ * Request body for `COMMAND_PATH`: "interact with this world entity".
+ *
+ * `targetEntityId` names a world object through its `EntityId`. The Manager
+ * validates that the target exists, is within interaction range, and is
+ * interactable for its kind; the observed effect today is the authoritative
+ * heading change plus stopping, carried by the existing `transform.changed`
+ * event. A refusal is a transport error (`NOT_FOUND` for an unknown target,
+ * `CONFLICT` for an illegal-against-current-state request), never a negative
+ * event.
+ *
+ * Carries no actor field, for the same reason as `MoveIntentCommand`: the actor
+ * is resolved from transport context.
+ */
+export interface InteractCommand {
+  type: 'actor.interact';
+  targetEntityId: EntityId;
+}
+
+/**
  * Discriminated union of client -> server commands, dispatched on `type`.
  *
  * There is deliberately no `action: string` + `args: unknown` catch-all: every
  * command is its own strongly-typed interface, so callers (and executors) narrow
- * on `type` and never need a cast.
+ * on `type` and never need a cast. The union is exactly three members today:
+ * a level-triggered direction intent, a world-space steering goal, and an
+ * entity interaction request.
  */
-export type GameCommand = MoveIntentCommand;
+export type GameCommand = MoveIntentCommand | MoveToCommand | InteractCommand;
 
 /**
  * Authoritative delta produced by a command or a simulation step.
@@ -54,6 +102,8 @@ export interface GameEventBatch {
 
 const MOVE_INTENT_COMMAND_KEYS = ['type', 'movement'] as const;
 const MOVE_MOVEMENT_KEYS = ['x', 'z'] as const;
+const MOVE_TO_COMMAND_KEYS = ['type', 'target'] as const;
+const INTERACT_COMMAND_KEYS = ['type', 'targetEntityId'] as const;
 const GAME_EVENT_BATCH_KEYS = ['events', 'serverTime'] as const;
 
 /**
@@ -90,6 +140,49 @@ export function parseMoveIntentCommand(value: unknown): MoveIntentCommand {
 }
 
 /**
+ * Structural guard for `MoveToCommand` (exactly `{ type: 'actor.moveTo', target }`).
+ * `target` must be a finite `Vec3`; its magnitude is intentionally unbounded.
+ */
+export function isMoveToCommand(value: unknown): value is MoveToCommand {
+  return (
+    isRecord(value) &&
+    hasExactKeys(value, MOVE_TO_COMMAND_KEYS) &&
+    value.type === 'actor.moveTo' &&
+    isVec3(value.target)
+  );
+}
+
+/** Parse and validate `MoveToCommand`, throwing `ProtocolParseError` on mismatch. */
+export function parseMoveToCommand(value: unknown): MoveToCommand {
+  if (!isMoveToCommand(value)) {
+    throw new ProtocolParseError('Invalid MoveToCommand payload');
+  }
+  return value;
+}
+
+/**
+ * Structural guard for `InteractCommand`
+ * (exactly `{ type: 'actor.interact', targetEntityId }`). `targetEntityId` must
+ * satisfy the non-empty `EntityId` guard.
+ */
+export function isInteractCommand(value: unknown): value is InteractCommand {
+  return (
+    isRecord(value) &&
+    hasExactKeys(value, INTERACT_COMMAND_KEYS) &&
+    value.type === 'actor.interact' &&
+    isEntityId(value.targetEntityId)
+  );
+}
+
+/** Parse and validate `InteractCommand`, throwing `ProtocolParseError` on mismatch. */
+export function parseInteractCommand(value: unknown): InteractCommand {
+  if (!isInteractCommand(value)) {
+    throw new ProtocolParseError('Invalid InteractCommand payload');
+  }
+  return value;
+}
+
+/**
  * Structural guard for `GameCommand`.
  *
  * Dispatches on the `type` discriminant. An unknown `type` (or any malformed
@@ -102,6 +195,10 @@ export function isGameCommand(value: unknown): value is GameCommand {
   switch (value.type) {
     case 'actor.moveIntent':
       return isMoveIntentCommand(value);
+    case 'actor.moveTo':
+      return isMoveToCommand(value);
+    case 'actor.interact':
+      return isInteractCommand(value);
     default:
       return false;
   }
@@ -118,6 +215,10 @@ export function parseGameCommand(value: unknown): GameCommand {
     switch (value.type) {
       case 'actor.moveIntent':
         return parseMoveIntentCommand(value);
+      case 'actor.moveTo':
+        return parseMoveToCommand(value);
+      case 'actor.interact':
+        return parseInteractCommand(value);
       default:
         break;
     }

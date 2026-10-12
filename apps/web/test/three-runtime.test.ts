@@ -1,3 +1,4 @@
+/// <reference types="node" />
 /**
  * Runtime tests for the Three.js Render ISA executor.
  *
@@ -13,7 +14,17 @@
  * assert the camera rig's follow/pitch/yaw/zoom through plain inspection data.
  */
 
-import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+
+import { BoxGeometry, Group, Mesh, MeshStandardMaterial } from 'three';
+import {
+  Bone,
+  Float32BufferAttribute,
+  Skeleton,
+  SkinnedMesh,
+  Uint16BufferAttribute,
+} from 'three';
+import { describe, expect, it, vi } from 'vitest';
 
 import type {
   AppearanceId,
@@ -27,13 +38,18 @@ import type {
 } from '@starvalley/render-protocol';
 
 import { BRIDGE_APPEARANCES } from '../src/render/bridge.ts';
+import { asAppearanceId } from '../src/render/three/assets.ts';
 import {
   KNOWN_APPEARANCES,
   RENDER_CAMERA,
   createThreeRuntime,
   orthographicBounds,
 } from '../src/render/three/runtime.ts';
-import type { RenderInspection, RenderRuntime } from '../src/render/three/runtime.ts';
+import type {
+  ModelLoader,
+  RenderInspection,
+  RenderRuntime,
+} from '../src/render/three/runtime.ts';
 
 const nodeA = 'node-a' as NodeId;
 const nodeB = 'node-b' as NodeId;
@@ -807,6 +823,348 @@ describe('three runtime appearance catalogue binding', () => {
   it('covers every appearance id the bridge can emit', () => {
     for (const appearance of BRIDGE_APPEARANCES) {
       expect(KNOWN_APPEARANCES).toContain(appearance);
+    }
+  });
+});
+
+describe('three runtime picking', () => {
+  it('picks a registered entity node under the centre ray', () => {
+    const runtime = makeRuntime();
+    runtime.apply([
+      createCommand('entity:actor' as NodeId, 'object', appearanceCharacter, { x: 0, y: 0, z: 0 }),
+    ]);
+
+    expect(runtime.pick(0, 0)).toEqual({ kind: 'node', nodeId: 'entity:actor' });
+
+    runtime.dispose();
+  });
+
+  it('picks the mathematical ground point for a bare ground click', () => {
+    const runtime = makeRuntime();
+
+    const hit = runtime.pick(0, 0);
+    expect(hit?.kind).toBe('ground');
+    if (hit?.kind === 'ground') {
+      // The centre ray points at the rig focus, which lies on the ground plane.
+      expect(hit.point.x).toBeCloseTo(0, 6);
+      expect(hit.point.y).toBeCloseTo(BOUNDS.min.y, 6);
+      expect(hit.point.z).toBeCloseTo(0, 6);
+    }
+
+    runtime.dispose();
+  });
+
+  it('returns null for a ground hit outside the world bounds, with no clamping', () => {
+    const runtime = makeRuntime();
+
+    // A corner ray lands far outside the 12x12 world; no intent may be derived.
+    expect(runtime.pick(1, 1)).toBeNull();
+    expect(runtime.pick(-1, -1)).toBeNull();
+
+    runtime.dispose();
+  });
+
+  it('prefers a node visual over the ground behind it at the same screen point', () => {
+    const runtime = makeRuntime();
+    // Tall tree at the focus: the centre ray would also reach the ground there.
+    runtime.apply([
+      createCommand('entity:tree' as NodeId, 'object', appearanceTree, { x: 0, y: 0, z: 0 }),
+    ]);
+
+    expect(runtime.pick(0, 0)).toEqual({ kind: 'node', nodeId: 'entity:tree' });
+
+    runtime.dispose();
+  });
+
+  it('does not let a base-layer terrain plate shadow the mathematical ground pick', () => {
+    const runtime = makeRuntime();
+    // A grass plate is the visible ground at the focus. If it were raycast as a
+    // node, every ground click would pick a tile node and never reach moveTo.
+    runtime.apply([
+      createCommand('tile:0,0' as NodeId, 'base', appearanceGrass, { x: 0, y: 0, z: 0 }),
+    ]);
+
+    const hit = runtime.pick(0, 0);
+    expect(hit?.kind).toBe('ground');
+    if (hit?.kind === 'ground') {
+      expect(hit.point.x).toBeCloseTo(0, 6);
+      expect(hit.point.z).toBeCloseTo(0, 6);
+    }
+
+    runtime.dispose();
+  });
+
+  it('ignores an invisible node and falls through to the ground', () => {
+    const runtime = makeRuntime();
+    runtime.apply([
+      createCommand('entity:actor' as NodeId, 'object', appearanceCharacter, { x: 0, y: 0, z: 0 }, IDENTITY, false),
+    ]);
+
+    expect(runtime.pick(0, 0)?.kind).toBe('ground');
+
+    runtime.dispose();
+  });
+});
+
+describe('three runtime GLB pipeline (injected loader)', () => {
+  /** A 1x1x1 box template whose base sits at y = 0. */
+  function makeTemplate(materialOverride?: MeshStandardMaterial): Group {
+    const group = new Group();
+    const mesh = new Mesh(
+      new BoxGeometry(1, 1, 1),
+      materialOverride ?? new MeshStandardMaterial({ color: 0xff8844 }),
+    );
+    mesh.position.y = 0.5;
+    group.add(mesh);
+    return group;
+  }
+
+  function flush(): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  it('keeps the placeholder until the load resolves, then shares one parse across two node clones', async () => {
+    const template = makeTemplate();
+    const loads: string[] = [];
+    const loadModel: ModelLoader = (url) => {
+      loads.push(url);
+      return Promise.resolve(template);
+    };
+    const catalogue = {
+      [asAppearanceId('appearance.tree')]: { url: '/models/tree.glb' },
+    };
+    const runtime = createThreeRuntime({ bounds: BOUNDS, loadModel, catalogue });
+
+    runtime.apply([
+      createCommand('entity:t1' as NodeId, 'object', appearanceTree, { x: 0, y: 0, z: 0 }),
+      createCommand('entity:t2' as NodeId, 'object', appearanceTree, { x: 2, y: 0, z: 0 }),
+    ]);
+
+    // The procedural placeholder is the immediate visual: a tall tree.
+    expect(findNode(runtime, 'entity:t1' as NodeId).model).toBe('loading');
+    expect(findNode(runtime, 'entity:t1' as NodeId).visualTopY).toBeGreaterThan(1);
+
+    await flush();
+
+    // Both nodes swapped to the model (one cached parse, one clone per node).
+    const first = findNode(runtime, 'entity:t1' as NodeId);
+    const second = findNode(runtime, 'entity:t2' as NodeId);
+    expect(first.model).toBe('loaded');
+    expect(second.model).toBe('loaded');
+    // Only one template exists, but each node has its own visual.
+    expect(runtime.inspect().models).toBe(1);
+    expect(loads).toEqual(['/models/tree.glb']);
+    // Height accounting re-measured off the model, not the retired placeholder.
+    expect(first.visualTopY).toBeCloseTo(1, 6);
+    expect(second.visualTopY).toBeCloseTo(1, 6);
+
+    runtime.dispose();
+  });
+
+  it('keeps the placeholder and records failure when the loader rejects', async () => {
+    const loadModel: ModelLoader = () => Promise.reject(new Error('404'));
+    const catalogue = {
+      [asAppearanceId('appearance.tree')]: { url: '/models/missing.glb' },
+    };
+    const runtime = createThreeRuntime({ bounds: BOUNDS, loadModel, catalogue });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    runtime.apply([
+      createCommand('entity:t1' as NodeId, 'object', appearanceTree, { x: 0, y: 0, z: 0 }),
+    ]);
+    await flush();
+
+    const node = findNode(runtime, 'entity:t1' as NodeId);
+    expect(node.model).toBe('failed');
+    // The placeholder is still there and still visible.
+    expect(node.visualTopY).toBeGreaterThan(1);
+    expect(node.visible).toBe(true);
+    expect(errorSpy).toHaveBeenCalled();
+
+    errorSpy.mockRestore();
+    runtime.dispose();
+  });
+
+  it('coerces a blended material to an alpha-tested opaque material and reports it', async () => {
+    const blended = new MeshStandardMaterial({ color: 0xff0000, transparent: true, alphaTest: 0 });
+    blended.name = 'artist-blend';
+    const template = makeTemplate(blended);
+    const loadModel: ModelLoader = () => Promise.resolve(template);
+    const catalogue = {
+      [asAppearanceId('appearance.tree')]: { url: '/models/cutout.glb' },
+    };
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const runtime = createThreeRuntime({ bounds: BOUNDS, loadModel, catalogue });
+
+    runtime.apply([
+      createCommand('entity:t1' as NodeId, 'object', appearanceTree, { x: 0, y: 0, z: 0 }),
+    ]);
+    await flush();
+
+    // The parsed template's material is coerced once, so every clone shares it.
+    expect(blended.transparent).toBe(false);
+    expect(blended.alphaTest).toBeGreaterThan(0);
+    // The coercion is no longer silent: one warning names the material and asset.
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy.mock.calls[0]?.[0]).toContain('artist-blend');
+    expect(warnSpy.mock.calls[0]?.[0]).toContain('/models/cutout.glb');
+
+    warnSpy.mockRestore();
+    runtime.dispose();
+  });
+
+  it('uses the skeleton-aware clone for a skinned template', async () => {
+    const skinned = (() => {
+      const geometry = new BoxGeometry(1, 1, 1);
+      const vertexCount = geometry.attributes.position.count;
+      geometry.setAttribute(
+        'skinIndex',
+        new Uint16BufferAttribute(new Uint16Array(vertexCount * 4), 4),
+      );
+      const weights = new Float32Array(vertexCount * 4);
+      for (let i = 0; i < vertexCount; i += 1) {
+        weights[i * 4] = 1;
+      }
+      geometry.setAttribute('skinWeight', new Float32BufferAttribute(weights, 4));
+      const bone = new Bone();
+      const mesh = new SkinnedMesh(geometry, new MeshStandardMaterial({ color: 0x33aa55 }));
+      mesh.add(bone);
+      mesh.bind(new Skeleton([bone]));
+      const group = new Group();
+      group.add(mesh);
+      return group;
+    })();
+    const loadModel: ModelLoader = () => Promise.resolve(skinned);
+    const catalogue = {
+      [asAppearanceId('appearance.character')]: { url: '/models/rig.glb' },
+    };
+    const runtime = createThreeRuntime({ bounds: BOUNDS, loadModel, catalogue });
+
+    runtime.apply([
+      createCommand('entity:a' as NodeId, 'object', appearanceCharacter, { x: 0, y: 0, z: 0 }),
+      createCommand('entity:b' as NodeId, 'object', appearanceCharacter, { x: 2, y: 0, z: 0 }),
+    ]);
+    await flush();
+
+    const first = findNode(runtime, 'entity:a' as NodeId);
+    const second = findNode(runtime, 'entity:b' as NodeId);
+    expect(first.model).toBe('loaded');
+    expect(second.model).toBe('loaded');
+    expect(runtime.inspect().models).toBe(1);
+    // `SkeletonUtils.clone` (not a plain `clone(true)`) produced the two node
+    // visuals. A plain clone shares the source `SkinnedMesh`'s skeleton, so the
+    // two ids would be equal; independent skeletons prove the skeleton-aware
+    // branch ran and each clone owns its bones.
+    expect(first.skeletonId).not.toBeNull();
+    expect(second.skeletonId).not.toBeNull();
+    expect(first.skeletonId).not.toBe(second.skeletonId);
+
+    runtime.dispose();
+  });
+
+  it('releases the loaded template resources on dispose and counts them', async () => {
+    const loadModel: ModelLoader = () => Promise.resolve(makeTemplate());
+    const catalogue = {
+      [asAppearanceId('appearance.tree')]: { url: '/models/tree.glb' },
+    };
+    const runtime = createThreeRuntime({ bounds: BOUNDS, loadModel, catalogue });
+
+    runtime.apply([
+      createCommand('entity:t1' as NodeId, 'object', appearanceTree, { x: 0, y: 0, z: 0 }),
+    ]);
+    await flush();
+    expect(runtime.inspect().models).toBe(1);
+
+    runtime.dispose();
+
+    const after = runtime.inspect();
+    expect(after.models).toBe(0);
+    // The placeholder tree (3 meshes) plus the box template have been released.
+    expect(after.released.geometries).toBeGreaterThanOrEqual(4);
+    expect(after.released.materials).toBeGreaterThanOrEqual(4);
+  });
+
+  it('never lets a load that resolves after dispose add to the scene', async () => {
+    let resolveTemplate: (template: Group) => void = () => {};
+    const loadModel: ModelLoader = () =>
+      new Promise<Group>((resolve) => {
+        resolveTemplate = resolve;
+      });
+    const catalogue = {
+      [asAppearanceId('appearance.tree')]: { url: '/models/slow.glb' },
+    };
+    const runtime = createThreeRuntime({ bounds: BOUNDS, loadModel, catalogue });
+
+    runtime.apply([
+      createCommand('entity:t1' as NodeId, 'object', appearanceTree, { x: 0, y: 0, z: 0 }),
+    ]);
+    runtime.dispose();
+
+    resolveTemplate(makeTemplate());
+    await flush();
+
+    const after = runtime.inspect();
+    expect(after.nodes).toHaveLength(0);
+    expect(after.models).toBe(0);
+    // The late template was released immediately rather than leaked.
+    expect(after.released.geometries).toBeGreaterThanOrEqual(4);
+  });
+});
+
+describe('three runtime GLB real-file path', () => {
+  it('loads the checked-in box.glb through the real GLTFLoader, clones for two nodes, and disposes', async () => {
+    // Node has no `ProgressEvent`; browsers do. `FileLoader` constructs one while
+    // streaming the response, so the minimal shape is polyfilled for this test.
+    const globalWithProgress = globalThis as { ProgressEvent?: unknown };
+    const originalProgressEvent = globalWithProgress.ProgressEvent;
+    globalWithProgress.ProgressEvent = class ProgressEvent extends Event {
+      readonly lengthComputable: boolean;
+      readonly loaded: number;
+      readonly total: number;
+      constructor(type: string, init: { lengthComputable?: boolean; loaded?: number; total?: number } = {}) {
+        super(type);
+        this.lengthComputable = init.lengthComputable ?? false;
+        this.loaded = init.loaded ?? 0;
+        this.total = init.total ?? 0;
+      }
+    };
+
+    try {
+      const bytes = readFileSync(new URL('./fixtures/box.glb', import.meta.url));
+      const dataUrl = `data:model/gltf-binary;base64,${bytes.toString('base64')}`;
+      const catalogue = {
+        [asAppearanceId('appearance.character')]: { url: dataUrl },
+      };
+      // No `loadModel`: the PRODUCTION default (real GLTFLoader) is exercised.
+      const runtime = createThreeRuntime({ bounds: BOUNDS, catalogue });
+
+      runtime.apply([
+        createCommand('entity:hero' as NodeId, 'object', appearanceCharacter, { x: 0, y: 0, z: 0 }),
+        createCommand('entity:hero2' as NodeId, 'object', appearanceCharacter, { x: 2, y: 0, z: 0 }),
+      ]);
+      expect(findNode(runtime, 'entity:hero' as NodeId).model).toBe('loading');
+
+      await vi.waitFor(() => {
+        expect(findNode(runtime, 'entity:hero' as NodeId).model).toBe('loaded');
+        expect(findNode(runtime, 'entity:hero2' as NodeId).model).toBe('loaded');
+      });
+
+      // One parse for the URL, two visual clones (placeholder replaced by the box).
+      expect(runtime.inspect().models).toBe(1);
+      expect(findNode(runtime, 'entity:hero' as NodeId).visualTopY).toBeCloseTo(0.5, 6);
+      expect(findNode(runtime, 'entity:hero2' as NodeId).visualTopY).toBeCloseTo(0.5, 6);
+      // The prefab's shadow intent (character: casts, does not receive) survives
+      // the swap. `GLTFLoader` leaves the clone's flags false, so without
+      // re-applying the intent these would read back false and real art would
+      // silently cast no shadows while the placeholder did.
+      expect(findNode(runtime, 'entity:hero' as NodeId).castsShadow).toBe(true);
+      expect(findNode(runtime, 'entity:hero' as NodeId).receivesShadow).toBe(false);
+
+      runtime.dispose();
+      expect(runtime.inspect().models).toBe(0);
+      expect(runtime.inspect().released.geometries).toBeGreaterThanOrEqual(1);
+    } finally {
+      globalWithProgress.ProgressEvent = originalProgressEvent;
     }
   });
 });

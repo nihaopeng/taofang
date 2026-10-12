@@ -32,7 +32,9 @@ export type { StreamStatus, WorldState, WorldStatus } from './world-store';
 
 export {
   getWorldState,
+  interact,
   loadWorld,
+  moveTo,
   resetWorldState,
   setMovementIntent,
   subscribeWorld,

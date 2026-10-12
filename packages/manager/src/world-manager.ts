@@ -5,6 +5,7 @@ import type {
   EntityKind,
   EntityState,
   GameCommand,
+  GameEvent,
   GameEventBatch,
   GridSpec,
   TerrainKind,
@@ -68,6 +69,16 @@ export const DEFAULT_ACTOR_SPEED = 3;
 /** Default actor collision radius (an XZ circle), in world units. */
 export const DEFAULT_ACTOR_RADIUS = 0.35;
 
+/**
+ * Interaction reach, in world units, measured on the ground plane (XZ).
+ *
+ * A target farther than this from the actor in XZ is rejected with
+ * `InteractionRejectedError` reason `'out-of-range'`. Height is deliberately
+ * ignored: interaction is a ground-plane reach, so an entity directly overhead
+ * is still "in range".
+ */
+export const INTERACTION_RANGE = 1.5;
+
 /** Map legend character -> static terrain kind (the tree character is handled separately). */
 const TERRAIN_BY_CHARACTER: ReadonlyMap<string, TerrainKind> = new Map([
   ['g', 'grass'],
@@ -116,6 +127,21 @@ export const BLOCKING_BY_ENTITY_KIND: Record<EntityKind, boolean> = {
   tree: true,
 };
 
+/**
+ * Placeholder interaction rules: whether the actor can interact with an entity
+ * kind. Revisit when real interactions land (farming, NPC dialogue, containers,
+ * ...); making a kind interactable flips its entry here.
+ *
+ * `tree: true` and `character: false` are deliberately chosen so BOTH the accept
+ * path (a tree) and the not-interactable reject path (the actor's own character
+ * entity) are real and testable. The annotation is total over `EntityKind`, so
+ * adding a kind is a compile error here until its interactability is decided.
+ */
+export const INTERACTABLE_BY_ENTITY_KIND: Record<EntityKind, boolean> = {
+  character: false,
+  tree: true,
+};
+
 /** Half-extents (XZ) of an entity kind's static collider footprint. */
 interface Footprint {
   readonly halfX: number;
@@ -156,6 +182,60 @@ export class UnknownActorError extends Error {
 }
 
 /**
+ * Thrown when an operation names an entity the manager does not know about.
+ *
+ * Transport maps this to `NOT_FOUND`; the manager itself stays transport-free.
+ */
+export class UnknownEntityError extends Error {
+  readonly entityId: EntityId;
+
+  constructor(entityId: EntityId) {
+    super(`Unknown entity: ${entityId}`);
+    this.name = 'UnknownEntityError';
+    this.entityId = entityId;
+  }
+}
+
+/** Why an interaction was refused even though the request itself was valid. */
+export type InteractionRejectionReason = 'out-of-range' | 'not-interactable';
+
+/**
+ * Thrown when an interaction request is well-formed and names a real entity but
+ * is illegal against the CURRENT world state: the target is out of reach or is
+ * not interactable for its kind.
+ *
+ * Transport maps this to `CONFLICT` (409). That is the whole point of the code:
+ * it distinguishes a refused-but-valid intent from an accepted command that
+ * produced no change (an empty event batch). The discriminated `reason` lets the
+ * client render a precise message.
+ */
+export class InteractionRejectedError extends Error {
+  readonly entityId: EntityId;
+  readonly reason: InteractionRejectionReason;
+
+  constructor(entityId: EntityId, reason: InteractionRejectionReason) {
+    super(`Interaction with ${entityId} rejected: ${reason}`);
+    this.name = 'InteractionRejectedError';
+    this.entityId = entityId;
+    this.reason = reason;
+  }
+}
+
+/**
+ * The actor's current movement mode: exactly one at a time, or `null` (stopped).
+ *
+ * - `direction`: a held, level-triggered direction intent (`actor.moveIntent`).
+ * - `moveTo`: a world-space steering goal (`actor.moveTo`).
+ *
+ * A new movement command REPLACES the mode, so the latest input wins: a WASD
+ * intent interrupts a click-to-move and vice versa. A `{ x: 0, z: 0 }`
+ * direction clears the mode (stop).
+ */
+type MovementMode =
+  | { readonly kind: 'direction'; readonly movement: { readonly x: number; readonly z: number } }
+  | { readonly kind: 'moveTo'; readonly target: Vec3 };
+
+/**
  * Read-only, transport-neutral access to the authoritative continuous world.
  *
  * Identity is supplied as typed input on every operation; there is no implicit
@@ -166,25 +246,30 @@ export interface WorldManager {
   /** Point-in-time authoritative world view for `input.actorId`. Always a fresh object graph. */
   getSnapshot(input: { actorId: ActorId }): WorldSnapshot;
   /**
-   * Store `input.command` as the actor's **current, level-triggered intent**.
+   * Apply `input.command` to the actor's current intent/state.
    *
-   * The actor is taken from `input.actorId`, never from the command. The stored
-   * intent persists across {@link step} ticks until it is replaced; a zero
-   * movement means "stop". Changing an intent is not itself world state, so the
-   * returned batch is intentionally empty. Unknown actors throw
-   * {@link UnknownActorError}.
+   * The actor is taken from `input.actorId`, never from the command. Movement
+   * commands (`actor.moveIntent`, `actor.moveTo`) set the actor's single
+   * movement mode and persist across {@link step} ticks until replaced; a zero
+   * direction means "stop". Changing a movement intent is not itself world
+   * state, so those batches are intentionally empty. `actor.interact` is
+   * resolved immediately: it stops and faces the target and returns one
+   * `transform.changed`, or throws a typed error (`UnknownEntityError`,
+   * `InteractionRejectedError`). Unknown actors throw {@link UnknownActorError}.
    */
   submitIntent(input: { actorId: ActorId; command: GameCommand }): GameEventBatch;
   /**
    * Advance the authoritative simulation by `dtMs` and return the world delta.
    *
    * Pure and deterministic for a given `dtMs`: no timers, no wall clock beyond
-   * the injected `serverTime` stamp. The stored level-triggered intent is applied
-   * for every actor, displacement is resolved against static world-space
-   * colliders (axis-separated, so the actor slides along walls), and the world
-   * `bounds` are part of that same resolution pass: a candidate is projected into
-   * the box *before* it is collision-tested, so clamping can never land the actor
-   * inside a collider. A step that moves nothing emits **no** event.
+   * the injected `serverTime` stamp. The actor's current movement mode is applied
+   * (a direction intent, or straight-line steering toward a moveTo goal),
+   * displacement is resolved against static world-space colliders
+   * (axis-separated, so the actor slides along walls), and the world `bounds` are
+   * part of that same resolution pass: a candidate is projected into the box
+   * *before* it is collision-tested, so clamping can never land the actor inside
+   * a collider. A moveTo goal is consumed on arrival or when a tick produces no
+   * movement at all. A step that moves nothing emits **no** event.
    */
   step(dtMs: number): GameEventBatch;
 }
@@ -257,6 +342,16 @@ function copyQuat(value: Quat): Quat {
 
 function copyTransform(value: Transform): Transform {
   return { position: copyVec3(value.position), rotation: copyQuat(value.rotation) };
+}
+
+/**
+ * Ground-plane (XZ) distance between two world positions; `y` is ignored.
+ *
+ * Interaction reach is measured on the ground plane, so a target at the same
+ * XZ but a very different height is still in range.
+ */
+export function distanceXZ(a: Vec3, b: Vec3): number {
+  return Math.hypot(a.x - b.x, a.z - b.z);
 }
 
 function copyEntity(entity: EntityState): EntityState {
@@ -474,8 +569,34 @@ export function createWorldManager(deps: CreateWorldManagerDeps = {}): WorldMana
     rotation: copyQuat(QUAT_IDENTITY),
   };
 
-  // Level-triggered movement intent: persists across ticks until replaced.
-  let intent: { x: number; z: number } = { x: 0, z: 0 };
+  // The actor has exactly ONE movement mode at a time: a held direction or a
+  // steering goal. A new movement command REPLACES it (the latest input wins),
+  // so WASD interrupts a click-to-move and vice versa; `null` means stopped.
+  let movementMode: MovementMode | null = null;
+
+  /** Find an entity by id, including the controlled actor's own entity. */
+  const findEntity = (id: EntityId): EntityState | undefined => {
+    if (id === entityId) {
+      return {
+        entityId,
+        actorId,
+        kind: 'character',
+        transform: copyTransform(transform),
+        visible: true,
+      };
+    }
+    return props.find((prop) => prop.entityId === id);
+  };
+
+  /** The one event a moved/rotated actor emits, built from current authority. */
+  const transformChangedEvent = (): GameEvent => ({
+    type: 'transform.changed',
+    entityId,
+    transform: {
+      position: copyVec3(transform.position),
+      rotation: copyQuat(transform.rotation),
+    },
+  });
 
   const wouldCollide = (x: number, z: number): boolean =>
     staticColliders.some((box) => circleIntersectsAabb(x, z, actorRadius, box));
@@ -524,6 +645,37 @@ export function createWorldManager(deps: CreateWorldManagerDeps = {}): WorldMana
     ...props.map(copyEntity),
   ];
 
+  /**
+   * Authoritative interaction: validate the target, then stop and face it.
+   *
+   * Placeholder effect: today the whole observable result is the heading change
+   * plus halting movement, carried by `transform.changed`. Real interactions
+   * (harvesting, dialogue, containers) build on this accepted path. A refusal is
+   * a typed error, never a negative event.
+   */
+  const performInteract = (targetEntityId: EntityId, serverTime: string): GameEventBatch => {
+    const target = findEntity(targetEntityId);
+    if (target === undefined) {
+      throw new UnknownEntityError(targetEntityId);
+    }
+    if (!INTERACTABLE_BY_ENTITY_KIND[target.kind]) {
+      throw new InteractionRejectedError(targetEntityId, 'not-interactable');
+    }
+    // Range is measured on the ground plane (XZ): height is ignored.
+    if (distanceXZ(transform.position, target.transform.position) > INTERACTION_RANGE) {
+      throw new InteractionRejectedError(targetEntityId, 'out-of-range');
+    }
+
+    // Accepted: stop and turn to face the target, using the SAME heading
+    // convention as movement (`yaw = atan2(dx, dz)`).
+    movementMode = null;
+    const deltaX = target.transform.position.x - transform.position.x;
+    const deltaZ = target.transform.position.z - transform.position.z;
+    transform.rotation = quatFromYaw(Math.atan2(deltaX, deltaZ));
+
+    return { events: [transformChangedEvent()], serverTime };
+  };
+
   return {
     getSnapshot(input: { actorId: ActorId }): WorldSnapshot {
       if (input.actorId !== actorId) {
@@ -560,11 +712,25 @@ export function createWorldManager(deps: CreateWorldManagerDeps = {}): WorldMana
             y: 0,
             z: input.command.movement.z,
           });
-          intent = { x: movement.x, z: movement.z };
+          // Replaces any pending mode; `{ x: 0, z: 0 }` means stop.
+          movementMode =
+            movement.x === 0 && movement.z === 0
+              ? null
+              : { kind: 'direction', movement: { x: movement.x, z: movement.z } };
           return { events: [], serverTime };
         }
+        case 'actor.moveTo': {
+          // A steering goal REPLACES the current movement mode (a click
+          // interrupts WASD and vice versa). The target is copied so the caller
+          // cannot mutate authority through the command object.
+          movementMode = { kind: 'moveTo', target: copyVec3(input.command.target) };
+          return { events: [], serverTime };
+        }
+        case 'actor.interact': {
+          return performInteract(input.command.targetEntityId, serverTime);
+        }
         default: {
-          const exhaustive: never = input.command.type;
+          const exhaustive: never = input.command;
           throw new Error(`Unhandled game command: ${String(exhaustive)}`);
         }
       }
@@ -572,19 +738,48 @@ export function createWorldManager(deps: CreateWorldManagerDeps = {}): WorldMana
 
     step(dtMs: number): GameEventBatch {
       const serverTime = clock().toISOString();
+      const mode = movementMode;
 
-      // `step(0)` (and any non-positive delta) is a strict no-op; a zero intent
-      // also moves nothing and emits nothing.
-      if (!(dtMs > 0) || (intent.x === 0 && intent.z === 0)) {
+      // `step(0)` (and any non-positive delta) is a strict no-op; no movement
+      // mode at all also moves nothing and emits nothing.
+      if (!(dtMs > 0) || mode === null) {
         return { events: [], serverTime };
       }
 
       const dtSeconds = dtMs / 1000;
-      const displacementX = intent.x * actorSpeed * dtSeconds;
-      const displacementZ = intent.z * actorSpeed * dtSeconds;
+      const stepDistance = actorSpeed * dtSeconds;
 
       const startX = transform.position.x;
       const startZ = transform.position.z;
+
+      // Desired horizontal displacement for this tick.
+      let displacementX: number;
+      let displacementZ: number;
+      // `arrived` is only set by the moveTo snap branch (the arrival rule).
+      let arrived = false;
+
+      if (mode.kind === 'direction') {
+        // Exactly the phase-7 behaviour: magnitude scales speed; level-triggered.
+        displacementX = mode.movement.x * stepDistance;
+        displacementZ = mode.movement.z * stepDistance;
+      } else {
+        const deltaX = mode.target.x - startX;
+        const deltaZ = mode.target.z - startZ;
+        const distance = Math.hypot(deltaX, deltaZ);
+        if (distance <= stepDistance) {
+          // Arrival radius: `|target - position| <= speed * dt`. Move EXACTLY
+          // onto the target (snap) so arrival is exact and the actor does not
+          // oscillate around the goal.
+          displacementX = deltaX;
+          displacementZ = deltaZ;
+          arrived = true;
+        } else {
+          // Straight-line steering: no pathfinding, so the actor walks toward
+          // the goal and stops against an obstacle rather than routing around it.
+          displacementX = (deltaX / distance) * stepDistance;
+          displacementZ = (deltaZ / distance) * stepDistance;
+        }
+      }
 
       // Base position: the current one, projected into the world box when that
       // projection is itself legal. The actor is always at a legal position, so a
@@ -622,7 +817,13 @@ export function createWorldManager(deps: CreateWorldManagerDeps = {}): WorldMana
       const deltaX = nextX - startX;
       const deltaZ = nextZ - startZ;
       if (deltaX === 0 && deltaZ === 0) {
-        // Fully blocked (or clamped): no state change, no event, no error.
+        // Fully blocked (or clamped): no state change, no event, no error. A
+        // moveTo goal that cannot progress is abandoned rather than staying
+        // pending forever; a direction intent persists because the input may
+        // still be held.
+        if (mode.kind === 'moveTo') {
+          movementMode = null;
+        }
         return { events: [], serverTime };
       }
 
@@ -634,19 +835,12 @@ export function createWorldManager(deps: CreateWorldManagerDeps = {}): WorldMana
       transform.position = { x: nextX, y: groundY, z: nextZ };
       transform.rotation = quatFromYaw(yaw);
 
-      return {
-        events: [
-          {
-            type: 'transform.changed',
-            entityId,
-            transform: {
-              position: copyVec3(transform.position),
-              rotation: copyQuat(transform.rotation),
-            },
-          },
-        ],
-        serverTime,
-      };
+      // Arrived exactly on a moveTo goal: consume the mode.
+      if (arrived) {
+        movementMode = null;
+      }
+
+      return { events: [transformChangedEvent()], serverTime };
     },
   };
 }
