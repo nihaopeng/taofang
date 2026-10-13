@@ -11,20 +11,24 @@ import {
   isGetGameInfoResponse,
   isHealthStatus,
   parseActorId,
+  parseColliderId,
   parseEntityId,
   parseGameEventBatch,
   parseGetGameInfoResponse,
   parseGetWorldResponse,
+  parseSurfaceId,
   parseWorldId,
   parseWorldStreamMessage,
 } from '@starvalley/protocol';
 import type {
   ActorId,
+  ColliderState,
   GameEventBatch,
   GameInfo,
   HealthStatus,
   ProtocolError,
   ProtocolErrorCode,
+  SurfaceState,
   TileState,
   WorldSnapshot,
   WorldStreamMessage,
@@ -54,7 +58,7 @@ function interactionRejection(reason: string): InteractionRejectedError {
 const GAME_INFO: GameInfo = {
   gameName: 'Test Valley',
   serverVersion: '1.2.3',
-  protocolVersion: 6,
+  protocolVersion: 8,
   serverTime: FIXED_TIME,
 };
 
@@ -83,12 +87,47 @@ function grassTiles(width: number, depth: number): TileState[] {
   return tiles;
 }
 
-/** A valid phase-7 WorldSnapshot: continuous bounds + separate interaction grid. */
+/**
+ * A valid phase-14 (protocol v8) WorldSnapshot: continuous world geometry
+ * (`bounds`/`surfaces`/`colliders`), the separate gameplay grid
+ * (`grid`/`tiles`), and dynamic `entities`. The Router relays this verbatim.
+ */
+const SURFACES: SurfaceState[] = [
+  {
+    surfaceId: parseSurfaceId('surface-ground'),
+    kind: 'ground',
+    center: { x: 1.5, y: 0, z: 1.5 },
+    axisU: { x: 1.5, y: 0, z: 0 },
+    axisV: { x: 0, y: 0, z: -1.5 },
+    walkable: true,
+  },
+  {
+    // A real but non-walkable patch: proves the explicit `walkable: false`
+    // traversal metadata survives transport untouched.
+    surfaceId: parseSurfaceId('surface-roof'),
+    kind: 'ramp',
+    center: { x: 1.5, y: 0.5, z: 1.5 },
+    axisU: { x: 1.5, y: 0.75, z: 0 },
+    axisV: { x: 0, y: 0, z: -1.5 },
+    walkable: false,
+  },
+];
+
+const COLLIDERS: ColliderState[] = [
+  {
+    colliderId: parseColliderId('collider-wall'),
+    kind: 'wall',
+    shape: { kind: 'aabb', min: { x: 0, y: 0, z: 0 }, max: { x: 1, y: 1, z: 1 } },
+  },
+];
+
 const SNAPSHOT: WorldSnapshot = {
   worldId: TEST_WORLD_ID,
   bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 3, y: 1, z: 3 } },
   grid: { origin: { x: 0, y: 0, z: 0 }, width: 3, depth: 3, cellSize: 1 },
   tiles: grassTiles(3, 3),
+  surfaces: SURFACES,
+  colliders: COLLIDERS,
   entities: [
     {
       entityId: ENTITY_ID,
@@ -449,16 +488,22 @@ describe('createRequestListener', () => {
 
     expect(Object.keys(world).sort()).toEqual([
       'bounds',
+      'colliders',
       'controlledActorId',
       'entities',
       'grid',
       'serverTime',
+      'surfaces',
       'tiles',
       'worldId',
     ]);
     expect(world.worldId).toBe(TEST_WORLD_ID);
     expect(world.grid).toEqual({ origin: { x: 0, y: 0, z: 0 }, width: 3, depth: 3, cellSize: 1 });
     expect(world.tiles).toHaveLength(9);
+    // World geometry passes through verbatim: the Router neither adds, drops,
+    // nor reinterprets `surfaces`/`colliders` (including `walkable: false`).
+    expect(world.surfaces).toEqual(SURFACES);
+    expect(world.colliders).toEqual(COLLIDERS);
     expect(world.serverTime).toBe(FIXED_TIME);
     expect(world.controlledActorId).toBe(ACTOR_ID);
 
@@ -833,6 +878,9 @@ describe('createRequestListener', () => {
     }
     expect(first.snapshot.worldId).toBe(TEST_WORLD_ID);
     expect(first.snapshot.controlledActorId).toBe(ACTOR_ID);
+    // The leading stream frame is the same verbatim snapshot as `GET /api/world`.
+    expect(first.snapshot.surfaces).toEqual(SURFACES);
+    expect(first.snapshot.colliders).toEqual(COLLIDERS);
 
     await sse.close();
   });

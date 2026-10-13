@@ -55,6 +55,8 @@ import type { AppearanceId, NodeCreateCommand, NodeId, Vec3 } from '@starvalley/
 
 import { createThreeRuntime, RENDER_CAMERA } from '../src/render/three/runtime.ts';
 import type { RenderInspection, RenderRuntime, RuntimeGridSpec } from '../src/render/three/runtime.ts';
+import { createRenderBridge } from '../src/render/bridge.ts';
+import type { WorldState } from '../src/organizer/index.ts';
 
 // ---------------------------------------------------------------------------
 // Scene definition: a 12x12 terrain grid whose tiles exactly fill the bounds.
@@ -524,6 +526,43 @@ function maxFootprintError(runtime: RenderRuntime): number {
   return error;
 }
 
+/**
+ * Rule 2/3 restricted to the plaster (base-layer) tiles.
+ *
+ * The 3D scene also contains object-layer surface nodes, whose unit prefab is
+ * deliberately scaled to the patch and must NOT be held to the terrain
+ * `footprint == cellSize` / `scale == 1` invariants. Tile nodes are the only
+ * `base`-layer nodes in this harness.
+ */
+function maxTileFootprintError(runtime: RenderRuntime): number {
+  const step = GRID.cellSize;
+  let error = 0;
+  for (const node of runtime.inspect().nodes) {
+    if (node.layer !== 'base') {
+      continue;
+    }
+    error = Math.max(error, Math.abs(node.footprintX - step), Math.abs(node.footprintZ - step));
+  }
+  return error;
+}
+
+/** Rule 4 restricted to the base-layer terrain tiles (surfaces are scaled). */
+function maxTileScaleError(runtime: RenderRuntime): number {
+  let error = 0;
+  for (const node of runtime.inspect().nodes) {
+    if (node.layer !== 'base') {
+      continue;
+    }
+    error = Math.max(
+      error,
+      Math.abs(node.scale.x - 1),
+      Math.abs(node.scale.y - 1),
+      Math.abs(node.scale.z - 1),
+    );
+  }
+  return error;
+}
+
 /** Rule 4: the largest deviation from unit scale over all tiles. */
 function maxScaleError(runtime: RenderRuntime): number {
   let error = 0;
@@ -660,6 +699,16 @@ interface BaselineRow {
   readonly footprintError: number;
   readonly boundaryError: number;
   readonly scaleError: number;
+  /**
+   * Real-3D-geometry scene only: the largest `|ndc|` over every scene point
+   * (ground + raised surfaces + actor), the nearest/farthest view depth, and the
+   * near/far planes that must not clip them. Absent for the terrain-only scene.
+   */
+  readonly sceneMaxNdc?: number;
+  readonly sceneMinDepth?: number;
+  readonly sceneMaxDepth?: number;
+  readonly sceneNear?: number;
+  readonly sceneFar?: number;
 }
 
 /**
@@ -972,6 +1021,292 @@ function assertSummary(label: string, summary: BaselineSummary, ratioTolerance: 
   );
 }
 
+// ---------------------------------------------------------------------------
+// Real 3D geometry scene (phase 14): platform + ramp + actor on the platform
+// ---------------------------------------------------------------------------
+
+/**
+ * The Manager's demo platform, in real 3D world space. A raised flat deck whose
+ * top is at `y = 2`, `3 x 1` in full extent, authored as a rectangle so the
+ * standard render transform is exact.
+ */
+const DEMO_PLATFORM: WorldState['surfaces'][number] = {
+  surfaceId: 'surface-platform',
+  kind: 'platform',
+  center: { x: 3.5, y: 2, z: -4.5 },
+  axisU: { x: 1.5, y: 0, z: 0 },
+  axisV: { x: 0, y: 0, z: -0.5 },
+  walkable: true,
+};
+
+/**
+ * The Manager's demo ramp: the same rectangular shape TILTED, so `axisV` gains a
+ * real `y` component. `|axisV| = 2` and the rise is `2 * axisV.y = 2`, giving the
+ * documented 30-degree inclination (`atan(2 / 3.464...)`).
+ */
+const DEMO_RAMP: WorldState['surfaces'][number] = {
+  surfaceId: 'surface-ramp',
+  kind: 'ramp',
+  center: { x: 3.5, y: 1, z: -2.267949192431123 },
+  axisU: { x: 1.5, y: 0, z: 0 },
+  axisV: { x: 0, y: 1, z: -1.7320508075688772 },
+  walkable: true,
+};
+
+/** The controlled actor standing ON the platform (`position.y = 2` is real state). */
+const DEMO_ACTOR: WorldState['entities'][number] = {
+  entityId: 'entity-actor',
+  actorId: 'actor-1',
+  kind: 'character',
+  position: { x: 3.5, y: 2, z: -4.5 },
+  rotation: { x: 0, y: 0, z: 0, w: 1 },
+  visible: true,
+};
+
+/**
+ * A realistic v8 world: a full grid of `tiles` (gameplay metadata), the matching
+ * one-ground-surface-per-cell geometry (which the bridge must NOT render -- tiles
+ * already do), the raised platform + ramp, and the actor on the platform.
+ */
+function buildWorldState3d(): WorldState {
+  const tiles: WorldState['tiles'][number][] = [];
+  const groundSurfaces: WorldState['surfaces'][number][] = [];
+  for (let cellZ = 0; cellZ < GRID.depth; cellZ += 1) {
+    for (let cellX = 0; cellX < GRID.width; cellX += 1) {
+      const position = cellCentre(cellX, cellZ);
+      tiles.push({
+        cellX,
+        cellZ,
+        position,
+        terrain: (cellX + cellZ) % 3 === 0 ? 'path' : 'grass',
+      });
+      groundSurfaces.push({
+        surfaceId: `surface-ground-${cellX}-${cellZ}`,
+        kind: 'ground',
+        center: { ...position },
+        axisU: { x: GRID.cellSize / 2, y: 0, z: 0 },
+        axisV: { x: 0, y: 0, z: -GRID.cellSize / 2 },
+        walkable: true,
+      });
+    }
+  }
+  return {
+    status: 'ready',
+    streamStatus: 'live',
+    worldId: 'world-3d',
+    bounds: BOUNDS,
+    grid: GRID,
+    tiles,
+    surfaces: [...groundSurfaces, DEMO_PLATFORM, DEMO_RAMP],
+    colliders: [],
+    entities: [DEMO_ACTOR],
+    controlledActorId: 'actor-1',
+    error: null,
+    notice: null,
+  };
+}
+
+/** The four real corners of a planar patch: `center ± axisU ± axisV`. */
+function patchCorners3d(surface: WorldState['surfaces'][number]): Vec3[] {
+  const corners: Vec3[] = [];
+  for (const su of [-1, 1]) {
+    for (const sv of [-1, 1]) {
+      corners.push({
+        x: surface.center.x + su * surface.axisU.x + sv * surface.axisV.x,
+        y: surface.center.y + su * surface.axisU.y + sv * surface.axisV.y,
+        z: surface.center.z + su * surface.axisU.z + sv * surface.axisV.z,
+      });
+    }
+  }
+  return corners;
+}
+
+/**
+ * Every point the camera must keep in frame / inside the near-far range: the
+ * world's ground corners, every tile centre, the raised platform + ramp patch
+ * corners, and the actor from its feet to a conservative `1.7`-unit body top.
+ *
+ * This is deliberately the FULL, conservative set: the flat-plane assumption
+ * being re-verified is that a `y = 0`-based footprint/far derivation also covers
+ * the real raised geometry.
+ */
+function buildScene3dPoints(): Vec3[] {
+  const points: Vec3[] = [...worldGroundCorners()];
+  for (let cellZ = 0; cellZ < GRID.depth; cellZ += 1) {
+    for (let cellX = 0; cellX < GRID.width; cellX += 1) {
+      points.push(cellCentre(cellX, cellZ));
+    }
+  }
+  points.push(...patchCorners3d(DEMO_PLATFORM), ...patchCorners3d(DEMO_RAMP));
+  points.push({ ...DEMO_ACTOR.position });
+  points.push({
+    x: DEMO_ACTOR.position.x,
+    y: DEMO_ACTOR.position.y + 1.7,
+    z: DEMO_ACTOR.position.z,
+  });
+  return points;
+}
+
+/**
+ * Sweep yaw with the REAL 3D geometry present and assert the camera derivation
+ * still holds. The near/far/framing assertions here are the new part: the
+ * terrain-only sweep uses `y = 0` analytic ground, this one uses the actual
+ * raised platform/ramp/actor points the world snapshot carries.
+ */
+function sweepScene3d(pitchDegrees: number): BaselineRow[] {
+  const runtime = createThreeRuntime({ bounds: BOUNDS, grid: GRID });
+  const bridge = createRenderBridge();
+  runtime.apply(bridge.frameFor(buildWorldState3d()));
+  runtime.setCameraPitch(pitchDegrees);
+
+  // Preconditions: the raised geometry is really present, the ground surfaces
+  // produced NO node (no double-draw), and the actor is on the platform at y=2.
+  const startNodes = runtime.inspect().nodes;
+  expect(startNodes.some((node) => node.appearance === 'appearance.surface.platform')).toBe(true);
+  expect(startNodes.some((node) => node.appearance === 'appearance.surface.ramp')).toBe(true);
+  expect(
+    startNodes.some((node) => String(node.nodeId).startsWith('surface:surface-ground')),
+  ).toBe(false);
+  expect(startNodes.filter((node) => node.layer === 'base')).toHaveLength(GRID.width * GRID.depth);
+  const actor = startNodes.find((node) => String(node.nodeId).startsWith('entity:'));
+  expect(actor).toBeDefined();
+  expect(actor?.world.y).toBeCloseTo(2, 9);
+
+  const scenePoints = buildScene3dPoints();
+  const rows: BaselineRow[] = [];
+  try {
+    for (let yaw = 0; yaw < 360; yaw += YAW_STEP_DEGREES) {
+      runtime.setCameraOrientation({ yawDegrees: yaw });
+      const inspection = runtime.inspect();
+      const camera = inspection.camera as CameraSnapshot;
+      const view = cameraView(camera);
+      expect(camera.pitchDegrees).toBe(pitchDegrees);
+
+      // Calibrate the reconstructed projection against the runtime's own
+      // `pick()`. A ray that lands on a raised surface node (or misses) is
+      // skipped; at least one ground hit must remain, or the projection is
+      // unverified and the whole measurement is untrustworthy.
+      let groundCalibrations = 0;
+      let maxGroundError = 0;
+      let maxRoundTripError = 0;
+      for (const ndc of CALIBRATION_NDC) {
+        const picked = runtime.pick(ndc.x, ndc.y);
+        if (picked === null || picked.kind !== 'ground') {
+          continue;
+        }
+        const reconstructed = ndcToGround(ndc, view, GRID.origin.y);
+        expect(reconstructed).not.toBeNull();
+        if (reconstructed === null) {
+          continue;
+        }
+        maxGroundError = Math.max(maxGroundError, distance(reconstructed, picked.point));
+        const roundTrip = projectToNdc(picked.point, view);
+        maxRoundTripError = Math.max(
+          maxRoundTripError,
+          Math.hypot(roundTrip.x - ndc.x, roundTrip.y - ndc.y),
+        );
+        groundCalibrations += 1;
+      }
+      expect(groundCalibrations).toBeGreaterThan(0);
+      expect(maxGroundError).toBeLessThanOrEqual(CALIBRATION_WORLD_TOLERANCE);
+      expect(maxRoundTripError).toBeLessThanOrEqual(CALIBRATION_NDC_TOLERANCE);
+
+      // near/far/framing over the REAL scene points. The flat-plane assumption
+      // predicts every raised point is in front, inside the frame, and between
+      // near and far; any counterexample fails here with its measurement.
+      let sceneMaxNdc = 0;
+      let sceneMinDepth = Number.POSITIVE_INFINITY;
+      let sceneMaxDepth = 0;
+      for (const point of scenePoints) {
+        const depth = viewDepth(point, view);
+        expect(depth).toBeGreaterThan(0);
+        sceneMinDepth = Math.min(sceneMinDepth, depth);
+        sceneMaxDepth = Math.max(sceneMaxDepth, depth);
+        const ndc = projectToNdc(point, view);
+        sceneMaxNdc = Math.max(sceneMaxNdc, Math.abs(ndc.x), Math.abs(ndc.y));
+      }
+      const near = camera.near ?? 0;
+      const far = camera.far ?? Number.POSITIVE_INFINITY;
+      expect(sceneMaxNdc).toBeLessThanOrEqual(1 + GEOMETRY_TOLERANCE);
+      expect(sceneMinDepth).toBeGreaterThanOrEqual(near);
+      expect(sceneMaxDepth).toBeLessThanOrEqual(far);
+
+      // Same smoke checks the terrain scene asserts: near edge stably longer.
+      const nearFar = nearAndFarEdges(view);
+      expect(nearFar.ratio).toBeGreaterThanOrEqual(PERSPECTIVE_MIN_NEAR_FAR_RATIO);
+
+      const focusOffset = sub(camera.position, camera.focus);
+      const dist = Math.hypot(focusOffset.x, focusOffset.y, focusOffset.z);
+      const height = focusOffset.y;
+      const focusSegmentNdc = fixedFocusSegmentNdc(view);
+      const utilisation = frameUtilisation(view);
+      expect(utilisation).toBeLessThanOrEqual(1 + GEOMETRY_TOLERANCE);
+
+      // Every visible viewport ground hit must stay strictly inside the single
+      // backdrop (the floor edge is never visible).
+      let backdropMargin = 0;
+      const backdrop = inspection.backdrop;
+      expect(backdrop).not.toBeNull();
+      if (backdrop !== null && backdrop.sizeX > 0 && backdrop.sizeZ > 0) {
+        for (const ndcX of [-1, 1]) {
+          for (const ndcY of [-1, 1]) {
+            const ground = ndcToGround({ x: ndcX, y: ndcY }, view, GRID.origin.y);
+            expect(ground).not.toBeNull();
+            if (ground === null) {
+              continue;
+            }
+            backdropMargin = Math.max(
+              backdropMargin,
+              Math.abs(ground.x - backdrop.center.x) / (backdrop.sizeX / 2),
+              Math.abs(ground.z - backdrop.center.z) / (backdrop.sizeZ / 2),
+            );
+          }
+        }
+      }
+      expect(backdropMargin).toBeLessThan(1);
+
+      // The base tile invariants stay exact even with surfaces in the scene.
+      const boundaryError = maxBoundaryError(runtime);
+      const footprintError = maxTileFootprintError(runtime);
+      const scaleError = maxTileScaleError(runtime);
+      expect(boundaryError).toBeLessThanOrEqual(GEOMETRY_TOLERANCE);
+      expect(footprintError).toBeLessThanOrEqual(GEOMETRY_TOLERANCE);
+      expect(scaleError).toBe(0);
+
+      rows.push({
+        yaw,
+        kind: view.kind,
+        axis: nearFar.axis,
+        ratio: nearFar.ratio,
+        nearLength: nearFar.near.length,
+        farLength: nearFar.far.length,
+        distance: dist,
+        height,
+        fovDegrees: camera.fovDegrees ?? 0,
+        near,
+        far,
+        focusSegmentNdc,
+        frameUtilisation: utilisation,
+        backdropMargin,
+        yawClass: yawClass(yaw),
+        groundError: maxGroundError,
+        roundTripError: maxRoundTripError,
+        footprintError,
+        boundaryError,
+        scaleError,
+        sceneMaxNdc,
+        sceneMinDepth,
+        sceneMaxDepth,
+        sceneNear: near,
+        sceneFar: far,
+      });
+    }
+  } finally {
+    runtime.dispose();
+  }
+  return rows;
+}
+
 describe('Phase-11 minimal terrain regression scene', () => {
   /**
    * Selected pitches, in degrees: both clamp ends and the default. Phase 13
@@ -1034,5 +1369,31 @@ describe('Phase-11 minimal terrain regression scene', () => {
     const appearances = new Set(buildTerrainFrame(mixedTerrain).map((command) => command.appearance));
     expect(appearances).toEqual(new Set([GRASS, PATH, WATER]));
     expect(appearances.has(BLOCKED)).toBe(false);
+  });
+
+  it('holds the same camera derivation with the real 3D geometry present (platform + ramp + actor on the platform)', () => {
+    for (const pitchDegrees of SELECTED_PITCHES) {
+      const rows = sweepScene3d(pitchDegrees);
+      const summary = summarize(rows);
+      const label = `real 3D geometry @ pitch ${pitchDegrees}`;
+      const maxSceneNdc = maxOver(rows, (row) => row.sceneMaxNdc ?? 0);
+      const minSceneDepth = Math.min(...rows.map((row) => row.sceneMinDepth ?? Number.NaN));
+      const maxSceneDepth = maxOver(rows, (row) => row.sceneMaxDepth ?? 0);
+      const minSceneNear = Math.min(...rows.map((row) => row.sceneNear ?? Number.NaN));
+      const minSceneFar = Math.min(...rows.map((row) => row.sceneFar ?? Number.NaN));
+      console.log(
+        `[terrain-regression] ${label}: scene max|ndc| ${maxSceneNdc.toFixed(6)}` +
+          ` | depth [${minSceneDepth.toFixed(3)}, ${maxSceneDepth.toFixed(3)}]` +
+          ` | near ${minSceneNear.toFixed(3)} | far ${minSceneFar.toFixed(3)}`,
+      );
+      console.log(`[terrain-regression] ${label} baseline\n${formatRows(label, rows)}`);
+      // The raised geometry must not have changed the constant projection, so
+      // every existing structural assertion still holds exactly.
+      assertSummary(label, summary, perspectiveRatioTolerance(pitchDegrees));
+      // And the real geometry stays framed and un-clipped by near/far.
+      expect(maxSceneNdc).toBeLessThanOrEqual(1 + GEOMETRY_TOLERANCE);
+      expect(minSceneDepth).toBeGreaterThanOrEqual(minSceneNear);
+      expect(maxSceneDepth).toBeLessThanOrEqual(minSceneFar);
+    }
   });
 });

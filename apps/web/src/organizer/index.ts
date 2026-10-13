@@ -22,9 +22,13 @@ export { useGameInfo } from './use-game-info';
 
 // World / tile / entity / movement-intent / realtime-stream feature.
 export type {
+  AabbColliderShapeViewModel,
   BoundsViewModel,
+  ColliderShapeViewModel,
+  ColliderViewModel,
   EntityViewModel,
   GridViewModel,
+  SurfaceViewModel,
   TileViewModel,
   Vec3ViewModel,
 } from './world-view-model';

@@ -22,6 +22,12 @@
  * (x,z) centre = (x-4.5, 0, z-4.5)): actor spawns at the centre cell (5,5) -> (0.5,0,0.5);
  * water at cells (3,3)(4,3)(3,4)(4,4) -> the block x in [-2,0], z in [-2,0];
  * tree-1 at cell (6,4) -> (1.5,0,-0.5) with half-extents 0.4; blocked rock at (2,8)(3,8).
+ *
+ * Phase 14 added a real 3D world model: the ground, the demo platform (top y = 2,
+ * z in [-5,-4]) and the 30-degree demo ramp that reaches it are world-space
+ * `surfaces`, and obstacles are `colliders` with genuine y ranges. The phase-14
+ * describe block below drives the actor up that ramp and off the platform edge
+ * through this same real chain.
  */
 
 import { createServer } from 'node:http';
@@ -435,10 +441,12 @@ describe('vertical slice: continuous 3D movement over the realtime stream', () =
     const snapshot = payload['world'] as Record<string, unknown>;
     expect(Object.keys(snapshot).sort()).toEqual([
       'bounds',
+      'colliders',
       'controlledActorId',
       'entities',
       'grid',
       'serverTime',
+      'surfaces',
       'tiles',
       'worldId',
     ]);
@@ -457,6 +465,117 @@ describe('vertical slice: continuous 3D movement over the realtime stream', () =
       });
       expect(legacy.status).toBe(404);
     }
+  });
+});
+
+/**
+ * Drive one authoritative tick and fan it out, WITHOUT waiting for the client
+ * round trip. Used when a test needs the authoritative value on every tick
+ * (continuity of a fall/climb); the client chain is asserted after a `settle`.
+ */
+function stepWithoutSettle(): void { // deliberately NOT `tick(1)`: no settle wait, so the caller can sample every tick
+  const batch = world.step(TICK_MS);
+  lastBatches.push(batch);
+  for (const listener of subscribers) {
+    listener(batch);
+  }
+}
+
+/** The authoritative actor position straight from the Manager (server truth). */
+function authoritativeActorPosition(): { x: number; y: number; z: number } {
+  const snapshot = currentWorld.getSnapshot({ actorId: ACTOR_ID });
+  const entity = snapshot.entities.find((candidate) => candidate.actorId === ACTOR_ID);
+  if (entity === undefined) {
+    throw new Error('expected a controlled actor entity');
+  }
+  return entity.transform.position;
+}
+
+describe('phase 14: real 3D world geometry (surfaces + colliders) over the real chain', () => {
+  it('serves world geometry as data: walkable surfaces, and colliders with REAL y ranges', async () => {
+    useRealServer();
+    await loadWorld();
+
+    const { surfaces, colliders, bounds } = getWorldState();
+    // The flat ground is now authored world-space geometry (the grid is only
+    // gameplay metadata), and the demo level adds a platform and a ramp to it.
+    expect(surfaces.some((surface) => surface.kind === 'ground' && surface.walkable)).toBe(true);
+    expect(surfaces.some((surface) => surface.kind === 'platform')).toBe(true);
+    expect(surfaces.some((surface) => surface.kind === 'ramp')).toBe(true);
+
+    // Requirement 5: no collider is an infinite ground-to-sky column any more.
+    expect(colliders.length).toBeGreaterThan(0);
+    expect(bounds).not.toBeNull();
+    for (const collider of colliders) {
+      expect(collider.shape.kind).toBe('aabb');
+      const { min, max } = collider.shape;
+      expect(max.y).toBeGreaterThan(min.y);
+      const spansTheWholeWorldVertically =
+        min.y <= bounds!.min.y + 1e-9 && max.y >= bounds!.max.y - 1e-9;
+      expect(spansTheWholeWorldVertically).toBe(false);
+    }
+  });
+
+  it('carries the actor up a real ramp: authoritative y rises CONTINUOUSLY to the platform', async () => {
+    useRealServer();
+    await loadWorld();
+
+    // Two legs so the path clears tree-1's AABB (x 1.1..1.9, z -0.9..-0.1).
+    await moveTo({ x: 4.2, y: 0, z: 0.8 });
+    await tick(90);
+    expect(actorPosition().y).toBe(0);
+
+    // The ramp runs from about z = -0.536 (ground) up to z = -4 (platform top, y = 2).
+    await moveTo({ x: 3.5, y: 0, z: -4.6 });
+    const ys: number[] = [];
+    for (let i = 0; i < 150; i += 1) {
+      stepWithoutSettle();
+      ys.push(authoritativeActorPosition().y);
+    }
+    await settle();
+
+    // The client sees the same authoritative height as the server.
+    const climbed = actorPosition();
+    expect(approx(climbed.y, 2, 1e-6)).toBe(true);
+    expect(climbed.z).toBeLessThan(-4);
+
+    // Continuity: no single tick teleports the actor up the ramp. The per-tick rise
+    // is the ramp's rise at the actor's speed (0.15 * tan 30 ~= 0.0866), never a jump.
+    let maxRise = 0;
+    for (let i = 1; i < ys.length; i += 1) {
+      maxRise = Math.max(maxRise, ys[i]! - ys[i - 1]!);
+    }
+    expect(maxRise).toBeGreaterThan(0.01);
+    expect(maxRise).toBeLessThan(0.2);
+  });
+
+  it('drops the actor when it walks off the platform edge (gravity, not a step-down)', async () => {
+    useRealServer();
+    await loadWorld();
+
+    await moveTo({ x: 4.2, y: 0, z: 0.8 });
+    await tick(90);
+    await moveTo({ x: 3.5, y: 0, z: -4.6 });
+    await tick(150);
+    expect(approx(actorPosition().y, 2, 1e-6)).toBe(true);
+
+    // Walk EAST off the platform (there is no ramp on that side): the actor must fall.
+    await moveTo({ x: 7.5, y: 0, z: -4.5 });
+    const ys: number[] = [];
+    for (let i = 0; i < 40; i += 1) {
+      stepWithoutSettle();
+      ys.push(authoritativeActorPosition().y);
+    }
+    await settle();
+
+    expect(actorPosition().y).toBe(0);
+    let maxDrop = 0;
+    for (let i = 1; i < ys.length; i += 1) {
+      maxDrop = Math.max(maxDrop, ys[i - 1]! - ys[i]!);
+    }
+    // Gravity accelerates (0.05, 0.10, 0.15, ...), so a tick drops clearly more than
+    // the constant ~0.087 a 30-degree ramp walk would produce.
+    expect(maxDrop).toBeGreaterThan(0.16);
   });
 });
 

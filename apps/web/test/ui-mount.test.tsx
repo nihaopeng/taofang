@@ -115,6 +115,8 @@ const VALID_WORLD_RESPONSE = {
     bounds: { min: { x: -6, y: 0, z: -6 }, max: { x: 6, y: 8, z: 6 } },
     grid: { origin: { x: -5, y: 0, z: -5 }, width: 10, depth: 10, cellSize: 1 },
     tiles: [{ cell: { x: 0, z: 0 }, terrain: 'grass' }],
+    surfaces: [],
+    colliders: [],
     entities: [],
     controlledActorId: null,
     serverTime: VALID_GAME_INFO.serverTime,

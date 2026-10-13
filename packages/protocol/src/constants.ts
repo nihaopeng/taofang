@@ -3,8 +3,12 @@
  *
  * `PROTOCOL_VERSION` is the client/server compatibility marker carried in
  * `GameInfo`. Bump it only for breaking wire changes.
+ *
+ * Version 8 is the phase-14 break: `WorldSnapshot` gained the world-geometry
+ * layer `surfaces`/`colliders` (real 3D support patches and `y`-ranged
+ * colliders). The old snapshot shape is rejected by the exact-key guards.
  */
-export const PROTOCOL_VERSION = 7;
+export const PROTOCOL_VERSION = 8;
 
 /** Wire path for the game-info endpoint. Transport-neutral: Router maps it. */
 export const GAME_INFO_PATH = '/api/game-info';

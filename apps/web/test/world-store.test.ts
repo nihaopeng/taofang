@@ -117,6 +117,67 @@ const TILE_BLOCKED_VM = {
 };
 const ORDERED_TILES = [TILE_GRASS_VM, TILE_PATH_VM, TILE_BLOCKED_VM];
 
+// World-geometry fixtures (Protocol v8). Wire order is deliberately scrambled so
+// the deterministic mapper must re-sort by `surfaceId` / `colliderId`. `axisU`
+// x `axisV` points up (`crossY = 1`), satisfying the Protocol geometric guard.
+const SURFACE_PLATFORM = {
+  surfaceId: 'surface-platform',
+  kind: 'platform',
+  center: { x: 13, y: 2, z: -3 },
+  axisU: { x: 1, y: 0, z: 0 },
+  axisV: { x: 0, y: 0, z: -1 },
+  walkable: false,
+};
+const SURFACE_GROUND = {
+  surfaceId: 'surface-ground',
+  kind: 'ground',
+  center: { x: 11, y: 0.5, z: -3 },
+  axisU: { x: 1, y: 0, z: 0 },
+  axisV: { x: 0, y: 0, z: -1 },
+  walkable: true,
+};
+
+const COLLIDER_ROCK = {
+  colliderId: 'collider-rock',
+  kind: 'rock',
+  shape: { kind: 'aabb', min: { x: 12, y: 0, z: -4 }, max: { x: 13, y: 2, z: -3 } },
+};
+const COLLIDER_WALL = {
+  colliderId: 'collider-wall',
+  kind: 'wall',
+  shape: { kind: 'aabb', min: { x: 10, y: 0, z: -4 }, max: { x: 10.5, y: 3, z: -3 } },
+};
+
+const SURFACE_GROUND_VM = {
+  surfaceId: 'surface-ground',
+  kind: 'ground',
+  center: { x: 11, y: 0.5, z: -3 },
+  axisU: { x: 1, y: 0, z: 0 },
+  axisV: { x: 0, y: 0, z: -1 },
+  walkable: true,
+};
+const SURFACE_PLATFORM_VM = {
+  surfaceId: 'surface-platform',
+  kind: 'platform',
+  center: { x: 13, y: 2, z: -3 },
+  axisU: { x: 1, y: 0, z: 0 },
+  axisV: { x: 0, y: 0, z: -1 },
+  walkable: false,
+};
+const ORDERED_SURFACES = [SURFACE_GROUND_VM, SURFACE_PLATFORM_VM];
+
+const COLLIDER_ROCK_VM = {
+  colliderId: 'collider-rock',
+  kind: 'rock',
+  shape: { kind: 'aabb', min: { x: 12, y: 0, z: -4 }, max: { x: 13, y: 2, z: -3 } },
+};
+const COLLIDER_WALL_VM = {
+  colliderId: 'collider-wall',
+  kind: 'wall',
+  shape: { kind: 'aabb', min: { x: 10, y: 0, z: -4 }, max: { x: 10.5, y: 3, z: -3 } },
+};
+const ORDERED_COLLIDERS = [COLLIDER_ROCK_VM, COLLIDER_WALL_VM];
+
 const ENTITY_A_VM = {
   entityId: 'entity-a',
   actorId: 'actor-1',
@@ -140,6 +201,8 @@ const SNAPSHOT = {
   bounds: BOUNDS,
   grid: GRID,
   tiles: [TILE_PATH, TILE_BLOCKED, TILE_GRASS],
+  surfaces: [SURFACE_PLATFORM, SURFACE_GROUND],
+  colliders: [COLLIDER_ROCK, COLLIDER_WALL],
   entities: [ENTITY_A, ENTITY_B],
   controlledActorId: 'actor-1',
   serverTime: SERVER_TIME,
@@ -304,6 +367,8 @@ describe('loadWorld snapshot mapping', () => {
     expect(state.bounds).toEqual(BOUNDS);
     expect(state.grid).toEqual(GRID);
     expect(state.tiles).toEqual(ORDERED_TILES);
+    expect(state.surfaces).toEqual(ORDERED_SURFACES);
+    expect(state.colliders).toEqual(ORDERED_COLLIDERS);
     expect(state.entities).toEqual([ENTITY_A_VM, ENTITY_B_VM]);
     expect(state.controlledActorId).toBe('actor-1');
   });
@@ -328,6 +393,65 @@ describe('loadWorld snapshot mapping', () => {
       [1, 0],
       [0, 1],
     ]);
+  });
+
+  it('maps and orders surfaces by surfaceId and colliders by colliderId regardless of wire order', async () => {
+    // The wire order is [platform, ground] / [rock, wall]; the mapped arrays
+    // must be a stable function of the snapshot, not of iteration order.
+    await loadValidWorld();
+
+    const state = getWorldState();
+    expect(state.surfaces.map((surface) => surface.surfaceId)).toEqual([
+      'surface-ground',
+      'surface-platform',
+    ]);
+    expect(state.colliders.map((collider) => collider.colliderId)).toEqual([
+      'collider-rock',
+      'collider-wall',
+    ]);
+  });
+
+  it('passes walkable through as data without deriving any traversal rule', async () => {
+    await loadValidWorld();
+
+    const state = getWorldState();
+    // The explicitly non-walkable patch is present (a real surface) and its flag
+    // is surfaced verbatim: the Organizer neither drops it nor reinterprets it.
+    const platform = state.surfaces.find((surface) => surface.surfaceId === 'surface-platform');
+    expect(platform).toBeDefined();
+    expect(platform?.walkable).toBe(false);
+    expect(platform?.kind).toBe('platform');
+  });
+
+  it('rejects a snapshot whose surface geometry fails the protocol guard (no partial data)', async () => {
+    // A missing `walkable` is a contract violation: traversal metadata is
+    // explicit and must be present on every surface. The protocol guard is
+    // reused, so this is rejected exactly like a malformed tile.
+    const malformedSurface = { ...SURFACE_GROUND, walkable: undefined };
+    setWorldFetch(async () => fakeResponse(snapshotWith({ surfaces: [malformedSurface] })));
+
+    await loadWorld();
+
+    const state = getWorldState();
+    expect(state.status).toBe('error');
+    expect(state.surfaces).toEqual([]);
+    expect(state.colliders).toEqual([]);
+    expect(state.error).toBeTruthy();
+  });
+
+  it('rejects a snapshot whose collider shape has a non-positive extent (no partial data)', async () => {
+    const malformedCollider = {
+      ...COLLIDER_WALL,
+      shape: { kind: 'aabb', min: { x: 10, y: 0, z: -4 }, max: { x: 10.5, y: 0, z: -3 } },
+    };
+    setWorldFetch(async () => fakeResponse(snapshotWith({ colliders: [malformedCollider] })));
+
+    await loadWorld();
+
+    const state = getWorldState();
+    expect(state.status).toBe('error');
+    expect(state.colliders).toEqual([]);
+    expect(state.error).toBeTruthy();
   });
 
   it('maps full 3D entity position and rotation and orders by entityId', async () => {
@@ -362,6 +486,8 @@ describe('loadWorld snapshot mapping', () => {
     expect(state.bounds).toBeNull();
     expect(state.grid).toBeNull();
     expect(state.tiles).toEqual([]);
+    expect(state.surfaces).toEqual([]);
+    expect(state.colliders).toEqual([]);
     expect(state.entities).toEqual([]);
     expect(state.controlledActorId).toBeNull();
     expect(state.error).toBeTruthy();
@@ -554,6 +680,27 @@ describe('realtime stream lifecycle', () => {
       bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 1, y: 1, z: 1 } },
       grid: { origin: { x: 0, y: 0, z: 0 }, width: 1, depth: 1, cellSize: 1 },
       tiles: [{ cell: { x: 0, z: 0 }, terrain: 'water' }],
+      surfaces: [
+        {
+          surfaceId: 'surface-next',
+          kind: 'bridge',
+          center: { x: 0.5, y: 1, z: 0.5 },
+          axisU: { x: 0.5, y: 0, z: 0 },
+          axisV: { x: 0, y: 0, z: -0.5 },
+          walkable: true,
+        },
+      ],
+      colliders: [
+        {
+          colliderId: 'collider-next',
+          kind: 'structure',
+          shape: {
+            kind: 'aabb',
+            min: { x: 0, y: 0, z: 0 },
+            max: { x: 0.5, y: 1, z: 0.5 },
+          },
+        },
+      ],
       entities: [ENTITY_C],
       controlledActorId: null,
       serverTime: SERVER_TIME,
@@ -567,6 +714,9 @@ describe('realtime stream lifecycle', () => {
     expect(state.tiles).toEqual([
       { cellX: 0, cellZ: 0, position: { x: 0.5, y: 0, z: 0.5 }, terrain: 'water' },
     ]);
+    expect(state.surfaces.map((surface) => surface.surfaceId)).toEqual(['surface-next']);
+    expect(state.surfaces[0].walkable).toBe(true);
+    expect(state.colliders.map((collider) => collider.colliderId)).toEqual(['collider-next']);
     expect(state.entities.map((candidate) => candidate.entityId)).toEqual(['entity-c']);
     expect(state.streamStatus).toBe('live');
   });
@@ -581,6 +731,8 @@ describe('realtime stream lifecycle', () => {
     expect(after).not.toBe(before);
     expect(after.entities).not.toBe(before.entities);
     expect(after.tiles).toBe(before.tiles);
+    expect(after.surfaces).toBe(before.surfaces);
+    expect(after.colliders).toBe(before.colliders);
     expect(after.grid).toBe(before.grid);
     expect(after.bounds).toBe(before.bounds);
     expect(entity(after, 'entity-a').position).toEqual({ x: 5, y: 0, z: 6 });
@@ -677,6 +829,8 @@ describe('realtime stream lifecycle', () => {
     expect(state.bounds).toBeNull();
     expect(state.grid).toBeNull();
     expect(state.tiles).toEqual([]);
+    expect(state.surfaces).toEqual([]);
+    expect(state.colliders).toEqual([]);
     expect(state.entities).toEqual([]);
     expect(state.controlledActorId).toBeNull();
     expect(state.error).toBeNull();
@@ -1180,6 +1334,8 @@ describe('world store identity and subscription', () => {
     expect(state.bounds).toBeNull();
     expect(state.grid).toBeNull();
     expect(state.tiles).toEqual([]);
+    expect(state.surfaces).toEqual([]);
+    expect(state.colliders).toEqual([]);
     expect(state.entities).toEqual([]);
     expect(state.controlledActorId).toBeNull();
     expect(state.notice).toBeNull();

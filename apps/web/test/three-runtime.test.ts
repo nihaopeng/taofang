@@ -61,6 +61,8 @@ const appearanceGrass = 'appearance.terrain.grass' as AppearanceId;
 const appearancePath = 'appearance.terrain.path' as AppearanceId;
 const appearanceWater = 'appearance.terrain.water' as AppearanceId;
 const appearanceBlocked = 'appearance.terrain.blocked' as AppearanceId;
+const appearanceSurfacePlatform = 'appearance.surface.platform' as AppearanceId;
+const appearanceSurfaceRamp = 'appearance.surface.ramp' as AppearanceId;
 
 /** Default 12x12 ground, 8 units tall, centred on the world origin. */
 const BOUNDS = { min: { x: -6, y: 0, z: -6 }, max: { x: 6, y: 8, z: 6 } } as const;
@@ -1161,6 +1163,78 @@ describe('three runtime seamless terrain footprint (phase 9)', () => {
   });
 });
 
+describe('three runtime surface prefabs (phase 14)', () => {
+  /** Hardcoded output of the bridge's `surfaceRenderTransform` for the demo platform. */
+  const PLATFORM_TRANSFORM: RenderTransform = {
+    position: { x: 3.5, y: 2, z: -4.5 },
+    rotation: IDENTITY,
+    scale: { x: 3, y: 1, z: 1 },
+  };
+
+  it('realises a platform as a Terrain-group object slab with its top face on the surface plane', () => {
+    const runtime = makeRuntime();
+    runtime.apply([
+      createCommand('surface:surface-platform' as NodeId, 'object', appearanceSurfacePlatform, {
+        x: 3.5,
+        y: 2,
+        z: -4.5,
+      }),
+    ]);
+    // Overwrite the transform with the real bridge-derived one and then read back
+    // what the scene graph actually contains.
+    runtime.apply([
+      { type: 'transform.set', nodeId: 'surface:surface-platform' as NodeId, transform: PLATFORM_TRANSFORM },
+    ]);
+
+    const node = findNode(runtime, 'surface:surface-platform' as NodeId);
+    expect(node.group).toBe('Terrain');
+    expect(node.layer).toBe('object');
+    expect(node.appearance).toBe(appearanceSurfacePlatform);
+    expect(node.world).toEqual({ x: 3.5, y: 2, z: -4.5 });
+    expect(node.scale).toEqual({ x: 3, y: 1, z: 1 });
+    // The prefab is a unit-footprint slab, so its own measured footprint is 1x1;
+    // the bridge's X/Z scale turns that into the patch's 3 x 1 full edges.
+    expect(node.footprintX).toBeCloseTo(1, 6);
+    expect(node.footprintZ).toBeCloseTo(1, 6);
+    // Top face at local y = 0 => the top is exactly the surface plane (y = 2).
+    expect(node.visualTopY).toBeCloseTo(0, 6);
+    // The platform slab is opaque; it neither casts nor receives on the backdrop.
+    expect(node.castsShadow).toBe(true);
+
+    runtime.dispose();
+  });
+
+  it('tilts a ramp by applying the bridge rotation to the same slab prefab', () => {
+    const runtime = makeRuntime();
+    // A rotation from the bridge's `surfaceRenderTransform` for the demo ramp:
+    // local X -> +X, local Y -> up-normal (0, 0.8660, 0.5), local Z -> (0, -0.5, 0.8660).
+    const rampRotation: Quat = { x: 0.25881904510252074, y: 0, z: 0, w: 0.9659258262890683 };
+    runtime.apply([
+      {
+        type: 'node.create',
+        layer: 'object',
+        nodeId: 'surface:surface-ramp' as NodeId,
+        appearance: appearanceSurfaceRamp,
+        transform: {
+          position: { x: 3.5, y: 1, z: -2.267949192431123 },
+          rotation: rampRotation,
+          scale: { x: 3, y: 1, z: 4 },
+        },
+        visible: true,
+      },
+    ]);
+
+    const node = findNode(runtime, 'surface:surface-ramp' as NodeId);
+    expect(node.appearance).toBe(appearanceSurfaceRamp);
+    expect(node.group).toBe('Terrain');
+    expect(node.rotation.x).toBeCloseTo(rampRotation.x, 9);
+    expect(node.rotation.w).toBeCloseTo(rampRotation.w, 9);
+    expect(node.scale).toEqual({ x: 3, y: 1, z: 4 });
+
+    runtime.dispose();
+  });
+});
+
 describe('three runtime grid overlay (phase 9)', () => {
   /** 100 grass tiles, plus the world, so the overlay is provably not per-tile. */
   function hundredTileFrame(): RenderFrame {
@@ -1865,7 +1939,15 @@ describe('three runtime picking', () => {
       createCommand('entity:actor' as NodeId, 'object', appearanceCharacter, { x: 0, y: 0, z: 0 }),
     ]);
 
-    expect(runtime.pick(0, 0)).toEqual({ kind: 'node', nodeId: 'entity:actor' });
+    // `pick` now reports the ray intersection point with the node visual, so the
+    // UI can move onto raised surfaces; the node identity is unchanged.
+    const hit = runtime.pick(0, 0);
+    expect(hit).toMatchObject({ kind: 'node', nodeId: 'entity:actor' });
+    if (hit?.kind === 'node') {
+      expect(Number.isFinite(hit.point.x)).toBe(true);
+      expect(Number.isFinite(hit.point.y)).toBe(true);
+      expect(Number.isFinite(hit.point.z)).toBe(true);
+    }
 
     runtime.dispose();
   });
@@ -1902,7 +1984,15 @@ describe('three runtime picking', () => {
       createCommand('entity:tree' as NodeId, 'object', appearanceTree, { x: 0, y: 0, z: 0 }),
     ]);
 
-    expect(runtime.pick(0, 0)).toEqual({ kind: 'node', nodeId: 'entity:tree' });
+    // `pick` now reports the ray intersection point with the node visual, so the
+    // UI can move onto raised surfaces; the node identity is unchanged.
+    const hit = runtime.pick(0, 0);
+    expect(hit).toMatchObject({ kind: 'node', nodeId: 'entity:tree' });
+    if (hit?.kind === 'node') {
+      expect(Number.isFinite(hit.point.x)).toBe(true);
+      expect(Number.isFinite(hit.point.y)).toBe(true);
+      expect(Number.isFinite(hit.point.z)).toBe(true);
+    }
 
     runtime.dispose();
   });
@@ -1920,6 +2010,40 @@ describe('three runtime picking', () => {
     if (hit?.kind === 'ground') {
       expect(hit.point.x).toBeCloseTo(0, 6);
       expect(hit.point.z).toBeCloseTo(0, 6);
+    }
+
+    runtime.dispose();
+  });
+
+  it('reports the ray intersection point for a picked raised surface node', () => {
+    const runtime = makeRuntime();
+    // A large platform slab raised to y = 0.5 (its top face) over the focus. The
+    // pick must hand back the opaque surface node id AND the world point where
+    // the ray met it, so the UI can emit a moveTo onto the raised geometry.
+    runtime.apply([
+      createCommand('surface:surface-platform' as NodeId, 'object', appearanceSurfacePlatform, {
+        x: 0,
+        y: 0.5,
+        z: 0,
+      }),
+      {
+        type: 'transform.set',
+        nodeId: 'surface:surface-platform' as NodeId,
+        transform: {
+          position: { x: 0, y: 0.5, z: 0 },
+          rotation: IDENTITY,
+          scale: { x: 20, y: 1, z: 20 },
+        },
+      },
+    ]);
+
+    const hit = runtime.pick(0, 0);
+    expect(hit).toMatchObject({ kind: 'node', nodeId: 'surface:surface-platform' });
+    if (hit?.kind === 'node') {
+      expect(Number.isFinite(hit.point.x)).toBe(true);
+      expect(Number.isFinite(hit.point.z)).toBe(true);
+      // The hit lands on the raised geometry, above the ground plane.
+      expect(hit.point.y).toBeCloseTo(0.5, 6);
     }
 
     runtime.dispose();

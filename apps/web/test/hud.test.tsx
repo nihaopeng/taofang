@@ -57,6 +57,8 @@ const VALID_SNAPSHOT = {
   bounds: BOUNDS,
   grid: GRID,
   tiles: [{ cell: { x: 0, z: 0 }, terrain: 'grass' }],
+  surfaces: [],
+  colliders: [],
   entities: [
     {
       entityId: 'entity-a',

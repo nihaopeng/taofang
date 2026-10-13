@@ -170,6 +170,23 @@ const VALID_SNAPSHOT = {
     { cell: { x: 0, z: 0 }, terrain: 'grass' },
     { cell: { x: 3, z: 4 }, terrain: 'path' },
   ],
+  surfaces: [
+    {
+      surfaceId: 'surface-1',
+      kind: 'ground',
+      center: { x: 0, y: 0, z: 0 },
+      axisU: { x: 1, y: 0, z: 0 },
+      axisV: { x: 0, y: 0, z: -1 },
+      walkable: true,
+    },
+  ],
+  colliders: [
+    {
+      colliderId: 'collider-1',
+      kind: 'wall',
+      shape: { kind: 'aabb', min: { x: 0, y: 0, z: 0 }, max: { x: 1, y: 2, z: 1 } },
+    },
+  ],
   entities: [VALID_ENTITY],
   controlledActorId: 'actor-1',
   serverTime: SERVER_TIME,

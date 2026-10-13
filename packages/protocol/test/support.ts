@@ -1,6 +1,14 @@
-import { ProtocolParseError, parseActorId, parseEntityId, parseWorldId } from '../src/index.ts';
+import {
+  ProtocolParseError,
+  parseActorId,
+  parseColliderId,
+  parseEntityId,
+  parseSurfaceId,
+  parseWorldId,
+} from '../src/index.ts';
 import type {
   CellCoord,
+  ColliderState,
   EntityRemovedEvent,
   EntitySpawnedEvent,
   EntityState,
@@ -10,6 +18,7 @@ import type {
   MoveIntentCommand,
   MoveToCommand,
   Quat,
+  SurfaceState,
   TileState,
   Transform,
   TransformChangedEvent,
@@ -36,7 +45,7 @@ export function captureParseError(fn: () => unknown): ProtocolParseError {
 export const validGameInfo = {
   gameName: 'Starvalley',
   serverVersion: '0.1.0',
-  protocolVersion: 7,
+  protocolVersion: 8,
   serverTime: '2025-01-02T03:04:05.000Z',
 };
 
@@ -52,6 +61,34 @@ export const validCellCoord: CellCoord = { x: 2, z: 3 };
 export const validTileState: TileState = {
   cell: validCellCoord,
   terrain: 'grass',
+};
+
+/**
+ * A flat 1x1 **walkable** ground patch centred at `(2.5, 0, 3.5)`. `axisU`/
+ * `axisV` are half-edge vectors ordered so the plane normal
+ * `cross(axisU, axisV)` points up (`+y`), which the geometric guard requires.
+ */
+export const validSurfaceState: SurfaceState = {
+  surfaceId: parseSurfaceId('surface-1'),
+  kind: 'ground',
+  center: { x: 2.5, y: 0, z: 3.5 },
+  axisU: { x: 0.5, y: 0, z: 0 },
+  axisV: { x: 0, y: 0, z: -0.5 },
+  walkable: true,
+};
+
+/**
+ * A `2x2x2` water slab centred at `(2.5, 1, 3.5)` with a genuine finite `y`
+ * range, expressed through the `'aabb'` `ColliderShape` variant.
+ */
+export const validColliderState: ColliderState = {
+  colliderId: parseColliderId('collider-1'),
+  kind: 'water',
+  shape: {
+    kind: 'aabb',
+    min: { x: 1.5, y: 0, z: 2.5 },
+    max: { x: 3.5, y: 2, z: 4.5 },
+  },
 };
 
 export const validEntityState: EntityState = {
@@ -79,8 +116,26 @@ export const validWorldSnapshot: WorldSnapshot = {
   bounds: validWorldBounds,
   grid: validGridSpec,
   tiles: [validTileState],
+  surfaces: [validSurfaceState],
+  colliders: [validColliderState],
   entities: [validEntityState],
   controlledActorId: parseActorId('actor-1'),
+  serverTime: '2025-01-02T03:04:05.000Z',
+};
+
+/**
+ * The phase-7 snapshot shape: `WorldBounds`/`GridSpec`/position-free
+ * `TileState`, but **no** `surfaces`/`colliders` world-geometry layer. Used to
+ * prove the 7 -> 8 break (real 3D surfaces and `y`-ranged colliders) is enforced
+ * by the exact-key guards.
+ */
+export const phase7WorldSnapshot = {
+  worldId: 'world-1',
+  bounds: validWorldBounds,
+  grid: validGridSpec,
+  tiles: [validTileState],
+  entities: [validEntityState],
+  controlledActorId: 'actor-1',
   serverTime: '2025-01-02T03:04:05.000Z',
 };
 

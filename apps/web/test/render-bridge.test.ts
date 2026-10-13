@@ -17,6 +17,7 @@ import type { NodeId, RenderCommand, RenderFrame } from '@starvalley/render-prot
 
 import type { WorldState } from '../src/organizer/index.ts';
 import {
+  BRIDGE_SURFACES,
   BRIDGE_TERRAINS,
   FALLBACK_APPEARANCE,
   createRenderBridge,
@@ -59,6 +60,8 @@ function makeState(
     bounds: null,
     grid: null,
     tiles: [],
+    surfaces: [],
+    colliders: [],
     entities,
     controlledActorId: null,
     error: null,
@@ -337,6 +340,310 @@ describe('render bridge terrain catalogue', () => {
       const frame = bridge.frameFor(makeState([], { tiles: [makeTile(0, 0, terrain)] }));
       expect(commandOfType(frame, 'node.create').appearance).not.toBe(FALLBACK_APPEARANCE);
     }
+  });
+});
+
+describe('render bridge world geometry (phase 14)', () => {
+  type Surface = WorldState['surfaces'][number];
+  type Collider = WorldState['colliders'][number];
+  type PlainVec3 = { x: number; y: number; z: number };
+
+  function makeSurface(overrides: Partial<Surface> & { surfaceId: string }): Surface {
+    return {
+      kind: 'platform',
+      center: { x: 0, y: 0, z: 0 },
+      axisU: { x: 1, y: 0, z: 0 },
+      axisV: { x: 0, y: 0, z: -1 },
+      walkable: true,
+      ...overrides,
+    };
+  }
+
+  /** The real demo platform geometry the Manager authors (default 10x10 map). */
+  const PLATFORM = makeSurface({
+    surfaceId: 'surface-platform',
+    kind: 'platform',
+    center: { x: 3.5, y: 2, z: -4.5 },
+    axisU: { x: 1.5, y: 0, z: 0 },
+    axisV: { x: 0, y: 0, z: -0.5 },
+  });
+
+  /** The real demo ramp geometry: `axisV` gains a real `y` component (tilted). */
+  const RAMP = makeSurface({
+    surfaceId: 'surface-ramp',
+    kind: 'ramp',
+    center: { x: 3.5, y: 1, z: -2.267949192431123 },
+    axisU: { x: 1.5, y: 0, z: 0 },
+    axisV: { x: 0, y: 1, z: -1.7320508075688772 },
+  });
+
+  const COLLIDER: Collider = {
+    colliderId: 'collider-1',
+    kind: 'wall',
+    shape: { kind: 'aabb', min: { x: 0, y: 0, z: 0 }, max: { x: 1, y: 2, z: 1 } },
+  };
+
+  function surfaceCreates(frame: RenderFrame): Extract<RenderCommand, { type: 'node.create' }>[] {
+    return creates(frame).filter((command) => String(command.nodeId).startsWith('surface:'));
+  }
+
+  function cross(a: PlainVec3, b: PlainVec3): PlainVec3 {
+    return {
+      x: a.y * b.z - a.z * b.y,
+      y: a.z * b.x - a.x * b.z,
+      z: a.x * b.y - a.y * b.x,
+    };
+  }
+
+  /** Apply a quaternion to a vector (the standard `v + 2w(q x v) + 2q x (q x v)`). */
+  function applyQuat(q: { x: number; y: number; z: number; w: number }, v: PlainVec3): PlainVec3 {
+    const qv = { x: q.x, y: q.y, z: q.z };
+    const t = cross(qv, v);
+    const t2 = { x: t.x * 2, y: t.y * 2, z: t.z * 2 };
+    const t3 = cross(qv, t2);
+    return { x: v.x + q.w * t2.x + t3.x, y: v.y + q.w * t2.y + t3.y, z: v.z + q.w * t2.z + t3.z };
+  }
+
+  /**
+   * Map the local top-face corners `(±0.5, 0, ±0.5)` through the emitted
+   * transform. This is exactly what the runtime slab does: scale, rotate,
+   * translate. It is the ground truth for "the top face IS the surface plane".
+   */
+  function topFaceCorners(transform: {
+    position: PlainVec3;
+    rotation: { x: number; y: number; z: number; w: number };
+    scale: PlainVec3;
+  }): PlainVec3[] {
+    const locals: PlainVec3[] = [
+      { x: -0.5, y: 0, z: -0.5 },
+      { x: 0.5, y: 0, z: -0.5 },
+      { x: -0.5, y: 0, z: 0.5 },
+      { x: 0.5, y: 0, z: 0.5 },
+    ];
+    return locals.map((local) => {
+      const scaled = {
+        x: local.x * transform.scale.x,
+        y: local.y * transform.scale.y,
+        z: local.z * transform.scale.z,
+      };
+      const rotated = applyQuat(transform.rotation, scaled);
+      return {
+        x: transform.position.x + rotated.x,
+        y: transform.position.y + rotated.y,
+        z: transform.position.z + rotated.z,
+      };
+    });
+  }
+
+  /** The patch's real four corners: `center ± axisU ± axisV`. */
+  function patchCorners(surface: Surface): PlainVec3[] {
+    const corners: PlainVec3[] = [];
+    for (const su of [-1, 1]) {
+      for (const sv of [-1, 1]) {
+        corners.push({
+          x: surface.center.x + su * surface.axisU.x + sv * surface.axisV.x,
+          y: surface.center.y + su * surface.axisU.y + sv * surface.axisV.y,
+          z: surface.center.z + su * surface.axisU.z + sv * surface.axisV.z,
+        });
+      }
+    }
+    return corners;
+  }
+
+  it('renders NO node for a ground surface, so tiles and ground surfaces never double-draw', () => {
+    const bridge = createRenderBridge();
+    const tiles = [makeTile(0, 0), makeTile(1, 0)];
+    // Ground surfaces cover exactly the same cells as the tiles.
+    const groundSurfaces = [
+      makeSurface({
+        surfaceId: 'surface-ground-0-0',
+        kind: 'ground',
+        center: { x: 0, y: 0, z: 0 },
+      }),
+      makeSurface({
+        surfaceId: 'surface-ground-1-0',
+        kind: 'ground',
+        center: { x: 1, y: 0, z: 0 },
+      }),
+    ];
+
+    const frame = bridge.frameFor(makeState([], { tiles, surfaces: groundSurfaces }));
+    const created = creates(frame);
+
+    // Exactly one visual per cell, and it is the tile (base layer). No ground
+    // surface produced a node, so the same ground cannot be drawn twice.
+    expect(created).toHaveLength(2);
+    expect(created.every((command) => command.layer === 'base')).toBe(true);
+    expect(created.every((command) => String(command.nodeId).startsWith('tile:'))).toBe(true);
+    expect(created.some((command) => String(command.nodeId).startsWith('surface:'))).toBe(false);
+    expect(frame.some((command) => command.type === 'node.destroy')).toBe(false);
+  });
+
+  it('emits nothing at all for ground surfaces alone (no tiles, no geometry)', () => {
+    const bridge = createRenderBridge();
+    const frame = bridge.frameFor(
+      makeState([], { surfaces: [makeSurface({ surfaceId: 'surface-ground-0-0', kind: 'ground' })] }),
+    );
+    expect(frame).toEqual([]);
+  });
+
+  it('renders a flat platform as an object node whose top face is the surface plane', () => {
+    const bridge = createRenderBridge();
+    const frame = bridge.frameFor(makeState([], { surfaces: [PLATFORM] }));
+
+    const [create] = surfaceCreates(frame);
+    expect(create).toBeDefined();
+    expect(create.nodeId).toBe('surface:surface-platform');
+    expect(create.layer).toBe('object');
+    expect(create.appearance).toBe('appearance.surface.platform');
+    expect(create.visible).toBe(true);
+    expect(create.transform.position).toEqual({ x: 3.5, y: 2, z: -4.5 });
+    // Full edges are 2*|axisU| x 2*|axisV|; local Y (thickness) is unscaled.
+    expect(create.transform.scale).toEqual({ x: 3, y: 1, z: 1 });
+    // A flat patch's normal is +Y and its in-plane axes are X/Z, so the emitted
+    // rotation is the identity quaternion.
+    expect(create.transform.rotation).toEqual({ x: 0, y: 0, z: 0, w: 1 });
+
+    const actual = topFaceCorners(create.transform).map((corner) => ({
+      ...corner,
+      x: Number(corner.x.toFixed(9)),
+      y: Number(corner.y.toFixed(9)),
+      z: Number(corner.z.toFixed(9)),
+    }));
+    for (const expected of patchCorners(PLATFORM)) {
+      const match = actual.find(
+        (corner) =>
+          Math.abs(corner.x - expected.x) < 1e-9 &&
+          Math.abs(corner.y - expected.y) < 1e-9 &&
+          Math.abs(corner.z - expected.z) < 1e-9,
+      );
+      expect(match).toBeDefined();
+    }
+  });
+
+  it('renders a tilted ramp with a non-identity rotation whose top face is still the surface plane', () => {
+    const bridge = createRenderBridge();
+    const frame = bridge.frameFor(makeState([], { surfaces: [RAMP] }));
+
+    const [create] = surfaceCreates(frame);
+    expect(create.appearance).toBe('appearance.surface.ramp');
+    // |axisU| = 1.5, |axisV| = hypot(1, 1.732...) = 2, so full edges 3 x 4.
+    expect(create.transform.scale.x).toBeCloseTo(3, 9);
+    expect(create.transform.scale.y).toBe(1);
+    expect(create.transform.scale.z).toBeCloseTo(4, 9);
+    // A tilted patch must NOT be an identity rotation.
+    expect(create.transform.rotation).not.toEqual({ x: 0, y: 0, z: 0, w: 1 });
+
+    const actual = topFaceCorners(create.transform);
+    for (const expected of patchCorners(RAMP)) {
+      const match = actual.find(
+        (corner) =>
+          Math.abs(corner.x - expected.x) < 1e-9 &&
+          Math.abs(corner.y - expected.y) < 1e-9 &&
+          Math.abs(corner.z - expected.z) < 1e-9,
+      );
+      expect(match).toBeDefined();
+    }
+  });
+
+  it('maps every non-ground surface kind to a distinct non-fallback appearance', () => {
+    expect([...BRIDGE_SURFACES].sort()).toEqual(['bridge', 'platform', 'ramp']);
+    const bridge = createRenderBridge();
+    const surfaces = BRIDGE_SURFACES.map((kind, index) =>
+      makeSurface({ surfaceId: `surface-${index}`, kind }),
+    );
+
+    const frame = bridge.frameFor(makeState([], { surfaces }));
+    const appearances = surfaceCreates(frame).map((command) => command.appearance);
+    expect(appearances).toHaveLength(3);
+    expect(new Set(appearances).size).toBe(3);
+    expect(appearances).not.toContain(FALLBACK_APPEARANCE);
+  });
+
+  it('keeps colliders invisible: they emit nothing and changing one is a no-op', () => {
+    const bridge = createRenderBridge();
+
+    expect(bridge.frameFor(makeState([], { colliders: [COLLIDER] }))).toEqual([]);
+    expect(
+      bridge.frameFor(
+        makeState([], {
+          colliders: [{ ...COLLIDER, shape: { kind: 'aabb', min: { x: 0, y: 0, z: 0 }, max: { x: 2, y: 3, z: 2 } } }],
+        }),
+      ),
+    ).toEqual([]);
+  });
+
+  it('is a no-op for a ground surface metadata change but diffs real surface geometry', () => {
+    const bridge = createRenderBridge();
+    bridge.frameFor(makeState([], { surfaces: [PLATFORM] }));
+
+    // A changed platform kind swaps appearance in place (no recreate).
+    const kindFrame = bridge.frameFor(
+      makeState([], { surfaces: [{ ...PLATFORM, kind: 'bridge' }] }),
+    );
+    expect(kindFrame).toEqual([
+      {
+        type: 'appearance.set',
+        nodeId: 'surface:surface-platform',
+        appearance: 'appearance.surface.bridge',
+      },
+    ]);
+
+    // A moved/reshaped surface emits `transform.set` (geometry is static, so the
+    // bridge still diffs it rather than leaving a stale node).
+    const moved = makeSurface({
+      ...PLATFORM,
+      center: { x: 3.5, y: 2.5, z: -4.5 },
+    });
+    const geometryFrame = bridge.frameFor(makeState([], { surfaces: [moved] }));
+    const transform = commandOfType(geometryFrame, 'transform.set');
+    expect(transform.nodeId).toBe('surface:surface-platform');
+    expect(transform.transform.position).toEqual({ x: 3.5, y: 2.5, z: -4.5 });
+  });
+
+  it('destroys a surface node when the surface disappears', () => {
+    const bridge = createRenderBridge();
+    bridge.frameFor(makeState([], { surfaces: [PLATFORM, RAMP] }));
+
+    const frame = bridge.frameFor(makeState([], { surfaces: [PLATFORM] }));
+
+    expect(frame).toEqual([{ type: 'node.destroy', nodeId: 'surface:surface-ramp' }]);
+  });
+
+  it('is a no-op when a ground surface is removed (it never had a node)', () => {
+    const bridge = createRenderBridge();
+    bridge.frameFor(
+      makeState([], { surfaces: [makeSurface({ surfaceId: 'surface-ground-0-0', kind: 'ground' })] }),
+    );
+
+    const frame = bridge.frameFor(makeState([], { surfaces: [] }));
+    expect(frame).toEqual([]);
+  });
+
+  it('re-creates surfaces on a world switch and destroys the previous world leftovers', () => {
+    const bridge = createRenderBridge();
+    bridge.frameFor(makeState([], { worldId: 'world-1', surfaces: [PLATFORM, RAMP] }));
+
+    const frame = bridge.frameFor(
+      makeState([], { worldId: 'world-2', surfaces: [PLATFORM] }),
+    );
+
+    // The new world's platform is re-created (a snap), the old ramp destroyed.
+    expect(surfaceCreates(frame).map((command) => command.nodeId)).toEqual([
+      'surface:surface-platform',
+    ]);
+    expect(frame).toContainEqual({ type: 'node.destroy', nodeId: 'surface:surface-ramp' });
+  });
+
+  it('namespaces surface node ids so a picked surface is never mistaken for an entity', () => {
+    const bridge = createRenderBridge();
+    const frame = bridge.frameFor(makeState([], { surfaces: [PLATFORM] }));
+    expect(surfaceCreates(frame)[0].nodeId).toBe('surface:surface-platform');
+
+    // `pick()` returns the opaque `NodeId`; the bridge's entity mapping must
+    // reject a surface node exactly like a tile node.
+    expect(entityIdOfNodeId('surface:surface-platform' as NodeId)).toBeNull();
+    expect(entityIdOfNodeId('tile:0,0' as NodeId)).toBeNull();
   });
 });
 

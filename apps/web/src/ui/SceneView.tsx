@@ -135,6 +135,11 @@ export function SceneView(props: {
    * Turn a completed click into a world-space gameplay intent. The pick is plain
    * data; the bridge maps a node id to a game entity id, and the Organizer owns
    * the command. No screen/NDC/camera value ever reaches a command.
+   *
+   * An entity node becomes an interact intent. Any other picked node (a raised
+   * surface) becomes a move intent toward the clicked world point, exactly like
+   * a flat-ground click: the UI applies no walkability rule, it only forwards
+   * the point and lets the Manager decide where the actor can actually go.
    */
   function handleClick(event: { clientX: number; clientY: number }): void {
     const canvas = canvasRef.current;
@@ -151,9 +156,11 @@ export function SceneView(props: {
       const entityId = entityIdOfNodeId(hit.nodeId);
       if (entityId !== null) {
         void interact(entityId);
+        return;
       }
-      return;
     }
+    // Ground and non-entity node (surface) hits alike carry a world point; both
+    // express the same move intent.
     void moveTo(hit.point);
   }
 

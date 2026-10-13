@@ -169,7 +169,17 @@ export type ModelLoader = (url: string) => Promise<Object3D>;
  * game identity is the bridge's job, not the runtime's.
  */
 export type RenderPick =
-  | { readonly kind: 'node'; readonly nodeId: NodeId }
+  | {
+      readonly kind: 'node';
+      readonly nodeId: NodeId;
+      /**
+       * World-space point where the ray first met the node visual. The runtime
+       * does not know whether a node is an entity or a surface; the UI uses this
+       * point for a non-entity (surface) click exactly as it uses the ground
+       * point for a flat-ground click.
+       */
+      readonly point: { readonly x: number; readonly y: number; readonly z: number };
+    }
   | {
       readonly kind: 'ground';
       readonly point: { readonly x: number; readonly y: number; readonly z: number };
@@ -471,11 +481,17 @@ export interface RenderRuntime {
    * to plain pick data:
    *
    * 1. a registered `object`-layer node visual under the ray ->
-   *    `{ kind: 'node', nodeId }` (terrain `base` plates are the visible ground
-   *    and are never nodes here);
+   *    `{ kind: 'node', nodeId, point }` (terrain `base` plates are the visible
+   *    ground and are never nodes here);
    * 2. otherwise the mathematical ground plane (`y = bounds.min.y`) ->
    *    `{ kind: 'ground', point }`;
    * 3. otherwise `null`.
+   *
+   * A node hit always reports the ray intersection `point` alongside the opaque
+   * `nodeId`. The runtime cannot tell an entity node from a surface node, so the
+   * caller decides what to do with it: an entity node becomes an interact
+   * intent, any other node (a raised surface) becomes a move intent toward the
+   * clicked point, exactly like the ground.
    *
    * A ground hit outside `bounds` returns `null`: there is no clamping and no
    * gameplay rule here. Node visuals win over the ground even when the ground is
@@ -1137,6 +1153,58 @@ function createBlockedVisual(cellSize: number): Group {
 }
 
 /**
+ * Surface slab thickness, in world units.
+ *
+ * The bridge scales a surface node's local X/Z to the patch's full edge lengths
+ * and leaves local Y at 1, so this is the real rendered thickness. It is thin and
+ * floating so the demo platform reads as a raised deck with visible sides and
+ * clear headroom underneath: the Manager authors NO side colliders, so an actor
+ * walks under the platform at the ground plane and the slab must not look like a
+ * solid block down to the floor.
+ */
+const SURFACE_SLAB_THICKNESS = 0.25;
+
+/**
+ * One non-ground surface visual: a unit-footprint slab whose TOP face is the
+ * node's local `y = 0` plane.
+ *
+ * The bridge's surface transform scales local X/Z to the patch's full edge
+ * lengths and leaves local Y at 1, so the slab's top is exactly the surface plane
+ * and its thickness hangs below it. `platform`/`ramp`/`bridge` share this shape
+ * and differ only by colour; a ramp is the same slab tilted by the transform, so
+ * a future bridge deck needs no new code. This is deliberately the STANDARD 3D
+ * transform path: no new Render ISA primitive, no height/level field.
+ */
+function createSurfaceSlabVisual(colour: number): Group {
+  const group = new Group();
+  const slab = new Mesh(
+    new BoxGeometry(1, SURFACE_SLAB_THICKNESS, 1),
+    material(colour, { roughness: 0.85 }),
+  );
+  // Top face at local y = 0; the slab body extends downward by its thickness.
+  slab.position.y = -SURFACE_SLAB_THICKNESS / 2;
+  slab.castShadow = true;
+  slab.receiveShadow = true;
+  group.add(slab);
+  return group;
+}
+
+/** Raised flat deck (`platform`): the shared floating slab in a wood tone. */
+function createPlatformVisual(): Group {
+  return createSurfaceSlabVisual(0x8a6a3f);
+}
+
+/** Tilted traversal patch (`ramp`): the same slab, tilted by the bridge transform. */
+function createRampVisual(): Group {
+  return createSurfaceSlabVisual(0x9c7b4a);
+}
+
+/** Deck that may sit above another surface (`bridge`): the same slab, no new code. */
+function createBridgeVisual(): Group {
+  return createSurfaceSlabVisual(0xa8895c);
+}
+
+/**
  * Water: a full-cell plate recessed by a small vertical step (a pond bank), plus
  * a full-cell shallow sheen on its surface. The recess and the sheen are both
  * full-footprint, never an inset, so water neighbours share edges exactly. Opaque
@@ -1471,6 +1539,21 @@ const PREFABS: Readonly<Record<string, Prefab>> = {
     group: 'Terrain',
     defaultAnimation: IDLE_ANIMATION,
     createVisual: createWaterVisual,
+  },
+  'appearance.surface.platform': {
+    group: 'Terrain',
+    defaultAnimation: IDLE_ANIMATION,
+    createVisual: createPlatformVisual,
+  },
+  'appearance.surface.ramp': {
+    group: 'Terrain',
+    defaultAnimation: IDLE_ANIMATION,
+    createVisual: createRampVisual,
+  },
+  'appearance.surface.bridge': {
+    group: 'Terrain',
+    defaultAnimation: IDLE_ANIMATION,
+    createVisual: createBridgeVisual,
   },
   'appearance.character': {
     group: 'Actors',
@@ -2455,9 +2538,14 @@ export function createThreeRuntime(options: {
     }
     const nodeHits = raycaster.intersectObjects(roots, true);
     if (nodeHits.length > 0) {
-      const hitNodeId = nodeIdForObject(nodeHits[0].object);
+      const firstHit = nodeHits[0];
+      const hitNodeId = nodeIdForObject(firstHit.object);
       if (hitNodeId !== null) {
-        return { kind: 'node', nodeId: hitNodeId };
+        return {
+          kind: 'node',
+          nodeId: hitNodeId,
+          point: { x: firstHit.point.x, y: firstHit.point.y, z: firstHit.point.z },
+        };
       }
     }
 

@@ -42,9 +42,24 @@
  *
  * Identity: a render `NodeId` is derived from game identity, but the two are
  * deliberately different types. The renderer must not be able to read game
- * identity (it receives only `NodeId`); game identity stops here. Tile and entity
- * ids are **namespaced** (`tile:<cellX>,<cellZ>` / `entity:<entityId>`) so a tile
- * can never collide with an entity whose id happens to look like a coordinate.
+ * identity (it receives only `NodeId`); game identity stops here. Tile, entity
+ * and surface ids are **namespaced** (`tile:<cellX>,<cellZ>` /
+ * `entity:<entityId>` / `surface:<surfaceId>`) so no two collections can collide
+ * even when an id textually looks like another's coordinate.
+ *
+ * Phase 14: real 3D world geometry
+ * --------------------------------
+ * The snapshot's `surfaces` are real planar patches in world space. The bridge
+ * renders the **non-ground** kinds (`platform`/`ramp`/`bridge`) as ordinary
+ * object-layer nodes using the standard 3D `RenderTransform` (position +
+ * rotation + scale) — no new ISA primitive. A `kind: 'ground'` surface is
+ * deliberately NOT rendered: the flat-ground VISUALS come from `tiles`, whose
+ * full-cell plates are the seamless ground by construction, so a ground node
+ * would double-draw the ground and z-fight. See `APPEARANCE_BY_SURFACE`.
+ *
+ * `colliders` are world geometry (movement truth) with no visual yet: colliders
+ * stay invisible, including where one overlaps a rendered surface, and no
+ * collider visual is invented. They are not diffed at all.
  */
 
 import type {
@@ -132,6 +147,37 @@ export const BRIDGE_TERRAINS: readonly string[] = Object.freeze(
   Object.keys(APPEARANCE_BY_TERRAIN),
 );
 
+/** The one surface kind whose visual must come from `tiles`, never a surface node. */
+const GROUND_SURFACE_KIND = 'ground';
+
+/**
+ * Appearance catalogue: surface `kind` -> opaque render `AppearanceId`.
+ *
+ * `'ground'` is deliberately ABSENT. The flat-ground VISUALS are the `tiles`'
+ * full-cell plates (the seamless, no-inset ground); a `ground` surface describes
+ * the same patch as geometry and must therefore NOT produce a render node, or the
+ * same ground would be drawn twice and z-fight. Every other kind
+ * (`platform`/`ramp`/`bridge`) is real geometry that `tiles` does not represent,
+ * so it renders through the standard 3D transform. The runtime owns what each id
+ * looks like; the bridge only chooses the id, exactly like terrain/entity kinds.
+ */
+const APPEARANCE_BY_SURFACE: Readonly<Record<string, AppearanceId>> = {
+  platform: asAppearanceId('appearance.surface.platform'),
+  ramp: asAppearanceId('appearance.surface.ramp'),
+  bridge: asAppearanceId('appearance.surface.bridge'),
+};
+
+/**
+ * Every surface kind the bridge renders with a real (non-fallback) appearance.
+ *
+ * Exported so a cross-module coverage assertion can pin it, mirroring
+ * {@link BRIDGE_TERRAINS}. `'ground'` is intentionally not a key: it has no
+ * node (see {@link APPEARANCE_BY_SURFACE}).
+ */
+export const BRIDGE_SURFACES: readonly string[] = Object.freeze(
+  Object.keys(APPEARANCE_BY_SURFACE),
+);
+
 /**
  * Documented fallback for a value the catalogue does not know (an entity `kind`
  * or a tile `terrain`).
@@ -157,6 +203,7 @@ export const BRIDGE_APPEARANCES: readonly AppearanceId[] = [
   ...new Set([
     ...Object.values(APPEARANCE_BY_KIND),
     ...Object.values(APPEARANCE_BY_TERRAIN),
+    ...Object.values(APPEARANCE_BY_SURFACE),
     FALLBACK_APPEARANCE,
   ]),
 ];
@@ -177,17 +224,29 @@ function entityNodeId(entityId: string): NodeId {
   return `entity:${entityId}` as NodeId;
 }
 
+/**
+ * The render node id of a non-ground surface: `surface:<surfaceId>`. The prefix
+ * keeps a surface node distinct from a tile (`tile:`) and an entity (`entity:`),
+ * so `pick()`'s opaque `NodeId` can never be mistaken for game identity.
+ */
+function surfaceNodeId(surfaceId: string): NodeId {
+  return `surface:${surfaceId}` as NodeId;
+}
+
 /** The namespace prefix that marks a render node id as an entity node. */
 const ENTITY_NODE_PREFIX = 'entity:';
 
 /**
  * Map a render `NodeId` back to the game `entityId` it was derived from, or
- * `null` when the node is not an entity node (e.g. a tile).
+ * `null` when the node is not an entity node.
  *
  * The bridge owns the `entity:<entityId>` convention, so this mapping lives here:
  * the runtime hands back an opaque `NodeId` from `pick()`, and the UI — which may
  * not import the game protocol — turns it into an interact intent through this
  * function.
+ *
+ * A `tile:` or `surface:` node returns `null`, so a picked surface can never be
+ * mistaken for an entity and the UI never emits an interact intent for it.
  */
 export function entityIdOfNodeId(nodeId: NodeId): string | null {
   const raw = String(nodeId);
@@ -217,6 +276,11 @@ function appearanceForTerrain(terrain: string): AppearanceId {
   return APPEARANCE_BY_TERRAIN[terrain] ?? FALLBACK_APPEARANCE;
 }
 
+/** Resolve the catalogue appearance for a surface kind, falling back for unknown values. */
+function appearanceForSurfaceKind(kind: string): AppearanceId {
+  return APPEARANCE_BY_SURFACE[kind] ?? FALLBACK_APPEARANCE;
+}
+
 /**
  * Build a Render ISA transform from a view-model world position/rotation.
  *
@@ -241,6 +305,15 @@ function sameQuat(a: Quat, b: Quat): boolean {
   return a.x === b.x && a.y === b.y && a.z === b.z && a.w === b.w;
 }
 
+/** Structural equality of two Render ISA transforms (surface geometry is static). */
+function sameTransform(a: RenderTransform, b: RenderTransform): boolean {
+  return (
+    sameVec3(a.position, b.position) &&
+    sameQuat(a.rotation, b.rotation) &&
+    sameVec3(a.scale, b.scale)
+  );
+}
+
 /** The render state the bridge believes exists for one entity node. */
 interface KnownEntity {
   appearance: AppearanceId;
@@ -255,6 +328,95 @@ interface KnownTile {
   cellZ: number;
   position: Vec3;
   terrain: string;
+}
+
+/** The render state the bridge believes exists for one (non-ground) surface node. */
+interface KnownSurface {
+  kind: string;
+  transform: RenderTransform;
+}
+
+function vec3Length(v: Vec3): number {
+  return Math.hypot(v.x, v.y, v.z);
+}
+
+function normalizeVec3(v: Vec3): Vec3 {
+  const length = vec3Length(v);
+  return length === 0 ? { x: 0, y: 0, z: 0 } : { x: v.x / length, y: v.y / length, z: v.z / length };
+}
+
+function crossVec3(a: Vec3, b: Vec3): Vec3 {
+  return {
+    x: a.y * b.z - a.z * b.y,
+    y: a.z * b.x - a.x * b.z,
+    z: a.x * b.y - a.y * b.x,
+  };
+}
+
+/**
+ * Build a rotation quaternion from three orthonormal column vectors (the images
+ * of local X, Y, Z). This is the standard rotation-matrix -> quaternion
+ * conversion, inlined here because the bridge is framework-free (no `three`).
+ */
+function quatFromBasis(xAxis: Vec3, yAxis: Vec3, zAxis: Vec3): Quat {
+  // Rotation matrix columns: local X -> xAxis, local Y -> yAxis, local Z -> zAxis.
+  const m00 = xAxis.x;
+  const m10 = xAxis.y;
+  const m20 = xAxis.z;
+  const m01 = yAxis.x;
+  const m11 = yAxis.y;
+  const m21 = yAxis.z;
+  const m02 = zAxis.x;
+  const m12 = zAxis.y;
+  const m22 = zAxis.z;
+  const trace = m00 + m11 + m22;
+  if (trace > 0) {
+    const s = 0.5 / Math.sqrt(trace + 1);
+    return { x: (m21 - m12) * s, y: (m02 - m20) * s, z: (m10 - m01) * s, w: 0.25 / s };
+  }
+  if (m00 > m11 && m00 > m22) {
+    const s = 2 * Math.sqrt(1 + m00 - m11 - m22);
+    return { x: 0.25 * s, y: (m01 + m10) / s, z: (m02 + m20) / s, w: (m21 - m12) / s };
+  }
+  if (m11 > m22) {
+    const s = 2 * Math.sqrt(1 + m11 - m00 - m22);
+    return { x: (m01 + m10) / s, y: 0.25 * s, z: (m12 + m21) / s, w: (m02 - m20) / s };
+  }
+  const s = 2 * Math.sqrt(1 + m22 - m00 - m11);
+  return { x: (m02 + m20) / s, y: (m12 + m21) / s, z: 0.25 * s, w: (m10 - m01) / s };
+}
+
+/**
+ * Derive the standard 3D render transform for one non-ground surface from its
+ * real planar geometry.
+ *
+ * The patch is `{ center + u*axisU + v*axisV : u,v in [-1,1] }`. The runtime's
+ * surface prefab is a unit-footprint slab whose TOP face is its local `y = 0`
+ * plane, so this maps:
+ *
+ * - local `+X` -> `axisU` direction, with local X scaled to the full `2|axisU|`;
+ * - local `+Y` -> the up normal `normalize(axisU x axisV)` (so local `-Y` is the
+ *   slab thickness direction);
+ * - local `+Z` -> the in-plane perpendicular, with local Z scaled to `2|axisV|`;
+ * - position -> `center`.
+ *
+ * That is exact for the rectangles the Manager authors (`axisU` perpendicular to
+ * `axisV`). A general parallelogram would need a shear the standard transform
+ * cannot express, so a non-perpendicular patch renders as the rectangle with the
+ * same centre and half-edge lengths — no new ISA primitive is invented for it.
+ */
+function surfaceRenderTransform(surface: WorldState['surfaces'][number]): RenderTransform {
+  const { center, axisU, axisV } = surface;
+  const u = normalizeVec3(axisU);
+  const normal = normalizeVec3(crossVec3(axisU, axisV));
+  // u and normal are unit and perpendicular, so z is a unit in-plane vector and
+  // (u, normal, z) is a right-handed orthonormal basis.
+  const z = crossVec3(u, normal);
+  return {
+    position: { x: center.x, y: center.y, z: center.z },
+    rotation: quatFromBasis(u, normal, z),
+    scale: { x: 2 * vec3Length(axisU), y: 1, z: 2 * vec3Length(axisV) },
+  };
 }
 
 /**
@@ -280,6 +442,23 @@ function byCell(a: { cellX: number; cellZ: number }, b: { cellX: number; cellZ: 
   return a.cellZ - b.cellZ || a.cellX - b.cellX;
 }
 
+/**
+ * Deterministic surface order: ascending by `surfaceId`. Surfaces are immutable
+ * world geometry, so this is their only ordering rule.
+ */
+function bySurfaceId(
+  a: WorldState['surfaces'][number],
+  b: WorldState['surfaces'][number],
+): number {
+  if (a.surfaceId < b.surfaceId) {
+    return -1;
+  }
+  if (a.surfaceId > b.surfaceId) {
+    return 1;
+  }
+  return 0;
+}
+
 /** Stateful mapper from `WorldState` to ordered render frames. */
 export interface RenderBridge {
   /**
@@ -289,7 +468,7 @@ export interface RenderBridge {
    * new world does not contain is destroyed.
    */
   frameFor(state: WorldState): RenderFrame;
-  /** Forget every known node, so the next call re-emits `node.create` for all tiles and entities. */
+  /** Forget every known node, so the next call re-emits `node.create` for all tiles, surfaces and entities. */
   reset(): void;
 }
 
@@ -320,12 +499,18 @@ export function controlledActorNodeId(state: WorldState): NodeId | null {
  * documented:
  *
  * 1. base-layer creates (`node.create` for new tiles), sorted `cellZ` then `cellX`;
- * 2. object-layer commands (`node.create` for new entities, then per-entity
+ * 2. surface object-layer commands (`node.create` for new non-ground surfaces,
+ *    then `appearance.set` / `transform.set` for changed ones), sorted by
+ *    `surfaceId`. A `kind: 'ground'` surface is skipped entirely (the ground
+ *    visual comes from `tiles`), so it emits nothing here;
+ * 3. object-layer commands (`node.create` for new entities, then per-entity
  *    `transform.setTarget` / `animation.play` / `visibility.set` /
  *    `appearance.set`), sorted by `entityId`;
- * 3. base-layer terrain changes (`appearance.set`), sorted `cellZ` then `cellX`;
- * 4. base-layer destroys (`node.destroy` for removed tiles), sorted `cellZ` then `cellX`;
- * 5. object-layer destroys (`node.destroy` for removed entities), sorted by
+ * 4. base-layer terrain changes (`appearance.set`), sorted `cellZ` then `cellX`;
+ * 5. base-layer destroys (`node.destroy` for removed tiles), sorted `cellZ` then `cellX`;
+ * 6. surface object-layer destroys (`node.destroy` for removed non-ground
+ *    surfaces), sorted by `surfaceId`;
+ * 7. object-layer destroys (`node.destroy` for removed entities), sorted by
  *    `entityId`.
  *
  * Why this shape: all base-layer creation is a contiguous block emitted before
@@ -345,6 +530,7 @@ export function createRenderBridge(options?: { stepDurationMs?: number }): Rende
   const stepDurationMs = options?.stepDurationMs ?? DEFAULT_STEP_DURATION_MS;
   const knownEntities = new Map<string, KnownEntity>();
   const knownTiles = new Map<string, KnownTile>();
+  const knownSurfaces = new Map<string, KnownSurface>();
   // Identity of the world the known-node maps describe. `undefined` means "no
   // frame has been produced yet"; `null` is a real (pre-ready) world id.
   let knownWorldId: string | null | undefined;
@@ -353,6 +539,7 @@ export function createRenderBridge(options?: { stepDurationMs?: number }): Rende
   function forgetAll(): void {
     knownEntities.clear();
     knownTiles.clear();
+    knownSurfaces.clear();
     knownWorldId = undefined;
   }
 
@@ -360,6 +547,7 @@ export function createRenderBridge(options?: { stepDurationMs?: number }): Rende
     frameFor(state: WorldState): RenderFrame {
       const commands: RenderCommand[] = [];
       const sortedTiles = [...state.tiles].sort(byCell);
+      const sortedSurfaces = [...state.surfaces].sort(bySurfaceId);
       const sortedEntities = [...state.entities].sort(byEntityId);
 
       // A change of `worldId` means every known node belongs to a different
@@ -371,9 +559,11 @@ export function createRenderBridge(options?: { stepDurationMs?: number }): Rende
       // destroyed) and reset the maps so the diff below re-emits `node.create`
       // for every node of the new world.
       let previousTiles: readonly KnownTile[] = [];
+      let previousSurfaceIds: readonly string[] = [];
       let previousEntityIds: readonly string[] = [];
       if (knownWorldId !== state.worldId) {
         previousTiles = [...knownTiles.values()];
+        previousSurfaceIds = [...knownSurfaces.keys()];
         previousEntityIds = [...knownEntities.keys()];
         forgetAll();
         knownWorldId = state.worldId;
@@ -403,7 +593,46 @@ export function createRenderBridge(options?: { stepDurationMs?: number }): Rende
         }
       }
 
-      // 2. Object-layer commands: entity create/update diff.
+      // 2. Surface object-layer commands: real non-ground world geometry. A
+      //    `kind: 'ground'` surface is deliberately skipped: `tiles` already draw
+      //    the flat ground, so a ground node would double-draw it and z-fight.
+      const seenSurfaces = new Set<string>();
+      for (const surface of sortedSurfaces) {
+        if (surface.kind === GROUND_SURFACE_KIND) {
+          continue;
+        }
+        const key = surface.surfaceId;
+        seenSurfaces.add(key);
+        const transform = surfaceRenderTransform(surface);
+        const appearance = appearanceForSurfaceKind(surface.kind);
+        const previous = knownSurfaces.get(key);
+        if (previous === undefined) {
+          commands.push({
+            type: 'node.create',
+            layer: 'object',
+            nodeId: surfaceNodeId(key),
+            appearance,
+            transform,
+            visible: true,
+          });
+          knownSurfaces.set(key, { kind: surface.kind, transform });
+          continue;
+        }
+        if (previous.kind !== surface.kind) {
+          commands.push({
+            type: 'appearance.set',
+            nodeId: surfaceNodeId(key),
+            appearance,
+          });
+          previous.kind = surface.kind;
+        }
+        if (!sameTransform(previous.transform, transform)) {
+          commands.push({ type: 'transform.set', nodeId: surfaceNodeId(key), transform });
+          previous.transform = transform;
+        }
+      }
+
+      // 3. Object-layer commands: entity create/update diff.
       const seenEntities = new Set<string>();
       for (const entity of sortedEntities) {
         const nodeId = entityNodeId(entity.entityId);
@@ -470,7 +699,7 @@ export function createRenderBridge(options?: { stepDurationMs?: number }): Rende
         }
       }
 
-      // 3. Base-layer terrain changes: a static tile whose terrain changed swaps
+      // 4. Base-layer terrain changes: a static tile whose terrain changed swaps
       //    appearance in place (it must not be recreated).
       for (const tile of sortedTiles) {
         const previous = knownTiles.get(tileKey(tile.cellX, tile.cellZ));
@@ -485,7 +714,7 @@ export function createRenderBridge(options?: { stepDurationMs?: number }): Rende
         previous.terrain = tile.terrain;
       }
 
-      // 4. Base-layer destroys: tiles that disappeared. After a world switch the
+      // 5. Base-layer destroys: tiles that disappeared. After a world switch the
       //    known map only holds the new world's tiles, so the previous world's
       //    tiles are considered here too, minus any the new world re-created.
       const removedTiles = [
@@ -499,7 +728,20 @@ export function createRenderBridge(options?: { stepDurationMs?: number }): Rende
         knownTiles.delete(key);
       }
 
-      // 5. Object-layer destroys: entities that disappeared, in id order.
+      // 6. Surface object-layer destroys: non-ground surfaces that disappeared.
+      //    After a world switch the known map only holds the new world's
+      //    surfaces, so the previous world's are considered here too, minus any
+      //    the new world re-created.
+      const removedSurfaces = [
+        ...[...knownSurfaces.keys()].filter((surfaceId) => !seenSurfaces.has(surfaceId)),
+        ...previousSurfaceIds.filter((surfaceId) => !seenSurfaces.has(surfaceId)),
+      ].sort();
+      for (const surfaceId of removedSurfaces) {
+        commands.push({ type: 'node.destroy', nodeId: surfaceNodeId(surfaceId) });
+        knownSurfaces.delete(surfaceId);
+      }
+
+      // 7. Object-layer destroys: entities that disappeared, in id order.
       const removedEntities = [
         ...[...knownEntities.keys()].filter((entityId) => !seenEntities.has(entityId)),
         ...previousEntityIds.filter((entityId) => !seenEntities.has(entityId)),

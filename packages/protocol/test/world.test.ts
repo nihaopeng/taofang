@@ -1,16 +1,27 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  cellCentre,
+  cellOf,
   isCellCoord,
+  isColliderKind,
+  isColliderShape,
+  isColliderState,
   isGetWorldResponse,
   isGridSpec,
+  isSurfaceKind,
+  isSurfaceState,
   isTerrainKind,
   isTileState,
   isWorldBounds,
   isWorldSnapshot,
   parseCellCoord,
+  parseColliderKind,
+  parseColliderState,
   parseGetWorldResponse,
   parseGridSpec,
+  parseSurfaceKind,
+  parseSurfaceState,
   parseTerrainKind,
   parseTileState,
   parseWorldBounds,
@@ -19,9 +30,12 @@ import {
 import {
   captureParseError,
   phase6WorldSnapshot,
+  phase7WorldSnapshot,
   validCellCoord,
+  validColliderState,
   validEntityState,
   validGridSpec,
+  validSurfaceState,
   validTileState,
   validWorldBounds,
   validWorldSnapshot,
@@ -215,6 +229,14 @@ describe('isTileState', () => {
     expect(isTileState({ transform: { x: 2, y: 3 }, terrain: 'grass' })).toBe(false);
   });
 
+  it('REJECTS a TileState carrying a `level` key (no integer-level/heightmap model)', () => {
+    expect(isTileState({ cell: validCellCoord, terrain: 'grass', level: 0 })).toBe(false);
+    expect(isTileState({ cell: validCellCoord, terrain: 'grass', level: 3 })).toBe(false);
+    // The rejected model must not be accepted under any spelling either.
+    expect(isTileState({ cell: validCellCoord, terrain: 'grass', height: 1 })).toBe(false);
+    expect(isTileState({ cell: validCellCoord, terrain: 'grass', elevation: 1 })).toBe(false);
+  });
+
   it.each(nonObjects)('rejects %s', (_label, value) => {
     expect(isTileState(value)).toBe(false);
   });
@@ -252,15 +274,442 @@ describe('parseTileState', () => {
   });
 });
 
+describe('isSurfaceKind', () => {
+  it("accepts exactly ground, platform, ramp, and bridge", () => {
+    expect(isSurfaceKind('ground')).toBe(true);
+    expect(isSurfaceKind('platform')).toBe(true);
+    expect(isSurfaceKind('ramp')).toBe(true);
+    expect(isSurfaceKind('bridge')).toBe(true);
+  });
+
+  it.each([
+    ['an unknown member', 'stair'],
+    ['the empty string', ''],
+    ['a number', 0],
+    ['null', null],
+    ['an object', {}],
+  ])('rejects %s', (_label, value) => {
+    expect(isSurfaceKind(value)).toBe(false);
+  });
+});
+
+describe('parseSurfaceKind', () => {
+  it('returns the value unchanged when valid', () => {
+    expect(parseSurfaceKind('ramp')).toBe('ramp');
+  });
+
+  it('throws ProtocolParseError on an unknown value', () => {
+    const error = captureParseError(() => parseSurfaceKind('stair'));
+    expect(error.message).toBe('Invalid SurfaceKind payload');
+    expect(error.code).toBe('BAD_REQUEST');
+  });
+});
+
+describe('isSurfaceState', () => {
+  it('accepts a well-formed, walkable, up-facing flat surface', () => {
+    expect(isSurfaceState(validSurfaceState)).toBe(true);
+  });
+
+  it('accepts an up-facing but NON-walkable surface (real geometry, no traversal)', () => {
+    // A too-steep slope / roof / rule-only patch: the geometry is legal
+    // (up-facing) while traversal is not. This is a normal, expected case.
+    expect(isSurfaceState({ ...validSurfaceState, walkable: false })).toBe(true);
+    expect(isSurfaceState({ ...validSurfaceState, kind: 'ramp', walkable: false })).toBe(true);
+  });
+
+  it('accepts a tilted ramp-shaped surface (axis vectors gain a y component)', () => {
+    expect(
+      isSurfaceState({
+        ...validSurfaceState,
+        kind: 'ramp',
+        center: { x: 0, y: 1, z: 0 },
+        axisU: { x: 0, y: 1, z: 2 },
+        axisV: { x: 2, y: 0, z: 0 },
+      }),
+    ).toBe(true);
+  });
+
+  it('REJECTS a VERTICAL patch (plane normal is horizontal, cross.y === 0)', () => {
+    expect(
+      isSurfaceState({
+        ...validSurfaceState,
+        // axisU along +x, axisV along +y: the patch stands upright.
+        axisU: { x: 0.5, y: 0, z: 0 },
+        axisV: { x: 0, y: 0.5, z: 0 },
+      }),
+    ).toBe(false);
+  });
+
+  it('REJECTS a DOWN-FACING ceiling (cross.y < 0) even though it defines a plane', () => {
+    expect(
+      isSurfaceState({
+        ...validSurfaceState,
+        axisU: { x: 0.5, y: 0, z: 0 },
+        axisV: { x: 0, y: 0, z: 0.5 },
+      }),
+    ).toBe(false);
+  });
+
+  it('accepts MANY surfaces sharing one (x, z) column at different y (bridge over a bed)', () => {
+    const bed = { ...validSurfaceState, surfaceId: 'surface-bed', center: { x: 0, y: -2, z: 0 } };
+    const deck = { ...validSurfaceState, surfaceId: 'surface-deck', center: { x: 0, y: 3, z: 0 } };
+    expect(isSurfaceState(bed)).toBe(true);
+    expect(isSurfaceState(deck)).toBe(true);
+    expect(bed.center.x).toBe(deck.center.x);
+    expect(bed.center.z).toBe(deck.center.z);
+  });
+
+  it.each(nonObjects)('rejects %s', (_label, value) => {
+    expect(isSurfaceState(value)).toBe(false);
+  });
+
+  it.each(['surfaceId', 'kind', 'center', 'axisU', 'axisV', 'walkable'])(
+    'rejects a missing %s',
+    (key) => {
+      const value: Record<string, unknown> = { ...validSurfaceState };
+      delete value[key];
+      expect(isSurfaceState(value)).toBe(false);
+    },
+  );
+
+  it('rejects extra keys, including a `level` / slope rule', () => {
+    expect(isSurfaceState({ ...validSurfaceState, level: 1 })).toBe(false);
+    expect(isSurfaceState({ ...validSurfaceState, normal: { x: 0, y: 1, z: 0 } })).toBe(false);
+    // No slope / traversability rule may leak into the contract.
+    expect(isSurfaceState({ ...validSurfaceState, slope: 0.5 })).toBe(false);
+    expect(isSurfaceState({ ...validSurfaceState, maxSlopeDegrees: 45 })).toBe(false);
+  });
+
+  it('rejects a missing or non-boolean `walkable` (walkability must be explicit)', () => {
+    const missing: Record<string, unknown> = { ...validSurfaceState };
+    delete missing.walkable;
+    expect(isSurfaceState(missing)).toBe(false);
+    expect(isSurfaceState({ ...validSurfaceState, walkable: 'yes' })).toBe(false);
+    expect(isSurfaceState({ ...validSurfaceState, walkable: 1 })).toBe(false);
+    expect(isSurfaceState({ ...validSurfaceState, walkable: null })).toBe(false);
+  });
+
+  it('rejects a malformed id, kind, or vector', () => {
+    expect(isSurfaceState({ ...validSurfaceState, surfaceId: '' })).toBe(false);
+    expect(isSurfaceState({ ...validSurfaceState, surfaceId: 1 })).toBe(false);
+    expect(isSurfaceState({ ...validSurfaceState, kind: 'stair' })).toBe(false);
+    expect(isSurfaceState({ ...validSurfaceState, center: null })).toBe(false);
+    expect(isSurfaceState({ ...validSurfaceState, center: { x: 0, y: 0 } })).toBe(false);
+    expect(isSurfaceState({ ...validSurfaceState, axisU: { x: '1', y: 0, z: 0 } })).toBe(false);
+  });
+
+  it('rejects degenerate patches whose axis vectors do not define a plane', () => {
+    expect(isSurfaceState({ ...validSurfaceState, axisU: { x: 0, y: 0, z: 0 } })).toBe(false);
+    expect(isSurfaceState({ ...validSurfaceState, axisV: { x: 0, y: 0, z: 0 } })).toBe(false);
+    // Parallel axes (here: same direction) are degenerate.
+    expect(isSurfaceState({ ...validSurfaceState, axisV: { x: 2, y: 0, z: 0 } })).toBe(false);
+    expect(
+      isSurfaceState({ ...validSurfaceState, axisU: { x: 1, y: 1, z: 1 }, axisV: { x: 2, y: 2, z: 2 } }),
+    ).toBe(false);
+  });
+});
+
+describe('parseSurfaceState', () => {
+  it('returns the value unchanged when valid', () => {
+    expect(parseSurfaceState(validSurfaceState)).toBe(validSurfaceState);
+  });
+
+  it('throws ProtocolParseError with a message when invalid', () => {
+    const error = captureParseError(() => parseSurfaceState({ ...validSurfaceState, kind: 'stair' }));
+    expect(error.message).toBe('Invalid SurfaceState payload');
+    expect(error.code).toBe('BAD_REQUEST');
+  });
+});
+
+describe('isColliderKind', () => {
+  it("accepts exactly wall, rock, water, and structure", () => {
+    expect(isColliderKind('wall')).toBe(true);
+    expect(isColliderKind('rock')).toBe(true);
+    expect(isColliderKind('water')).toBe(true);
+    expect(isColliderKind('structure')).toBe(true);
+  });
+
+  it.each([
+    ['an unknown member', 'tree'],
+    ['the empty string', ''],
+    ['a number', 0],
+    ['null', null],
+    ['an object', {}],
+  ])('rejects %s', (_label, value) => {
+    expect(isColliderKind(value)).toBe(false);
+  });
+});
+
+describe('parseColliderKind', () => {
+  it('returns the value unchanged when valid', () => {
+    expect(parseColliderKind('wall')).toBe('wall');
+  });
+
+  it('throws ProtocolParseError on an unknown value', () => {
+    const error = captureParseError(() => parseColliderKind('tree'));
+    expect(error.message).toBe('Invalid ColliderKind payload');
+    expect(error.code).toBe('BAD_REQUEST');
+  });
+});
+
+describe('isColliderShape', () => {
+  it('accepts the aabb variant', () => {
+    expect(
+      isColliderShape({ kind: 'aabb', min: { x: 0, y: 0, z: 0 }, max: { x: 1, y: 1, z: 1 } }),
+    ).toBe(true);
+  });
+
+  it.each(nonObjects)('rejects %s', (_label, value) => {
+    expect(isColliderShape(value)).toBe(false);
+  });
+
+  it.each(['kind', 'min', 'max'])('rejects an aabb shape missing %s', (key) => {
+    const value: Record<string, unknown> = {
+      kind: 'aabb',
+      min: { x: 0, y: 0, z: 0 },
+      max: { x: 1, y: 1, z: 1 },
+    };
+    delete value[key];
+    expect(isColliderShape(value)).toBe(false);
+  });
+
+  it('rejects an unknown shape.kind (the only variant today is aabb)', () => {
+    expect(
+      isColliderShape({ kind: 'sphere', center: { x: 0, y: 0, z: 0 }, radius: 1 }),
+    ).toBe(false);
+    expect(
+      isColliderShape({ kind: 'obb', min: { x: 0, y: 0, z: 0 }, max: { x: 1, y: 1, z: 1 } }),
+    ).toBe(false);
+    expect(
+      isColliderShape({ kind: 'AABB', min: { x: 0, y: 0, z: 0 }, max: { x: 1, y: 1, z: 1 } }),
+    ).toBe(false);
+  });
+
+  it('rejects extra keys inside the aabb shape', () => {
+    expect(
+      isColliderShape({
+        kind: 'aabb',
+        min: { x: 0, y: 0, z: 0 },
+        max: { x: 1, y: 1, z: 1 },
+        radius: 1,
+      }),
+    ).toBe(false);
+    expect(
+      isColliderShape({
+        kind: 'aabb',
+        min: { x: 0, y: 0, z: 0 },
+        max: { x: 1, y: 1, z: 1 },
+        level: 1,
+      }),
+    ).toBe(false);
+  });
+
+  it('rejects malformed or non-positive corners inside the aabb shape', () => {
+    expect(isColliderShape({ kind: 'aabb', min: null, max: { x: 1, y: 1, z: 1 } })).toBe(false);
+    expect(
+      isColliderShape({ kind: 'aabb', min: { x: 0, y: 0, z: 0 }, max: { x: 1, y: 0, z: 1 } }),
+    ).toBe(false);
+    expect(
+      isColliderShape({ kind: 'aabb', min: { x: 0, y: 0, z: 0 }, max: { x: 1, y: 1, z: 1 } }),
+    ).toBe(true);
+  });
+});
+
+describe('isColliderState', () => {
+  it('accepts a well-formed AABB collider', () => {
+    expect(isColliderState(validColliderState)).toBe(true);
+  });
+
+  it('accepts a flat, low wall with a small but real y range', () => {
+    expect(
+      isColliderState({
+        ...validColliderState,
+        kind: 'wall',
+        shape: { kind: 'aabb', min: { x: 0, y: 0, z: 0 }, max: { x: 4, y: 0.5, z: 0.25 } },
+      }),
+    ).toBe(true);
+  });
+
+  it('accepts MANY colliders overlapping in (x, z) with different y ranges', () => {
+    const lowWall = {
+      ...validColliderState,
+      colliderId: 'collider-wall',
+      shape: { kind: 'aabb', min: { x: 0, y: 0, z: 0 }, max: { x: 1, y: 1, z: 1 } },
+    };
+    const deckBody = {
+      ...validColliderState,
+      colliderId: 'collider-deck',
+      shape: { kind: 'aabb', min: { x: 0, y: 4, z: 0 }, max: { x: 1, y: 4.5, z: 1 } },
+    };
+    expect(isColliderState(lowWall)).toBe(true);
+    expect(isColliderState(deckBody)).toBe(true);
+  });
+
+  it.each(nonObjects)('rejects %s', (_label, value) => {
+    expect(isColliderState(value)).toBe(false);
+  });
+
+  it.each(['colliderId', 'kind', 'shape'])('rejects a missing %s', (key) => {
+    const value: Record<string, unknown> = { ...validColliderState };
+    delete value[key];
+    expect(isColliderState(value)).toBe(false);
+  });
+
+  it('rejects the old flat `{ min, max }` shape and other top-level shortcuts', () => {
+    expect(
+      isColliderState({
+        ...validColliderState,
+        min: { x: 0, y: 0, z: 0 },
+        max: { x: 1, y: 1, z: 1 },
+      }),
+    ).toBe(false);
+    expect(isColliderState({ ...validColliderState, level: 1 })).toBe(false);
+    expect(isColliderState({ ...validColliderState, height: 2 })).toBe(false);
+    expect(isColliderState({ ...validColliderState, size: { x: 1, y: 1, z: 1 } })).toBe(false);
+  });
+
+  it('rejects a malformed id, kind, or shape', () => {
+    expect(isColliderState({ ...validColliderState, colliderId: '' })).toBe(false);
+    expect(isColliderState({ ...validColliderState, colliderId: 1 })).toBe(false);
+    expect(isColliderState({ ...validColliderState, kind: 'tree' })).toBe(false);
+    expect(isColliderState({ ...validColliderState, shape: null })).toBe(false);
+    expect(isColliderState({ ...validColliderState, shape: { kind: 'sphere' } })).toBe(false);
+    expect(
+      isColliderState({
+        ...validColliderState,
+        shape: { kind: 'aabb', min: { x: 0, y: 0, z: 0 }, max: { x: 1, y: Number.NaN, z: 1 } },
+      }),
+    ).toBe(false);
+  });
+
+  it('REJECTS a zero or negative y extent (no infinite ground-to-sky column)', () => {
+    expect(
+      isColliderState({
+        ...validColliderState,
+        shape: { kind: 'aabb', min: { x: 1.5, y: 0, z: 2.5 }, max: { x: 3.5, y: 0, z: 4.5 } },
+      }),
+    ).toBe(false);
+    expect(
+      isColliderState({
+        ...validColliderState,
+        shape: { kind: 'aabb', min: { x: 1.5, y: 0, z: 2.5 }, max: { x: 3.5, y: -1, z: 4.5 } },
+      }),
+    ).toBe(false);
+  });
+
+  it('rejects a non-positive extent on any axis', () => {
+    expect(
+      isColliderState({
+        ...validColliderState,
+        shape: { kind: 'aabb', min: { x: 1.5, y: 0, z: 2.5 }, max: { x: 1.5, y: 2, z: 4.5 } },
+      }),
+    ).toBe(false);
+    expect(
+      isColliderState({
+        ...validColliderState,
+        shape: { kind: 'aabb', min: { x: 1.5, y: 0, z: 2.5 }, max: { x: 3.5, y: 2, z: 2.5 } },
+      }),
+    ).toBe(false);
+  });
+});
+
+describe('parseColliderState', () => {
+  it('returns the value unchanged when valid', () => {
+    expect(parseColliderState(validColliderState)).toBe(validColliderState);
+  });
+
+  it('throws ProtocolParseError with a message when invalid', () => {
+    const error = captureParseError(() =>
+      parseColliderState({
+        ...validColliderState,
+        shape: { kind: 'aabb', min: { x: 1.5, y: 0, z: 2.5 }, max: { x: 3.5, y: 0, z: 4.5 } },
+      }),
+    );
+    expect(error.message).toBe('Invalid ColliderState payload');
+    expect(error.code).toBe('BAD_REQUEST');
+  });
+});
+
+describe('cellCentre / cellOf (the shared world <-> grid query)', () => {
+  it('applies the frozen cell-centre rule', () => {
+    expect(cellCentre(validGridSpec, { x: 0, z: 0 })).toEqual({ x: 0.5, y: 0, z: 0.5 });
+    expect(cellCentre(validGridSpec, { x: 2, z: 3 })).toEqual({ x: 2.5, y: 0, z: 3.5 });
+    expect(cellCentre(validGridSpec, { x: -1, z: -2 })).toEqual({ x: -0.5, y: 0, z: -1.5 });
+  });
+
+  it('uses the grid origin and cellSize rather than the world origin', () => {
+    const grid = { ...validGridSpec, origin: { x: 10, y: 2, z: -5 }, cellSize: 2 };
+    expect(cellCentre(grid, { x: 1, z: 2 })).toEqual({ x: 13, y: 2, z: 0 });
+  });
+
+  it('cellOf inverts cellCentre for many cells, including negatives', () => {
+    const cells = [
+      { x: 0, z: 0 },
+      { x: 9, z: 9 },
+      { x: -1, z: -2 },
+      { x: 3, z: -4 },
+      { x: -5, z: 7 },
+    ];
+    for (const cell of cells) {
+      expect(cellOf(validGridSpec, cellCentre(validGridSpec, cell))).toEqual(cell);
+    }
+  });
+
+  it('cellOf is the WORLD rule: it maps any position and never clamps to the grid', () => {
+    expect(cellOf(validGridSpec, { x: -0.1, y: 0, z: -0.1 })).toEqual({ x: -1, z: -1 });
+    expect(cellOf(validGridSpec, { x: 100, y: 0, z: 100 })).toEqual({ x: 100, z: 100 });
+  });
+
+  it('cellOf ignores y entirely: a bridge deck and the bed below map to the same cell', () => {
+    const bed = cellOf(validGridSpec, { x: 2.5, y: -2, z: 3.5 });
+    const deck = cellOf(validGridSpec, { x: 2.5, y: 3, z: 3.5 });
+    expect(bed).toEqual({ x: 2, z: 3 });
+    expect(deck).toEqual({ x: 2, z: 3 });
+  });
+});
+
 describe('isWorldSnapshot', () => {
   it('accepts a well-formed WorldSnapshot', () => {
     expect(isWorldSnapshot(validWorldSnapshot)).toBe(true);
   });
 
-  it('accepts empty tiles and entities lists, and a null controlledActorId', () => {
+  it('accepts empty tiles, surfaces, colliders, and entities lists, and a null controlledActorId', () => {
     expect(isWorldSnapshot({ ...validWorldSnapshot, tiles: [] })).toBe(true);
+    expect(isWorldSnapshot({ ...validWorldSnapshot, surfaces: [] })).toBe(true);
+    expect(isWorldSnapshot({ ...validWorldSnapshot, colliders: [] })).toBe(true);
     expect(isWorldSnapshot({ ...validWorldSnapshot, entities: [] })).toBe(true);
     expect(isWorldSnapshot({ ...validWorldSnapshot, controlledActorId: null })).toBe(true);
+  });
+
+  it('accepts a snapshot with many surfaces/colliders overlapping in (x, z)', () => {
+    expect(
+      isWorldSnapshot({
+        ...validWorldSnapshot,
+        surfaces: [
+          { ...validSurfaceState, surfaceId: 'surface-bed', center: { x: 0, y: -2, z: 0 } },
+          { ...validSurfaceState, surfaceId: 'surface-deck', center: { x: 0, y: 3, z: 0 } },
+          {
+            ...validSurfaceState,
+            surfaceId: 'surface-roof',
+            kind: 'ramp',
+            center: { x: 0, y: 6, z: 0 },
+            walkable: false,
+          },
+        ],
+        colliders: [
+          {
+            ...validColliderState,
+            colliderId: 'collider-wall',
+            shape: { kind: 'aabb', min: { x: 0, y: 0, z: 0 }, max: { x: 1, y: 1, z: 1 } },
+          },
+          {
+            ...validColliderState,
+            colliderId: 'collider-deck',
+            shape: { kind: 'aabb', min: { x: 0, y: 4, z: 0 }, max: { x: 1, y: 4.5, z: 1 } },
+          },
+        ],
+      }),
+    ).toBe(true);
   });
 
   it("accepts a snapshot containing a 'water' tile and a 'tree' entity (phase-6 vocabulary)", () => {
@@ -277,14 +726,21 @@ describe('isWorldSnapshot', () => {
     expect(isWorldSnapshot(value)).toBe(false);
   });
 
-  it.each(['worldId', 'bounds', 'grid', 'tiles', 'entities', 'controlledActorId', 'serverTime'])(
-    'rejects a missing %s',
-    (key) => {
-      const value: Record<string, unknown> = { ...validWorldSnapshot };
-      delete value[key];
-      expect(isWorldSnapshot(value)).toBe(false);
-    },
-  );
+  it.each([
+    'worldId',
+    'bounds',
+    'grid',
+    'tiles',
+    'surfaces',
+    'colliders',
+    'entities',
+    'controlledActorId',
+    'serverTime',
+  ])('rejects a missing %s', (key) => {
+    const value: Record<string, unknown> = { ...validWorldSnapshot };
+    delete value[key];
+    expect(isWorldSnapshot(value)).toBe(false);
+  });
 
   it('rejects unknown extra fields, including the legacy `size`', () => {
     expect(isWorldSnapshot({ ...validWorldSnapshot, extra: 1 })).toBe(false);
@@ -295,6 +751,22 @@ describe('isWorldSnapshot', () => {
     expect(isWorldSnapshot(phase6WorldSnapshot)).toBe(false);
     expect(isWorldSnapshot({ ...phase6WorldSnapshot, bounds: validWorldBounds })).toBe(false);
     expect(isWorldSnapshot({ ...phase6WorldSnapshot, grid: validGridSpec })).toBe(false);
+  });
+
+  it('rejects the phase-7 snapshot shape (no surfaces/colliders) — the 7 -> 8 break', () => {
+    expect(isWorldSnapshot(phase7WorldSnapshot)).toBe(false);
+    expect(
+      isWorldSnapshot({ ...phase7WorldSnapshot, tiles: [] }),
+    ).toBe(false);
+  });
+
+  it('REJECTS a tile carrying a `level` inside a snapshot (no integer-level model)', () => {
+    expect(
+      isWorldSnapshot({
+        ...validWorldSnapshot,
+        tiles: [{ cell: validCellCoord, terrain: 'grass', level: 0 }],
+      }),
+    ).toBe(false);
   });
 
   it('rejects a malformed worldId', () => {
@@ -314,12 +786,70 @@ describe('isWorldSnapshot', () => {
     );
   });
 
-  it('rejects unknown terrain / entity kind values inside a snapshot (exact-union regression guard)', () => {
+  it('rejects unknown terrain / entity / surface / collider kinds inside a snapshot (exact-union regression guard)', () => {
     expect(
       isWorldSnapshot({ ...validWorldSnapshot, tiles: [{ ...validTileState, terrain: 'lava' }] }),
     ).toBe(false);
     expect(
       isWorldSnapshot({ ...validWorldSnapshot, entities: [{ ...validEntityState, kind: 'npc' }] }),
+    ).toBe(false);
+    expect(
+      isWorldSnapshot({
+        ...validWorldSnapshot,
+        surfaces: [{ ...validSurfaceState, kind: 'stair' }],
+      }),
+    ).toBe(false);
+    expect(
+      isWorldSnapshot({
+        ...validWorldSnapshot,
+        colliders: [{ ...validColliderState, kind: 'tree' }],
+      }),
+    ).toBe(false);
+  });
+
+  it('rejects an unknown shape.kind / missing walkable inside a snapshot', () => {
+    expect(
+      isWorldSnapshot({
+        ...validWorldSnapshot,
+        colliders: [
+          {
+            ...validColliderState,
+            shape: { kind: 'sphere', center: { x: 0, y: 0, z: 0 }, radius: 1 },
+          },
+        ],
+      }),
+    ).toBe(false);
+    expect(
+      isWorldSnapshot({
+        ...validWorldSnapshot,
+        surfaces: [{ ...validSurfaceState, walkable: undefined }],
+      }),
+    ).toBe(false);
+  });
+
+  it('rejects surfaces/colliders that are not arrays or contain a malformed item', () => {
+    expect(isWorldSnapshot({ ...validWorldSnapshot, surfaces: null })).toBe(false);
+    expect(isWorldSnapshot({ ...validWorldSnapshot, surfaces: {} })).toBe(false);
+    expect(isWorldSnapshot({ ...validWorldSnapshot, surfaces: ['surface-1'] })).toBe(false);
+    expect(
+      isWorldSnapshot({
+        ...validWorldSnapshot,
+        surfaces: [{ ...validSurfaceState, axisV: { x: 2, y: 0, z: 0 } }],
+      }),
+    ).toBe(false);
+    expect(isWorldSnapshot({ ...validWorldSnapshot, colliders: null })).toBe(false);
+    expect(isWorldSnapshot({ ...validWorldSnapshot, colliders: {} })).toBe(false);
+    expect(isWorldSnapshot({ ...validWorldSnapshot, colliders: ['collider-1'] })).toBe(false);
+    expect(
+      isWorldSnapshot({
+        ...validWorldSnapshot,
+        colliders: [
+          {
+            ...validColliderState,
+            shape: { kind: 'aabb', min: { x: 1.5, y: 0, z: 2.5 }, max: { x: 3.5, y: 0, z: 4.5 } },
+          },
+        ],
+      }),
     ).toBe(false);
   });
 
@@ -365,6 +895,11 @@ describe('parseWorldSnapshot', () => {
     const error = captureParseError(() => parseWorldSnapshot(phase6WorldSnapshot));
     expect(error.message).toBe('Invalid WorldSnapshot payload');
   });
+
+  it('rejects the phase-7 snapshot shape (no surfaces/colliders)', () => {
+    const error = captureParseError(() => parseWorldSnapshot(phase7WorldSnapshot));
+    expect(error.message).toBe('Invalid WorldSnapshot payload');
+  });
 });
 
 describe('isGetWorldResponse', () => {
@@ -391,6 +926,10 @@ describe('isGetWorldResponse', () => {
     expect(isGetWorldResponse({ world: { ...phase6WorldSnapshot, bounds: validWorldBounds } })).toBe(
       false,
     );
+  });
+
+  it('rejects the phase-7 snapshot shape inside `world`', () => {
+    expect(isGetWorldResponse({ world: phase7WorldSnapshot })).toBe(false);
   });
 });
 

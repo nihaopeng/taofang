@@ -56,7 +56,9 @@
  *
  * Terrain is **static**: no event carries it, so `tiles`/`grid`/`bounds` are only
  * ever replaced by a fresh snapshot and are carried over reference-identically by
- * the event applier. `terrain` stays an opaque string; walkability is an
+ * the event applier. The same holds for the world-geometry layer
+ * (`surfaces`/`colliders`): no event replaces it, and the applier passes it
+ * through untouched. `terrain` stays an opaque string; walkability is an
  * authoritative Manager rule, so the store derives no collision rule of its own.
  */
 
@@ -78,15 +80,19 @@ import type { EventSourceLike } from './world-stream';
 import {
   compareEntityViewModels,
   toBoundsViewModel,
+  toColliderViewModels,
   toEntityViewModels,
   toEntityViewModel,
   toGridViewModel,
+  toSurfaceViewModels,
   toTileViewModels,
 } from './world-view-model';
 import type {
   BoundsViewModel,
+  ColliderViewModel,
   EntityViewModel,
   GridViewModel,
+  SurfaceViewModel,
   TileViewModel,
 } from './world-view-model';
 
@@ -111,6 +117,17 @@ export interface WorldState {
   grid: GridViewModel | null;
   /** Static terrain, ordered deterministically by `cellZ` then `cellX`. */
   tiles: readonly TileViewModel[];
+  /**
+   * World-geometry support patches, ordered deterministically by `surfaceId`.
+   * `walkable` is passed through as data; the Organizer makes no traversal,
+   * slope or support-selection decision.
+   */
+  surfaces: readonly SurfaceViewModel[];
+  /**
+   * World-geometry static blocking volumes, ordered deterministically by
+   * `colliderId`. Geometry only; the Organizer performs no collision test.
+   */
+  colliders: readonly ColliderViewModel[];
   /** Authoritative entities, ordered deterministically by `entityId`. */
   entities: readonly EntityViewModel[];
   /** The actor the caller controls, or `null` when the caller controls nothing. */
@@ -134,6 +151,8 @@ const NOTICE_GENERIC = 'Could not do that.';
 
 /** Shared empty lists so idle/loading states are reference-stable. */
 const NO_TILES: readonly TileViewModel[] = Object.freeze([]);
+const NO_SURFACES: readonly SurfaceViewModel[] = Object.freeze([]);
+const NO_COLLIDERS: readonly ColliderViewModel[] = Object.freeze([]);
 const NO_ENTITIES: readonly EntityViewModel[] = Object.freeze([]);
 
 /** Canonical initial state. Reused so `getWorldState` is reference-stable. */
@@ -144,6 +163,8 @@ const IDLE_STATE: WorldState = {
   bounds: null,
   grid: null,
   tiles: NO_TILES,
+  surfaces: NO_SURFACES,
+  colliders: NO_COLLIDERS,
   entities: NO_ENTITIES,
   controlledActorId: null,
   error: null,
@@ -280,6 +301,8 @@ async function runLoad(requestGeneration: number): Promise<void> {
     bounds: null,
     grid: null,
     tiles: NO_TILES,
+    surfaces: NO_SURFACES,
+    colliders: NO_COLLIDERS,
     entities: NO_ENTITIES,
     controlledActorId: null,
     error: null,
@@ -304,6 +327,8 @@ async function runLoad(requestGeneration: number): Promise<void> {
       bounds: null,
       grid: null,
       tiles: NO_TILES,
+      surfaces: NO_SURFACES,
+      colliders: NO_COLLIDERS,
       entities: NO_ENTITIES,
       controlledActorId: null,
       error: describeApiError(error, 'Something went wrong while loading the world.'),
@@ -315,7 +340,8 @@ async function runLoad(requestGeneration: number): Promise<void> {
 /**
  * Project a validated snapshot into client state. Bounds/grid are mapped fresh,
  * tiles get their world positions derived from the grid, and entities are mapped
- * with their full 3D transform.
+ * with their full 3D transform. World geometry (surfaces/colliders) is mapped as
+ * plain view-model data; no traversal or collision rule is applied here.
  */
 function fromSnapshot(
   snapshot: WorldSnapshot,
@@ -330,6 +356,8 @@ function fromSnapshot(
     bounds: toBoundsViewModel(snapshot.bounds),
     grid: toGridViewModel(snapshot.grid),
     tiles: toTileViewModels(snapshot.tiles, snapshot.grid),
+    surfaces: toSurfaceViewModels(snapshot.surfaces),
+    colliders: toColliderViewModels(snapshot.colliders),
     entities: toEntityViewModels(snapshot.entities),
     controlledActorId: snapshot.controlledActorId,
     error,
@@ -848,6 +876,8 @@ export function applyEvents(events: readonly GameEvent[]): void {
     ...state,
     status: 'ready',
     tiles: state.tiles,
+    surfaces: state.surfaces,
+    colliders: state.colliders,
     grid: state.grid,
     bounds: state.bounds,
     entities: [...byId.values()].sort(compareEntityViewModels),

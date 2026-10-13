@@ -24,7 +24,7 @@ describe('protocol constants', () => {
     expect(STREAM_PATH).toBe('/api/stream');
   });
 
-  it('exposes the phase-8 protocol version (two new intents; GLB + mouse-first input)', () => {
-    expect(PROTOCOL_VERSION).toBe(7);
+  it('exposes the phase-14 protocol version (world-geometry layer break)', () => {
+    expect(PROTOCOL_VERSION).toBe(8);
   });
 });

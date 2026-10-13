@@ -12,7 +12,10 @@
  *
  * Phase 7 models a real continuous 3D world. The gameplay grid is a separate
  * interaction layer (`GridSpec`/`CellCoord`/`TileState`); it is never the
- * Actor's motion coordinate system. `Vec3`/`Quat` are re-exported here so
+ * Actor's motion coordinate system. Phase 14 makes that explicit: the snapshot
+ * carries a **world-geometry** layer (`surfaces`/`colliders`) in which `y` is a
+ * real coordinate, the gameplay grid is demoted to metadata, and the actor's
+ * `Transform.position.y` is authoritative. `Vec3`/`Quat` are re-exported here so
  * consumers keep a single import site.
  */
 
@@ -88,15 +91,26 @@ export type { HealthStatus } from './health.ts';
 
 export {
   isActorId,
+  isColliderId,
   isEntityId,
   isPlayerId,
+  isSurfaceId,
   isWorldId,
   parseActorId,
+  parseColliderId,
   parseEntityId,
   parsePlayerId,
+  parseSurfaceId,
   parseWorldId,
 } from './identity.ts';
-export type { ActorId, EntityId, PlayerId, WorldId } from './identity.ts';
+export type {
+  ActorId,
+  ColliderId,
+  EntityId,
+  PlayerId,
+  SurfaceId,
+  WorldId,
+} from './identity.ts';
 
 export { isQuat, isVec3, parseQuat, parseVec3 } from './math.ts';
 export type { Quat, Vec3 } from './math.ts';
@@ -105,16 +119,27 @@ export { isWorldStreamMessage, parseWorldStreamMessage } from './stream.ts';
 export type { WorldStreamMessage } from './stream.ts';
 
 export {
+  cellCentre,
+  cellOf,
   isCellCoord,
+  isColliderKind,
+  isColliderShape,
+  isColliderState,
   isGetWorldResponse,
   isGridSpec,
+  isSurfaceKind,
+  isSurfaceState,
   isTerrainKind,
   isTileState,
   isWorldBounds,
   isWorldSnapshot,
   parseCellCoord,
+  parseColliderKind,
+  parseColliderState,
   parseGetWorldResponse,
   parseGridSpec,
+  parseSurfaceKind,
+  parseSurfaceState,
   parseTerrainKind,
   parseTileState,
   parseWorldBounds,
@@ -122,8 +147,13 @@ export {
 } from './world.ts';
 export type {
   CellCoord,
+  ColliderKind,
+  ColliderShape,
+  ColliderState,
   GetWorldResponse,
   GridSpec,
+  SurfaceKind,
+  SurfaceState,
   TerrainKind,
   TileState,
   WorldBounds,

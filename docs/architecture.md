@@ -484,6 +484,500 @@ the runtime remains the single source of truth. It is deliberately **not saved**
 anywhere: a reload returns to `RENDER_CAMERA.pitchDegrees = 35`. There is no
 Protocol field, no localStorage, and no Organizer state for it.
 
+## Phase 14 frozen contract — real 3D world geometry; the grid is demoted to gameplay metadata
+
+Owner directive (verbatim intent): do **not** model height as a `TileState.level`
+integer or a heightmap. The goal is a general real 3D world. Height is a natural
+part of world-space `Vec3.y`, not a special extension of a tile. Actor, static
+entities, collision and surfaces are all designed in real 3D space. The gameplay
+grid/tile is only a discrete interaction layer overlaid on the 3D world (farming,
+placement, terrain metadata, selection); it must not define the Actor's motion
+space and must not be the sole truth of the world surface.
+
+Phase 14 wave 1 changes the **contract only**. Movement, collision resolution,
+gravity and world authoring are wave 2 (Manager).
+
+### The 3-layer model (this is the whole design)
+
+```
+1. WORLD GEOMETRY  (movement truth)          <-- WorldSnapshot.bounds / surfaces / colliders
+     support patches:  surfaces[]           (planar geometry, real y; walkable is an explicit flag)
+     blockers:         colliders[]          (volumes, real y range; today an 'aabb' shape)
+2. GAMEPLAY GRID   (metadata only)           <-- WorldSnapshot.grid / tiles
+     farming / placement / selection / terrain metadata; no position, no level, defines no geometry
+3. ACTOR TRANSFORM (real 3D state)           <-- EntityState.transform
+     position is a Vec3; position.y is authoritative; no fixed ground y
+```
+
+- Layer 1 is the ONLY source of truth for where a surface is and what blocks
+  movement; `y` is a real coordinate everywhere in it. `surfaces`/`colliders`
+  are the world geometry (the movement truth); `tiles` is gameplay metadata
+  only and defines no geometry. A surface's `walkable` flag is traversal
+  metadata layered on that geometry, not geometry itself.
+- Layer 2 is **demoted**: `TileState { cell, terrain }` holds a `CellCoord` and a
+  `TerrainKind` and nothing else. It holds no position, defines no geometry, and
+  is not the source of truth for any surface.
+- Layer 3 is real 3D state: nothing in the contract may imply a fixed ground
+  `y` for an actor.
+
+### World geometry layer (new snapshot fields)
+
+```ts
+type SurfaceKind  = 'ground' | 'platform' | 'ramp' | 'bridge';
+type ColliderKind = 'wall' | 'rock' | 'water' | 'structure';
+
+interface SurfaceState {
+  surfaceId: SurfaceId;   // branded, like EntityId
+  kind: SurfaceKind;      // game label; the bridge maps it to an appearance
+  center: Vec3;
+  axisU: Vec3;            // half-edge vector (world units), NOT a unit direction
+  axisV: Vec3;            // half-edge vector; cross(axisU, axisV).y must be > 0
+  walkable: boolean;      // explicit traversal metadata, NOT geometry
+}
+
+// Collider geometry is a discriminated union; today it has exactly one variant.
+type ColliderShape = { kind: 'aabb'; min: Vec3; max: Vec3 };
+
+interface ColliderState {
+  colliderId: ColliderId; // branded
+  kind: ColliderKind;     // gameplay vocabulary (a DIFFERENT axis from shape.kind)
+  shape: ColliderShape;   // geometry primitive
+}
+```
+
+A `SurfaceState` is the planar parallelogram
+`{ center + u*axisU + v*axisV : -1 <= u <= 1, -1 <= v <= 1 }`, which is a
+rectangle when `axisU ⟂ axisV`. The plane normal is `normalize(axisU x axisV)`.
+A flat ground and a platform are the same shape at different `center.y`; a ramp
+is the same shape tilted (its axes gain a `y` component).
+
+**`SurfaceState` is geometry first.** Being in `surfaces` means a real planar
+patch exists there, NOT that an actor may walk it. Walkability is the explicit
+`walkable` boolean: **up-facing but NON-walkable surfaces are a normal, expected
+case** — a too-steep slope, a roof, a special material, a decorative or
+rule-only surface. The contract must be able to say "this is a real surface,
+you just may not traverse it", so such a patch is still a `SurfaceState` with
+`walkable: false`, not an omitted entry. The Manager's support query filters on
+`walkable === true` first and then applies its own traversal rules.
+
+**The geometric guard is `cross(axisU, axisV).y > 0` only.** That makes a patch
+an up-facing ground *candidate*: a vertical patch (`cross.y === 0`) and a
+down-facing ceiling (`cross.y < 0`) are not legal surfaces. This is a
+**GEOMETRIC legality constraint ONLY, NOT a slope/traversability rule**. The
+actual passable-slope threshold, and any actor/material-specific traversal rule,
+is a **MANAGER** runtime rule; it must never be derived from `normal.y > 0` here,
+and **no slope limit, angle, or tolerance appears in the contract**.
+
+**Collider geometry is a union, not "min/max AABB" forever.** `ColliderShape` is
+a discriminated union on `shape.kind` whose first (and today only) variant is
+`'aabb'`. An `'aabb'` shape is rejected unless it has a strictly positive extent
+on every axis, **including `y`** — the regression barrier against the former
+"infinite ground-to-sky column". Future variants (`'sphere'`, `'obb'`, ...) are
+**additive union members plus a new `switch` case** in `isColliderShape`, not a
+redesign; none are added speculatively. Note that `shape.kind` (the geometry
+primitive) and `ColliderState.kind` (the gameplay vocabulary) are **separate
+axes** and neither implies the other.
+
+### Multi-surface-per-XZ is a first-class requirement
+
+Many surfaces may overlap in `(x, z)` with different `y`: a bridge deck over a
+river bed, stacked floors, a cave floor beneath a ledge. There is deliberately no
+uniqueness constraint on `center`, no per-surface `level`, and no "one XZ = one
+height". The contract only requires that selecting the support for a given
+`(x, z, feetY)` be *expressible*: the query filters `walkable === true` first,
+then applies the Manager's own slope/traversal rules (e.g. "the highest surface
+at or below `feetY` + step tolerance"). The selection and step tolerance are
+wave-2 Manager rules. `ColliderState` works the same way: a low wall occupied
+only `0..0.5` in `y` does not block a deck at `y = 4`, and a platform blocks only
+its own body.
+
+### The gameplay grid participates only through the shared cell query
+
+The frozen cell-centre rule now lives in Protocol (`@starvalley/protocol`, so
+both sides import the same code and neither re-derives it):
+
+```text
+cellCentre.x = origin.x + (cell.x + 0.5) * cellSize
+cellCentre.z = origin.z + (cell.z + 0.5) * cellSize
+cellCentre.y = origin.y
+```
+
+and its inverse, added by this phase because gameplay (farming/placement/
+selection/terrain metadata) needs both directions:
+
+```ts
+function cellCentre(grid: GridSpec, cell: CellCoord): Vec3
+function cellOf(grid: GridSpec, position: Vec3): CellCoord   // inverse; ignores y
+```
+
+`cellOf` is the WORLD rule: it maps any position (no clamping to the grid) and
+**ignores `y`**, so a bridge deck and the bed below it resolve to the same cell.
+Neither helper may be used as the Actor's stored position. The grid participates
+in gameplay only through this query pair; it defines no geometry.
+
+### `WorldSnapshot` after phase 14
+
+```ts
+interface WorldSnapshot {
+  worldId: WorldId;
+  bounds: WorldBounds;        // the world AABB (movement truth)
+  grid: GridSpec;             // gameplay metadata
+  tiles: TileState[];         // gameplay metadata; no position, no level
+  surfaces: SurfaceState[];   // world geometry; walkable is explicit (may overlap in x,z)
+  colliders: ColliderState[]; // world geometry (a shape union; real y ranges)
+  entities: EntityState[];    // each with a real 3D Transform
+  controlledActorId: ActorId | null;
+  serverTime: string;         // ISO-8601 UTC
+}
+```
+
+`PROTOCOL_VERSION` 7 -> 8. Adding required `surfaces`/`colliders` fields is an
+incompatible change under the exact-key guards, and a `phase7WorldSnapshot` test
+fixture pins that the old shape is rejected.
+
+### Explicit non-goals / non-negotiable rules
+
+- **No integer levels and no heightmap.** There is no `TileState.level`, no
+  `height`, no `elevation`, and no "one XZ = one integer height" anywhere in the
+  contract. A guard test rejects a `level` key on `TileState` (in the spirit of
+  the existing `transform` rejection), and the same for `SurfaceState` /
+  `ColliderState`.
+- **No physics on the wire.** Actor radius/height, step-up/step-down tolerance,
+  gravity/fall speed and surface selection are SERVER-SIDE Manager rules, NOT
+  wire fields. The client is never handed a physics rule it could apply locally.
+- **No traversal rule on the wire.** After the `cross(axisU, axisV).y > 0`
+  geometric ground-candidate guard, the passable-slope threshold and any
+  actor/material-specific traversal rule are Manager rules; the contract carries
+  no slope limit, degrees, or tolerance, and `normal.y > 0` must never be treated
+  as one.
+- **`ColliderShape` is a union, not frozen to AABBs.** The model must not assume
+  every collider is a min/max AABB forever: today there is exactly one variant
+  (`'aabb'`), and a future `'sphere'`/`'obb'` is an additive union member, not a
+  redesign.
+- **No new render primitive and no height-specific command.** The Render ISA
+  stays standard 3D (`RenderTransform { position, rotation, scale }`). A later
+  renderer must not "solve" height with a special primitive or a `level` field;
+  surfaces and colliders arrive as ordinary world data and are rendered with the
+  existing transforms. This is stated here so the temptation is on record.
+- **No physics on the client, no prediction** added by this phase. Collision and
+  gravity remain authoritative Manager behaviour.
+- **`surfaces`/`colliders` are world data, not instructions.** The bridge maps
+  `SurfaceKind`/`ColliderKind` to appearances exactly like `TerrainKind` and
+  `EntityKind`; neither carries appearance, colour or asset information.
+
+### What wave 2 (Manager) implemented against this contract
+
+IMPLEMENTED - the outcome, constants and rules are recorded in the "Phase 14 Manager
+rules" section below; this list is kept as the contract's requirement statement.
+
+1. Author the world as `surfaces` + `colliders` in real 3D (flat ground,
+   platforms at different `y`, a ramp). The model must also SUPPORT a bridge deck
+   above a river bed and an up-facing but non-walkable surface with
+   `walkable: false`; the DEFAULT map authors the ground, a platform at `y = 2`
+   and a 30-degree ramp, while the bridge-over-a-river and `walkable: false`
+   cases are exercised by `packages/manager/test/world-geometry.test.ts` rather
+   than authored in the default map. The grid stays gameplay metadata unchanged.
+2. Support-surface selection for `(x, z, feetY)`: filter to `walkable === true`,
+   then take the highest surface at or below `feetY + step tolerance`, with
+   server-side step tolerance, slope/traversal rules and gravity.
+3. Real 3D collision against `colliders` (today an `'aabb'` `shape` with real
+   `y` ranges; dispatch on `shape.kind` so a future variant is additive), removed
+   from the old "one AABB per unwalkable cell, ground-to-sky" generator.
+4. Emit the new snapshot fields; keep `bounds`/`grid`/`tiles`/`entities`/
+   `controlledActorId`/`serverTime` semantics coherent.
+5. Organizer/Router must consume the new `WorldSnapshot` shape (they speak the
+   old shape until they are migrated; that is the expected wave-1 downstream
+   failure, not a Protocol failure).
+
+### Acceptance (wave 1)
+
+`npx tsc --noEmit -p packages/protocol/tsconfig.json`, `npx vitest run
+packages/protocol` and `npx eslint packages/protocol` all pass; no failure is
+inside `packages/protocol` itself. Manager, Router, Organizer and the
+integration suite are expected to fail to compile until waves 2+ land, because
+they still build the phase-7 snapshot shape.
+
+**Phase 14 wave 1b is the contract freeze.** With the three amendments above
+(explicit `walkable`, the geometric-only `cross.y > 0` guard, and the
+`ColliderShape` union), the Phase-14 contract is FROZEN: `PROTOCOL_VERSION` stays
+`8` (this is still the same unreleased breaking change). Downstream Manager work
+must implement against this shape and must not alter it.
+
+## Phase 14 Manager rules (wave 2) — the world model and movement
+
+Wave 2 implements the frozen phase-14 contract in `packages/manager`. No wire
+field is added: every rule below is a Manager runtime rule with a named constant
+in `packages/manager/src/world-manager.ts`.
+
+### Three-layer discipline
+
+1. **World geometry is the movement truth.** `step` queries `surfaces` and
+   `colliders` ONLY. It never looks up the grid, a tile, or `DEFAULT_WORLD_MAP`.
+2. **`tiles` is gameplay metadata.** `DEFAULT_WORLD_MAP` is a **convenience
+   authoring** source consumed exactly once at construction to *emit*
+   `surfaces`/`colliders`; it defines the grid and the terrain metadata, not the
+   motion space and not the runtime geometry. A custom `map` is still authored
+   into real 3D geometry at construction, but after that the grid is inert for
+   movement.
+3. **The actor transform's `y` is authoritative.** `position.y` is real state,
+   resolved by the support query and gravity every tick. There is no "every
+   walkable movement sets `y = groundY`" behaviour and no integer level/heightmap
+   anywhere.
+
+### Authoring the default world
+
+Construction emits, in deterministic order (sorted by `surfaceId` / `colliderId`
+in every snapshot path):
+
+- one flat, `walkable: true` `ground` patch per walkable cell;
+- one real-`y` `collider` per unwalkable cell — `water` is a shallow
+  `[groundY, groundY + 0.3]` block, `blocked` a `[groundY, groundY + 1]` block —
+  so a bridge above either becomes possible;
+- one real-`y` `collider` per blocking prop — a tree is a trunk
+  `[groundY, groundY + 2.5]`, not a ground-to-sky column;
+- a demo 3D area: a raised platform at `y = groundY + 2` (default map cells
+  x = 7..9, z = 0, i.e. world `x ∈ [2, 5]`, `z ∈ [-5, -4]`) reached by a **30°**
+  ramp running south from its edge (run `= 2 / tan(30°) ≈ 3.464`, so the ramp
+  reaches south to `z ≈ -0.54`). It is anchored to grid cells and only authored
+  when the map is large enough, so small custom maps are untouched, and it is
+  placed clear of the spawn cell (5, 5), the water cells (x 3..4, z 3..4) and
+  both tree cells (6, 4) and (4, 7). The incline is deliberately well below the
+  `45°` traversal limit (a full `15°` of margin) rather than sitting on it, so
+  the demo every acceptance run exercises is not a knife-edge case.
+
+**Winding convention.** A patch is `center + u*axisU + v*axisV`, `u,v ∈ [-1, 1]`,
+with `axisU`/`axisV` HALF-edge vectors. The Protocol guard requires
+`cross(axisU, axisV).y > 0`, so a flat XZ patch with `axisU = +X` MUST use
+`axisV = -Z` (`X x -Z = +Y`); the natural-looking `axisV = +Z` is rejected. The
+ramp uses `axisV = (0, +rise/2, -run/2)` so the patch faces up and tilts north.
+
+### Physics constants (Manager-owned, NOT on the wire)
+
+| Constant | Value | Reason |
+| --- | --- | --- |
+| `DEFAULT_ACTOR_RADIUS` | `0.35` | Body XZ radius; unchanged from phase 7. |
+| `DEFAULT_ACTOR_HEIGHT` | `1.7` | Body vertical extent, so a low wall blocks a ground actor but not a deck actor, and a slab above 1.7 is passed under. |
+| `MAX_STEP_UP` | `0.3` | Highest support the feet can snap up to in one tick (a curb/small riser); bounds the per-step upward snap. |
+| `MAX_STEP_DOWN` | `0.3` | Deepest drop followed while grounded (walking down a step); deeper starts a fall. |
+| `MAX_WALKABLE_SLOPE_DEGREES` | `45` | Steeper than this is a wall/cliff, not walkable. The limit lives here, NOT in the contract. The demo ramp is authored at `DEMO_RAMP_ANGLE_DEGREES = 30`, a `15°` margin, so the acceptance demo is comfortably inside the rule. |
+| `GRAVITY` | `20` | Game-feel downward acceleration (units/s²); settles a fall in a few 20 Hz ticks instead of floating. |
+| `LANDING_SNAP_TOLERANCE` | `0.05` | A fall can overshoot a support within one tick; within this tolerance the actor is placed exactly on it. |
+| `TREE_TRUNK_HEIGHT` / `BLOCKED_COLLIDER_HEIGHT` / `WATER_COLLIDER_HEIGHT` | `2.5` / `1` / `0.3` | Real collider heights; no ground-to-sky columns. |
+
+### Horizontal resolution (body-span collision)
+
+Intent/steering and "latest mode wins" are unchanged, as is the per-axis sliding
+resolution. The only change is that a collider blocks ONLY when its `y` range
+overlaps the actor's CURRENT body span `[feetY, feetY + DEFAULT_ACTOR_HEIGHT]`
+and the body circle overlaps its XZ footprint. Touching (a wall top exactly at
+the feet, a slab bottom exactly at the body top) does not block. This is what
+lets an actor walk UNDER a deck whose slab is above its head while a low wall
+still blocks a ground-level actor.
+
+### Support query and vertical resolution
+
+`findSupportY(surfaces, x, z, feetY)` returns the HIGHEST surface that
+(a) has `walkable === true`, (b) is within the traversal slope limit, (c) whose
+patch contains `(x, z)` in local coordinates, and (d) whose plane `y` at
+`(x, z)` is at most `feetY + MAX_STEP_UP`. A `walkable: false` up-facing slope is
+real geometry but is NEVER support. So is a `walkable: true` patch steeper than
+`MAX_WALKABLE_SLOPE_DEGREES` (e.g. `60°`): the slope limit — not the
+`walkable` flag — is what rejects it, so the rule genuinely bites. That negative
+case is covered by the `criterion 7b` test. Many surfaces may overlap in `(x, z)` at
+different heights; the query picks the one that supports the actor's current
+feet.
+
+Vertical resolution per tick:
+
+- support within `MAX_STEP_DOWN` (including a step UP, a negative drop): snap the
+  feet exactly onto it — this is what makes `y` continuous along a ramp/stairs;
+- a deeper drop: fall (`v += GRAVITY*dt`, `feetY -= v*dt`) and land exactly on the
+  support when the tick reaches/crosses it within `LANDING_SNAP_TOLERANCE`, then
+  zero `v`;
+- no surface at all under the actor: keep falling to `bounds.min.y` (the world
+  floor, treated as ground). This never produces `NaN` and never leaves the actor
+  hovering. No jump, no swimming.
+
+`position.y` is authoritative; the horizontal pass uses the pre-tick `feetY`, and
+the two passes are deterministic — same inputs, same outputs, no timers, no I/O.
+
+### Manager authoring seam (not a wire field)
+
+`createWorldManager` accepts optional `surfaces`/`colliders` arrays that are
+APPENDED to the map-derived geometry (validated with the Protocol guards,
+defensively copied). This is a Manager-internal authoring/test seam; it changes
+no Protocol shape and adds no cross-boundary field.
+
+### Landing inside a collider (depenetration)
+
+Now that colliders have REAL `y` ranges, an airborne actor can fall onto a support
+whose height lies INSIDE a collider volume - the case the model exists to allow
+(a bridge deck over a river). Without a rule for it the actor would land inside the
+volume and every later tick would be blocked in *every* direction, i.e. permanently
+wedged. `step` therefore runs `resolveColliderPenetration` after the vertical pass:
+if the committed position still overlaps a collider body, the circle is pushed out
+horizontally through the nearest face (bounded passes; collider order is the
+deterministic tie-break), and if it cannot be resolved the fallback is refused (the
+actor keeps its previous `y`) rather than committing an unresolvable position.
+
+The push uses `DEPENETRATION_EPSILON = 1e-9` on top of the radius, and this is
+DELIBERATE: placing the centre exactly `radius` from the face and then re-testing
+with the strict `dx*dx + dz*dz < radius*radius` is a floating-point knife edge - the
+recomputed distance rounds slightly inward for some directions, so the search kept
+finding the same blocker, exhausted its passes and returned `null` (the actor stayed
+wedged). That bug shipped green because the first test only walked off the deck to
+the WEST, one of the two directions that happened to round outward. The epsilon is
+private to `pushCircleOutOfAabb`, which only depenetration calls: the ordinary
+horizontal sweep keeps the strict test, so an actor still can never WALK into a
+collider. The regression test now covers all four faces, all four corners and
+near-face points, asserting for each that the result is not `null` and clears the
+box by at least the radius.
+
+### Verification (wave 2)
+
+`npx tsc --noEmit -p packages/manager/tsconfig.json`, `npx vitest run
+packages/manager` and `npx eslint packages/manager` all pass; no failure is
+inside `packages/manager`. Wave-1 downstream consumers (Router, Organizer, the
+web app) and `tests/integration` are expected to fail until waves 3+ land.
+
+## Phase 14 wave 4 — rendering the real 3D world (UI)
+
+Wave 4 consumes the frozen contract through the Organizer and renders the world
+geometry. The boundary is unchanged: the Organizer hands the bridge
+`SurfaceViewModel`/`ColliderViewModel` plain data; the bridge maps them to the
+Render ISA; the Three.js runtime realises them. UI code never talks to the
+backend, never parses a wire DTO, and never invents a Protocol field.
+
+### A surface becomes a render node (standard 3D transform only)
+
+The bridge maps every **non-ground** surface (`platform`/`ramp`/`bridge`) to one
+object-layer node `surface:<surfaceId>` with the existing
+`RenderTransform { position, rotation, scale }` — no new ISA primitive and no
+height/level field. The runtime's surface prefab is a **unit-footprint slab whose
+top face is its local `y = 0` plane**, so the bridge maps the patch
+`{ center + u*axisU + v*axisV }` as:
+
+```text
+position = center
+local +X = normalize(axisU)              scale.x = 2 * |axisU|
+local +Y = normalize(axisU x axisV)     scale.y = 1
+local +Z = cross(local +X, local +Y)    scale.z = 2 * |axisV|
+```
+
+`(local +X, local +Y, local +Z)` is an orthonormal right-handed basis, so the
+mapping is exact for the rectangles the Manager authors (`axisU` perpendicular to
+`axisV`, including the tilted ramp). A general non-perpendicular parallelogram
+would need a shear the standard transform cannot express; such a patch renders as
+the rectangle with the same centre and half-edge lengths rather than inventing a
+primitive. The transform is computed in the **bridge** (framework-free; the
+quaternion is derived with the standard basis -> quaternion conversion, no
+`three`), so the runtime only ever sees ordinary ISA data.
+
+`apps/web/test/render-bridge.test.ts` proves the emitted transform's top face is
+the real patch: it maps the local top corners `(±0.5, 0, ±0.5)` through the
+emitted position/rotation/scale and checks they land on `center ± axisU ± axisV`
+for both the flat platform and the tilted ramp.
+
+### The no-double-draw rule (explicit and tested)
+
+The flat-ground VISUALS come from `tiles`, whose full-cell plates are the seamless
+no-inset ground (the terrain-regression invariants). A `kind: 'ground'` surface
+describes the same patch as geometry, so the bridge **must not emit a node for it**
+— doing so would draw the ground twice and z-fight. `APPEARANCE_BY_SURFACE`
+deliberately has no `ground` key and the bridge skips `GROUND_SURFACE_KIND` before
+any appearance lookup. A bridge test builds a snapshot whose `ground` surfaces and
+`tiles` cover the same cells and asserts **exactly one visual per cell** (the base
+tile) and no `surface:` node.
+
+### Prefabs and geometry
+
+`appearance.surface.platform` / `appearance.surface.ramp` /
+`appearance.surface.bridge` are new prefabs in the runtime registry. All three
+share one visual: a `BoxGeometry(1, SURFACE_SLAB_THICKNESS, 1)` slab whose top is
+at local `y = 0` and whose body hangs below, `SURFACE_SLAB_THICKNESS = 0.25`.
+They differ only by colour. Because the bridge scales local X/Z and leaves local
+Y at 1, the slab's top is exactly the surface plane and a ramp is the same slab
+tilted — a future bridge deck needs no new code. The thin, floating slab is what
+keeps the platform visually plausible: the Manager authors NO side colliders, so
+an actor walks under the platform at the ground plane, and the deck must not look
+like a solid block down to the floor. `BRIDGE_APPEARANCES` grows by the three ids
+and the existing runtime binding test pins that every bridge appearance has a
+prefab.
+
+### Clicking a raised surface
+
+`pick()` returns the ray intersection point for a NODE hit as well as for a ground
+hit (`{ kind: 'node'; nodeId; point }`), because the runtime cannot tell an entity
+node from a surface node - both are opaque `NodeId`s on the `object` layer. The UI
+therefore resolves game identity first and falls through to a move otherwise: a node
+whose id maps to an entity emits the interact intent, and everything else (the flat
+ground OR a raised `surface:` node) emits `moveTo` at the clicked world point. Before
+this, clicking the new platform or ramp emitted NOTHING at all, because the surface
+node swallowed the click - a usability regression against the flat-ground behaviour.
+The client still applies no walkability/slope rule: it emits the intent and the
+authoritative Manager decides where the actor can actually go.
+
+### Colliders stay invisible
+
+`colliders` are world geometry (movement truth) with no visual yet. The bridge
+does not diff them at all: they emit nothing, including where a collider's region
+overlaps a rendered surface, and no collider visual is invented. Tree/prop
+entities keep their existing entity visuals (their colliders remain invisible).
+
+### Node id namespacing and picking
+
+Surface nodes are namespaced `surface:<surfaceId>`, alongside `tile:<cellX>,<cellZ>`
+and `entity:<entityId>`. `runtime.pick()` returns an opaque `NodeId`; the bridge's
+`entityIdOfNodeId` returns `null` for a `surface:` (or `tile:`) node, so a picked
+surface can never be mistaken for an entity and the UI never emits an interact
+intent for it. `scene-view.test.tsx` pins that a picked surface node produces no
+Organizer intent (and no fall-through `moveTo`).
+
+### Camera derivation re-verified against real geometry (not assumed)
+
+`perspectiveFrustum` / `backdropHalfExtents` / the near derivation all intersect
+the camera's corner rays with the FLAT ground plane `y = 0`. Wave 4 tests that
+assumption with the real geometry present instead of assuming it: a new sweep in
+`terrain-regression.test.ts` builds the actual v8 snapshot (144 tiles, a ground
+surface per cell, the raised platform at `y = 2`, the 30-degree ramp, and the
+actor standing on the platform at `y = 2`) through the **real bridge** and asserts,
+at every yaw at pitches 25/35/75:
+
+- the world frames (every ground, raised-surface and actor point projects inside
+the viewport);
+- the floor edge is never visible (every viewport-corner ground hit stays inside
+the single backdrop);
+- the near plane clips nothing (`depth >= near` for every scene point);
+- the far plane covers everything (`depth <= far` for every scene point).
+
+Measured (canvas aspect 1, bounds `[-6,6] x [0,8] x [-6,6]`):
+
+| pitch | scene max `|ndc|` | scene depth range | near | far |
+| --- | --- | --- | --- | --- |
+| 25 | 0.846179 | [33.149, 48.529] | 21.077 | 112.675 |
+| 35 | 0.842030 | [33.888, 47.790] | 21.077 | 81.699 |
+| 75 | 0.781492 | [39.222, 46.457] | 24.499 | 61.349 |
+
+At every pitch the scene's `max|ndc|` equals the ground-footprint utilisation
+(the raised points never project outside the `y = 0` trapezoid's outline), and the
+nearest scene point is comfortably farther than `near` while the farthest is well
+inside `far`. **The flat-plane assumption held**; no fudge factor was added. Every
+existing structural assertion is kept exact and unchanged in the same sweep: FOV
+28 constant, distance/height/near/far constant across yaw (1e-9), fixed-size
+focus-segment NDC constant, tile `footprint == cellSize`, tile `scale == 1`, and
+zero boundary error. The raised surface nodes are excluded from the tile-only
+footprint/scale assertions (they are deliberately scaled to their patch).
+
+### Presentation contract unchanged
+
+Default pitch 35 - adjustable at runtime through the in-world settings panel, which
+remains the ONLY way to change it (`setCameraOrientation` is yaw-only, so drag can
+never tilt the view); yaw-only drag (right drag rotates the world counter-clockwise from
+above), wheel dolly zoom, the single shadowless backdrop, the independent
+`GridOverlay` hidden by default, and HUD pointer/keyboard isolation are all
+re-pinned by the existing `scene-view`, `hud`, `three-runtime` and
+`terrain-regression` suites, which remain green.
+
 ## Phase 8 frozen design — GLB asset pipeline + mouse-first input
 
 Two presentation-side additions, then they are wired to the phase-7 continuous authoritative
@@ -732,7 +1226,11 @@ movement intent -> desired displacement (speed * |v| * dt) -> world-space collis
   Because the simulation is discrete-step, contact is approached to within one integrated step
   rather than exactly; tests therefore assert the invariant (never penetrates, and stops within one
   step of the surface) instead of a magic contact number.
-- Y is taken from the ground/surface (flat `y = 0` for now); no gravity, no jumping, no slopes.
+- ~~Y is taken from the ground/surface (flat `y = 0` for now); no gravity, no jumping, no slopes.~~
+  **SUPERSEDED IN PHASE 14**: `position.y` is real authoritative state. The actor follows the
+  support surface (so Y changes continuously on a ramp/stairs), falls under gravity when the drop
+  exceeds the step-down tolerance, and is filtered by a server-side traversal slope rule. See the
+  phase-14 contract and Manager-rules sections.
 - Heading (rotation) is AUTHORITATIVE and follows the effective movement direction; when the intent
   is zero the last heading is kept. This removes the phase-6 presentational facing derivation.
 
@@ -1247,8 +1745,10 @@ fixing it today needs a handler/context union that buys nothing until a session 
 4. **~~The world has no terrain.~~ RESOLVED IN PHASE 5.** `WorldSnapshot` now carries `worldId`
    and `tiles` (`TileState { transform, terrain }`), the Manager holds a real 10x10 map, and
    collision is enforced authoritatively against `WALKABILITY_BY_TERRAIN`. What is still NOT
-   built: other terrain besides `grass`/`path`/`blocked`, elevation, buildings, crops, more than
-   one map, and any client-side collision/prediction.
+   built: terrain kinds beyond the four in the contract, buildings, crops, more than
+   one map, and any client-side collision/prediction. (**Elevation is now RESOLVED**: phase 14
+   made the world genuinely 3D - walkable world-space `surfaces` at different `y`, a platform and
+   a ramp in the default map, gravity, and colliders with real `y` ranges.)
 5. **A load overlapping an in-flight move can render a stale position.** `performMove` drops a
    move result when the store has no controlled actor yet (`state.controlledActor === null`),
    and a snapshot fetched before the move was applied can be older than the server's current

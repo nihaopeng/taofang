@@ -60,6 +60,8 @@ const VALID_SNAPSHOT = {
   bounds: BOUNDS,
   grid: GRID,
   tiles: TILES,
+  surfaces: [],
+  colliders: [],
   entities: [ENTITY_A],
   controlledActorId: 'actor-1',
   serverTime: SERVER_TIME,
@@ -551,7 +553,11 @@ describe('SceneView mouse-first interaction', () => {
 
   it('converts a click to NDC for the canvas rect and maps a picked node to interact', async () => {
     const recorder = createRecordingRuntime();
-    recorder.pickResult = { kind: 'node', nodeId: 'entity:entity-a' as never };
+    recorder.pickResult = {
+      kind: 'node',
+      nodeId: 'entity:entity-a' as never,
+      point: { x: 3, y: 0, z: 4 },
+    };
     const requests: CapturedRequest[] = [];
     const canvas = await mountWithRuntime(recorder, requests);
 
@@ -600,6 +606,37 @@ describe('SceneView mouse-first interaction', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(requests).toHaveLength(0);
+    expect(recorder.pickCalls).toHaveLength(1);
+  });
+
+  it('maps a walkable surface click to a world-space moveTo at the clicked point (phase 14)', async () => {
+    const recorder = createRecordingRuntime();
+    // A real surface node id from the bridge's `surface:<surfaceId>` namespace.
+    // `pick()` reports the ray intersection point, exactly as it does for a
+    // ground hit, so the UI can move the actor onto the raised geometry.
+    recorder.pickResult = {
+      kind: 'node',
+      nodeId: 'surface:surface-platform' as never,
+      point: { x: 0.5, y: 1.25, z: -0.75 },
+    };
+    const requests: CapturedRequest[] = [];
+    const canvas = await mountWithRuntime(recorder, requests);
+
+    fireEvent.pointerDown(canvas, { clientX: 110, clientY: 70, pointerId: 1, button: 0 });
+    fireEvent.pointerUp(canvas, { clientX: 110, clientY: 70, pointerId: 1, button: 0 });
+
+    await waitFor(() => {
+      expect(requests).toHaveLength(1);
+    });
+    // The bridge's entity mapping returns null for a `surface:` node, so the UI
+    // must NOT invent an interact intent. It instead emits the same move intent
+    // a flat-ground click produces, carrying only the world-space point so the
+    // authoritative Manager decides where the actor can actually go.
+    expect(requests[0].body).toEqual({
+      type: 'actor.moveTo',
+      target: { x: 0.5, y: 1.25, z: -0.75 },
+    });
+    expect(requests[0].body).not.toMatchObject({ type: 'actor.interact' });
     expect(recorder.pickCalls).toHaveLength(1);
   });
 

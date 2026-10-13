@@ -19,6 +19,15 @@ import { isNonEmptyString } from './internal.ts';
  *
  * Runtime behaviour of all four is identical: a non-empty string.
  *
+ * The world-geometry layer adds two further nominal ids that answer "which
+ * surface / collider is this", branded so they can never drift into an entity
+ * or actor slot:
+ *
+ * | Type         | Answers                                    | In the world? | On the wire today? |
+ * | ------------ | ------------------------------------------ | ------------- | ------------------ |
+ * | `SurfaceId`  | "this walkable surface patch is which"     | yes           | yes (world geometry) |
+ * | `ColliderId` | "this static collider volume is which"     | yes           | yes (world geometry) |
+ *
  * `PlayerId` is **not a wire field today**: it is vocabulary reserved for the
  * session slice. The relation below is reserved, not implemented; it is
  * deliberately not encoded as a wire field.
@@ -41,6 +50,8 @@ declare const entityIdBrand: unique symbol;
 declare const actorIdBrand: unique symbol;
 declare const playerIdBrand: unique symbol;
 declare const worldIdBrand: unique symbol;
+declare const surfaceIdBrand: unique symbol;
+declare const colliderIdBrand: unique symbol;
 
 /** Identifier of any world object (tiles, objects, crops, ...). Non-empty string. */
 export type EntityId = string & { readonly [entityIdBrand]: true };
@@ -53,6 +64,18 @@ export type PlayerId = string & { readonly [playerIdBrand]: true };
 
 /** Identifier of a world (a snapshot's scope). Non-empty string. */
 export type WorldId = string & { readonly [worldIdBrand]: true };
+
+/**
+ * Identifier of a walkable surface patch in the world-geometry layer
+ * (`SurfaceState`). Non-empty string.
+ */
+export type SurfaceId = string & { readonly [surfaceIdBrand]: true };
+
+/**
+ * Identifier of a static 3D collider volume in the world-geometry layer
+ * (`ColliderState`). Non-empty string.
+ */
+export type ColliderId = string & { readonly [colliderIdBrand]: true };
 
 /** Structural/runtime guard for `EntityId`: any non-empty string. */
 export function isEntityId(value: unknown): value is EntityId {
@@ -98,10 +121,36 @@ export function isWorldId(value: unknown): value is WorldId {
   return isNonEmptyString(value);
 }
 
+/** Structural/runtime guard for `SurfaceId`: any non-empty string. */
+export function isSurfaceId(value: unknown): value is SurfaceId {
+  return isNonEmptyString(value);
+}
+
+/** Structural/runtime guard for `ColliderId`: any non-empty string. */
+export function isColliderId(value: unknown): value is ColliderId {
+  return isNonEmptyString(value);
+}
+
 /** Parse and validate `WorldId`, throwing `ProtocolParseError` on mismatch. */
 export function parseWorldId(value: unknown): WorldId {
   if (!isWorldId(value)) {
     throw new ProtocolParseError('Invalid WorldId payload');
+  }
+  return value;
+}
+
+/** Parse and validate `SurfaceId`, throwing `ProtocolParseError` on mismatch. */
+export function parseSurfaceId(value: unknown): SurfaceId {
+  if (!isSurfaceId(value)) {
+    throw new ProtocolParseError('Invalid SurfaceId payload');
+  }
+  return value;
+}
+
+/** Parse and validate `ColliderId`, throwing `ProtocolParseError` on mismatch. */
+export function parseColliderId(value: unknown): ColliderId {
+  if (!isColliderId(value)) {
+    throw new ProtocolParseError('Invalid ColliderId payload');
   }
   return value;
 }
