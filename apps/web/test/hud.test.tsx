@@ -23,7 +23,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -128,6 +128,7 @@ interface RecordingRuntime {
   disposeCalls: number;
   orientationCalls: { yawDegrees?: number }[];
   zoomCalls: number[];
+  pitchCalls: number[];
   pickCalls: { x: number; y: number }[];
   /** Result the injected `pick` returns; default `null`. */
   pickResult: RenderPick;
@@ -147,6 +148,7 @@ function createRecordingRuntime(): RecordingRuntime {
     disposeCalls: 0,
     orientationCalls: [],
     zoomCalls: [],
+    pitchCalls: [],
     pickCalls: [],
     pickResult: null,
     factory: undefined as unknown as RecordingRuntime['factory'],
@@ -167,6 +169,11 @@ function createRecordingRuntime(): RecordingRuntime {
       if (orientation.yawDegrees !== undefined) {
         cameraState.yawDegrees = orientation.yawDegrees;
       }
+    },
+    setCameraPitch: (degrees) => {
+      recorder.pitchCalls.push(degrees);
+      // Mirror the real rig: clamp to the documented range.
+      cameraState.pitchDegrees = Math.min(Math.max(degrees, 25), 75);
     },
     setZoom: (zoom) => {
       recorder.zoomCalls.push(zoom);
@@ -358,6 +365,32 @@ describe('HTML HUD layout', () => {
     expect(bag.getAttribute('aria-expanded')).toBe('false');
   });
 
+  it('opens an in-world settings panel with a labelled pitch control, its range, and a no-persistence note', async () => {
+    const recorder = createRecordingRuntime();
+    installWorldFetch();
+    await mountWorldHud(recorder);
+
+    const button = screen.getByTestId('settings-button');
+    expect(button.getAttribute('aria-label')).toBe('Settings');
+    expect(button.getAttribute('aria-expanded')).toBe('false');
+    expect(button.getAttribute('aria-controls')).toBe('world-settings-panel');
+    expect(screen.queryByTestId('settings-panel')).toBeNull();
+
+    // The button lives inside the world viewport, not in a panel below it.
+    expect(screen.getByTestId('world-viewport').contains(button)).toBe(true);
+
+    fireEvent.click(button);
+    const panel = screen.getByTestId('settings-panel');
+    expect(button.getAttribute('aria-expanded')).toBe('true');
+
+    // A labelled control (slider and/or number input) with the current value
+    // shown, the allowed range stated, and the reset-on-reload honesty note.
+    expect(within(panel).getByLabelText('Camera pitch')).toBe(screen.getByTestId('camera-pitch'));
+    expect(screen.getByTestId('camera-pitch-value').textContent).toBe('35°');
+    expect(screen.getByTestId('camera-pitch-range').textContent).toContain('25°–75°');
+    expect(within(panel).getByText(/reload resets the camera pitch to 35°/i)).toBeTruthy();
+  });
+
   it('keeps the server stream status and a rejected-intent notice visible in the HUD', async () => {
     const recorder = createRecordingRuntime();
     installWorldFetch();
@@ -406,6 +439,32 @@ describe('HUD interaction safety', () => {
     fireEvent.pointerUp(panel, { clientX: 160, clientY: 90, pointerId: 7, button: 0 });
     await new Promise((resolve) => setTimeout(resolve, 0));
 
+    expect(recorder.orientationCalls).toHaveLength(0);
+    expect(recorder.pickCalls).toHaveLength(0);
+    expect(requests).toHaveLength(0);
+  });
+
+  it('changes the pitch from the settings slider without rotating, picking, or emitting an Organizer intent', async () => {
+    const recorder = createRecordingRuntime();
+    recorder.pickResult = { kind: 'ground', point: { x: 0, y: 0, z: 0 } };
+    const requests: CapturedRequest[] = [];
+    installWorldFetch(requests);
+    await mountWorldHud(recorder);
+
+    fireEvent.click(screen.getByTestId('settings-button'));
+    const slider = screen.getByTestId('camera-pitch');
+
+    // A drag gesture on the slider is captured by the panel (a `pointer-events:
+    // auto` control); it must never reach the canvas' drag-to-orbit handler.
+    fireEvent.pointerDown(slider, { clientX: 40, clientY: 60, pointerId: 9, button: 0 });
+    fireEvent.pointerMove(slider, { clientX: 120, clientY: 60, pointerId: 9 });
+    fireEvent.pointerUp(slider, { clientX: 120, clientY: 60, pointerId: 9, button: 0 });
+    fireEvent.change(slider, { target: { value: '55' } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // The only effect is the rig pitch; it is presentation, not an intent.
+    expect(recorder.pitchCalls).toEqual([55]);
+    expect(screen.getByTestId('camera-pitch-value').textContent).toBe('55°');
     expect(recorder.orientationCalls).toHaveLength(0);
     expect(recorder.pickCalls).toHaveLength(0);
     expect(requests).toHaveLength(0);

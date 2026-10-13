@@ -46,73 +46,95 @@ const mockRuntime = vi.hoisted(() => ({
   frames: [] as RenderFrame[],
   mountCalls: 0,
   yawDegrees: 0,
+  pitchDegrees: 35,
+  pitchCalls: [] as number[],
   gridOverlayVisible: false,
   gridOverlayCalls: [] as boolean[],
 }));
 
 // Replace the WebGL runtime with a recording no-op so mounting `<App />` /
-// `<WorldView />` under jsdom never needs a canvas or WebGL context.
+// `<WorldView />` under jsdom never needs a canvas or WebGL context. `RENDER_CAMERA`
+// is the rig constant the UI reads for the settings panel's range/default.
 vi.mock('../src/render/three/runtime.ts', () => ({
-  createThreeRuntime: () => ({
-    mount: () => {
-      mockRuntime.mountCalls += 1;
-    },
-    apply: (frame: RenderFrame) => {
-      mockRuntime.frames.push(frame);
-    },
-    update: () => {},
-    setFollowTarget: () => {},
-    getCameraState: () => ({
-      pitchDegrees: 35,
-      yawDegrees: mockRuntime.yawDegrees,
-      zoom: 1,
-      focus: { x: 0, y: 0, z: 0 },
-    }),
-    setCameraOrientation: (orientation: { yawDegrees?: number }) => {
-      if (orientation.yawDegrees !== undefined) {
-        mockRuntime.yawDegrees = orientation.yawDegrees;
-      }
-    },
-    setZoom: () => {},
-    setGridOverlayVisible: (visible: boolean) => {
-      mockRuntime.gridOverlayVisible = visible;
-      mockRuntime.gridOverlayCalls.push(visible);
-    },
-    setHighlightedCell: () => {},
-    pick: () => null,
-    inspect: () => ({
-      mounted: false,
-      lights: 0,
-      ground: false,
-      background: null,
-      groups: 0,
-      shadow: null,
-      models: 0,
-      released: { geometries: 0, materials: 0, textures: 0 },
-      camera: {
-        fovDegrees: 28,
-        near: 0.1,
-        far: 100,
-        aspect: 1,
-        pitchDegrees: 35,
+  RENDER_CAMERA: {
+    pitchDegrees: 35,
+    minPitchDegrees: 25,
+    maxPitchDegrees: 75,
+    fovDegrees: 28,
+    minNear: 0.5,
+    nearClearance: 1,
+    verticalHeadroom: 1,
+    framingMargin: 1.2,
+    minZoom: 0.25,
+    maxZoom: 8,
+  },
+  createThreeRuntime: () => (
+    {
+      mount: () => {
+        mockRuntime.mountCalls += 1;
+      },
+      apply: (frame: RenderFrame) => {
+        mockRuntime.frames.push(frame);
+      },
+      update: () => {},
+      setFollowTarget: () => {},
+      getCameraState: () => ({
+        pitchDegrees: mockRuntime.pitchDegrees,
         yawDegrees: mockRuntime.yawDegrees,
         zoom: 1,
         focus: { x: 0, y: 0, z: 0 },
-        position: { x: 0, y: 0, z: 0 },
-        forward: { x: 0, y: 0, z: -1 },
-        up: { x: 0, y: 1, z: 0 },
+      }),
+      setCameraOrientation: (orientation: { yawDegrees?: number }) => {
+        if (orientation.yawDegrees !== undefined) {
+          mockRuntime.yawDegrees = orientation.yawDegrees;
+        }
       },
-      nodes: [],
-      buckets: [],
-      gridOverlay: {
-        visible: mockRuntime.gridOverlayVisible,
-        highlightedCell: null,
-        lineObjectCount: 1,
-        highlightMarkerCount: 1,
+      setCameraPitch: (degrees: number) => {
+        mockRuntime.pitchCalls.push(degrees);
+        // Mirror the real rig: clamp to the documented range.
+        mockRuntime.pitchDegrees = Math.min(Math.max(degrees, 25), 75);
       },
-    }),
-    dispose: () => {},
-  }),
+      setZoom: () => {},
+      setGridOverlayVisible: (visible: boolean) => {
+        mockRuntime.gridOverlayVisible = visible;
+        mockRuntime.gridOverlayCalls.push(visible);
+      },
+      setHighlightedCell: () => {},
+      pick: () => null,
+      inspect: () => ({
+        mounted: false,
+        lights: 0,
+        ground: false,
+        background: null,
+        groups: 0,
+        shadow: null,
+        models: 0,
+        released: { geometries: 0, materials: 0, textures: 0 },
+        camera: {
+          fovDegrees: 28,
+          near: 0.1,
+          far: 100,
+          aspect: 1,
+          pitchDegrees: mockRuntime.pitchDegrees,
+          yawDegrees: mockRuntime.yawDegrees,
+          zoom: 1,
+          focus: { x: 0, y: 0, z: 0 },
+          position: { x: 0, y: 0, z: 0 },
+          forward: { x: 0, y: 0, z: -1 },
+          up: { x: 0, y: 1, z: 0 },
+        },
+        nodes: [],
+        buckets: [],
+        gridOverlay: {
+          visible: mockRuntime.gridOverlayVisible,
+          highlightedCell: null,
+          lineObjectCount: 1,
+          highlightMarkerCount: 1,
+        },
+      }),
+      dispose: () => {},
+    }
+  ),
 }));
 
 /** Does any recorded frame contain a command of `type`? */
@@ -262,6 +284,8 @@ beforeEach(() => {
   mockRuntime.frames.length = 0;
   mockRuntime.mountCalls = 0;
   mockRuntime.yawDegrees = 0;
+  mockRuntime.pitchDegrees = 35;
+  mockRuntime.pitchCalls.length = 0;
   mockRuntime.gridOverlayVisible = false;
   mockRuntime.gridOverlayCalls.length = 0;
   resetGameInfoState();
@@ -494,6 +518,84 @@ describe('WorldView keyboard input', () => {
     });
 
     releaseKey('ArrowUp');
+  });
+
+  it('does not drive movement while focus is inside the settings panel, and still changes the pitch', async () => {
+    await loadValidWorld();
+
+    const requests: CapturedRequest[] = [];
+    captureMoves(requests);
+
+    render(<WorldView />);
+
+    // Open the in-world settings panel and focus the pitch slider. Because the
+    // panel is inside the world window, the global movement listener would
+    // otherwise turn arrow keys into walking and WASD into a diagonal walk.
+    fireEvent.click(screen.getByTestId('settings-button'));
+    const slider = screen.getByTestId('camera-pitch') as HTMLInputElement;
+    slider.focus();
+    expect(document.activeElement).toBe(slider);
+
+    // The range line is stated in the panel and matches the rig clamp.
+    expect(screen.getByTestId('camera-pitch-range').textContent).toContain('25°–75°');
+
+    // Arrow keys and WASD while the slider owns focus must emit NO movement (and
+    // must not rotate the rig or toggle the grid either).
+    for (const key of ['ArrowRight', 'ArrowUp', 'w', 'a', 's', 'd']) {
+      fireEvent.keyDown(slider, { key, bubbles: true, cancelable: true });
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(requests).toHaveLength(0);
+    expect(mockRuntime.yawDegrees).toBe(0);
+
+    // The movement handler must not `preventDefault`, so the native control stays
+    // free to handle arrow keys (jsdom itself does not move a range input).
+    const arrow = new KeyboardEvent('keydown', {
+      key: 'ArrowRight',
+      bubbles: true,
+      cancelable: true,
+    });
+    fireEvent(slider, arrow);
+    expect(arrow.defaultPrevented).toBe(false);
+
+    // The control still works: it drives the render rig's pitch directly, never
+    // the Organizer.
+    fireEvent.change(slider, { target: { value: '60' } });
+    expect(mockRuntime.pitchCalls).toEqual([60]);
+    expect(screen.getByTestId('camera-pitch-value').textContent).toBe('60°');
+    expect(requests).toHaveLength(0);
+
+    // Escape closes the panel and returns focus to the settings button.
+    fireEvent.keyDown(slider, { key: 'Escape', bubbles: true });
+    expect(screen.queryByTestId('settings-panel')).toBeNull();
+    expect(document.activeElement).toBe(screen.getByTestId('settings-button'));
+  });
+
+  it('ignores movement keys that bubble from the HUD form container, not just its inputs', async () => {
+    await loadValidWorld();
+
+    const requests: CapturedRequest[] = [];
+    captureMoves(requests);
+
+    render(<WorldView />);
+
+    fireEvent.click(screen.getByTestId('settings-button'));
+    const panel = screen.getByTestId('settings-panel');
+
+    // A key pressed on the panel chrome (a label, the panel itself) bubbles to
+    // the window listener. The `[data-hud-form]` clause of the isolation guard
+    // must make it a no-op exactly like an input does: no movement, no rotate,
+    // no grid toggle, and no `preventDefault`.
+    for (const key of ['ArrowRight', 'w', 'g']) {
+      fireEvent.keyDown(panel, { key, bubbles: true, cancelable: true });
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(requests).toHaveLength(0);
+    expect(mockRuntime.yawDegrees).toBe(0);
+    // The `g` grid toggle must not have fired: no call ever turned the overlay on.
+    expect(mockRuntime.gridOverlayCalls).not.toContain(true);
+    expect(mockRuntime.gridOverlayVisible).toBe(false);
   });
 });
 

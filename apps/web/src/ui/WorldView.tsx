@@ -6,6 +6,7 @@ import { SceneView } from './SceneView';
 import type { SceneViewOptions } from './SceneView';
 import { createMovementController } from './movement-input';
 import type { MovementController, MovementKey } from './movement-input';
+import { RENDER_CAMERA } from '../render/three/runtime';
 import type { RenderRuntime } from '../render/three/runtime';
 
 /**
@@ -67,6 +68,24 @@ function formatCoordinate(value: number): string {
 }
 
 /**
+ * Whether a key event originated inside an interactive HUD form control (the
+ * settings panel's range input, or a future text field).
+ *
+ * While such an element has focus the global movement / Q-E / G handlers must
+ * NOT run: arrow keys must operate the control rather than walking the actor (or
+ * being `preventDefault()`-ed), and a stray letter must not rotate the view or
+ * toggle the grid. This is the keyboard half of the HUD pointer/keyboard
+ * isolation guarantee; the pointer half is `pointer-events: none` on the overlay
+ * with `pointer-events: auto` on the controls (see `styles.css`).
+ */
+function isHudFormTarget(target: EventTarget | null): boolean {
+  return (
+    target instanceof HTMLElement &&
+    target.closest('input, textarea, select, [data-hud-form]') !== null
+  );
+}
+
+/**
  * Presentation of the Organizer's world/actor state.
  *
  * The world itself is rendered by `<SceneView />` (Three.js executing the Render
@@ -113,6 +132,20 @@ export function WorldView(props: {
     applyGridOverlayVisible(!gridOverlayVisibleRef.current);
   }, [applyGridOverlayVisible]);
 
+  // The camera pitch is a PRESENTATION parameter of the render rig, not Organizer
+  // state and never a Protocol field. This React mirror exists only so the HUD can
+  // display the live value; the runtime remains the single source of truth and the
+  // setter is clamped there, so the mirror reads the live value back.
+  const [pitchDegrees, setPitchDegrees] = useState<number>(RENDER_CAMERA.pitchDegrees);
+  const applyPitch = useCallback((degrees: number) => {
+    const runtime = runtimeRef.current;
+    if (runtime === null) {
+      return;
+    }
+    runtime.setCameraPitch(degrees);
+    setPitchDegrees(runtime.getCameraState().pitchDegrees);
+  }, []);
+
   // Movement is only meaningful once an authoritative controlled actor exists.
   const canMove = status === 'ready' && controlledActorId !== null;
   const canMoveRef = useRef(canMove);
@@ -143,6 +176,13 @@ export function WorldView(props: {
     const handleKeyDown = (event: KeyboardEvent): void => {
       // Let browser/OS shortcuts through untouched.
       if (event.ctrlKey || event.metaKey || event.altKey) {
+        return;
+      }
+      // Keyboard isolation: while focus is inside a HUD form control (the camera
+      // pitch slider), arrow keys / WASD must not drive movement, rotate the rig,
+      // or toggle the grid. Returning before `preventDefault` also leaves the
+      // native control free to handle the key (e.g. an arrow key moves the slider).
+      if (isHudFormTarget(event.target)) {
         return;
       }
       if (GRID_TOGGLE_KEYS.has(event.key)) {
@@ -206,9 +246,15 @@ export function WorldView(props: {
 
   // Keep the runtime's grid layer in sync with the presentational toggle. The
   // runtime is created by the child `SceneView`, whose effect runs first, so when
-  // the world becomes ready this re-applies the (default hidden) state to it.
+  // the world becomes ready this re-applies the (default hidden) state to it. A
+  // runtime (re)creation also resets the rig pitch to the default, so mirror the
+  // live pitch here rather than letting the settings panel show a stale value.
   useEffect(() => {
-    runtimeRef.current?.setGridOverlayVisible(gridOverlayVisibleRef.current);
+    const runtime = runtimeRef.current;
+    runtime?.setGridOverlayVisible(gridOverlayVisibleRef.current);
+    if (runtime !== null) {
+      setPitchDegrees(runtime.getCameraState().pitchDegrees);
+    }
   }, [state]);
 
   // The controlled entity is the one linked to the controlled actor. It is
@@ -232,7 +278,14 @@ export function WorldView(props: {
       */}
       <div className="world__viewport" data-testid="world-viewport">
         <SceneView runtimeRef={runtimeRef} createRuntime={createRuntime} />
-        <Hud streamStatus={streamStatus} notice={notice} />
+        <Hud
+          streamStatus={streamStatus}
+          notice={notice}
+          pitchDegrees={pitchDegrees}
+          pitchRange={{ min: RENDER_CAMERA.minPitchDegrees, max: RENDER_CAMERA.maxPitchDegrees }}
+          defaultPitchDegrees={RENDER_CAMERA.pitchDegrees}
+          onPitchChange={applyPitch}
+        />
       </div>
       {controlledEntity !== null ? (
         <p className="world__actor-info" data-testid="controlled-actor-info">

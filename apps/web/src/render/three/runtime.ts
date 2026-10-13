@@ -28,22 +28,25 @@
  *
  * CameraRig (the only place "2.5D" is allowed to live)
  * ---------------------------------------------------
- * The rig owns follow + smoothing, a **fixed** pitch, free yaw, and zoom. It is
- * deliberately a **narrow-FOV perspective** camera (phase 11): the tilt and the
- * narrow FOV give a gentle near-large/far-small read without a strong
- * third-person look. Phase 11 Wave D makes the view a **pure orbit with an
- * unchanging projection**: the pitch is a single fixed constant (no adjustable
- * path), and the FOV is a fixed constant, with the camera DISTANCE fixed from
- * the worst-case yaw fit. Neither the distance nor the projection depends on
- * yaw, so rotating cannot dolly or zoom. The world model, the Actor motion model,
- * and the Render ISA carry no projection assumption, so the rig remains the
- * *only* module that knows how the scene is projected. Yaw rotates the rig (and
- * therefore the view); it never changes the world coordinate system.
+ * The rig owns follow + smoothing, a **clamped, settable** pitch, free yaw, and
+ * zoom. It is deliberately a **narrow-FOV perspective** camera (phase 11): the
+ * tilt and the narrow FOV give a gentle near-large/far-small read without a
+ * strong third-person look. Phase 11 Wave D makes the view a **pure orbit with an
+ * unchanging projection at any single pitch**: the FOV is a fixed constant and the
+ * camera DISTANCE is fixed from the worst-case yaw fit at the current pitch, so
+ * neither depends on yaw, and rotating cannot dolly or zoom. Phase 13 reverses the
+ * earlier "no adjustable path" decision and adds {@link RenderRuntime.setCameraPitch}:
+ * the pitch is clamped to `[minPitchDegrees, maxPitchDegrees]` and re-runs the same
+ * reframe path, while a canvas drag remains yaw-only so it can never tilt the view.
+ * The world model, the Actor motion model, and the Render ISA carry no projection
+ * assumption, so the rig remains the *only* module that knows how the scene is
+ * projected. Yaw rotates the rig (and therefore the view); it never changes the
+ * world coordinate system.
  *
  * `inspect()` exposes the rig as plain data (`pitchDegrees`, `yawDegrees`,
  * `zoom`, the honest perspective frustum — `fovDegrees`/`near`/`far`/`aspect` —
- * and the camera's world position/forward/up) so tests can assert the fixed
- * pitch, yaw view changes, and zoom extent numerically.
+ * and the camera's world position/forward/up) so tests can assert the pitch, yaw
+ * view changes, and zoom extent numerically.
  *
  * Layer / depth / occlusion (frozen policy)
  * ----------------------------------------
@@ -434,11 +437,21 @@ export interface RenderRuntime {
   /** Read the rig state as plain data (yaw is what camera-relative input needs). */
   getCameraState(): CameraState;
   /**
-   * Set the rig's yaw. Pitch is a fixed composition constant and is deliberately
-   * NOT settable here (see {@link RENDER_CAMERA.pitchDegrees}); yaw is
-   * normalised to `[0, 360)`. Rotating the rig never changes world coordinates.
+   * Set the rig's yaw. This is deliberately yaw-only so a drag can NEVER tilt the
+   * view; the pitch has its own explicit setter ({@link setCameraPitch}) and is
+   * never inferred from an orientation field. Yaw is normalised to `[0, 360)`.
+   * Rotating the rig never changes world coordinates.
    */
   setCameraOrientation(orientation: { yawDegrees?: number }): void;
+  /**
+   * Set the rig's downward pitch in degrees, clamped to
+   * `[RENDER_CAMERA.minPitchDegrees, RENDER_CAMERA.maxPitchDegrees]`. The value is
+   * a presentation/camera-rig parameter (never a Protocol field), and the setter
+   * re-runs the same reframe path as yaw/zoom so every derived quantity
+   * (orbit distance, backdrop, near/far, the camera transform) follows. A
+   * non-finite input is ignored.
+   */
+  setCameraPitch(degrees: number): void;
   /** Set the perspective zoom factor (clamped to the rig's limits). */
   setZoom(zoom: number): void;
   /**
@@ -531,17 +544,34 @@ interface RuntimeNode {
   startRotation: Quaternion;
 }
 
-/** Camera stance, frozen by Main. Exported so projection tests share one source. */
+/** Camera stance. Exported so projection tests and the HUD share one source. */
 export const RENDER_CAMERA = {
   /**
-   * The camera's fixed downward pitch from the horizontal, in degrees.
+   * The camera's INITIAL/default downward pitch from the horizontal, in degrees.
    *
-   * This is a single FIXED composition constant, intentionally NOT adjustable:
-   * there is no pitch input in the UI and `setCameraOrientation` has no pitch
-   * field, so the view can never tilt. It is still reported in `inspect().camera`
-   * for tests and debugging.
+   * It is also the value a reload resets to (there is deliberately no
+   * persistence). The live pitch is settable through the explicit rig API
+   * {@link RenderRuntime.setCameraPitch} (and reported in `inspect().camera`)
+   * because the in-world settings panel exposes it; a drag on the canvas still
+   * only yaws, so the `setCameraOrientation` guarantee is unchanged.
    */
   pitchDegrees: 35,
+  /**
+   * Lower clamp for the settable pitch, in degrees.
+   *
+   * An unbounded low pitch is unsafe: the visible ground distance grows like
+   * `1 / tan(pitch - fov/2)`, so as the top viewport ray approaches the horizon
+   * the single backdrop and the far plane blow up without bound. 25 keeps a
+   * strict, generous margin: `25 - fov/2 = 11` degrees below the horizon at the
+   * top of the frame (with `fov = 28`), so the footprint stays finite and the
+   * composition stays a framed world rather than an edge toward infinity.
+   */
+  minPitchDegrees: 25,
+  /**
+   * Upper clamp for the settable pitch, in degrees. 75 is a steep, near
+   * top-down view; 90 would be straight down and is deliberately excluded.
+   */
+  maxPitchDegrees: 75,
   /**
    * The fixed vertical field of view, in degrees. Deliberately narrow (phase 11)
    * so the projected near/far size difference stays gentle.
@@ -942,11 +972,12 @@ export function perspectiveFrustum(options: {
   const camZ = distance * cosPitch * cosYaw;
 
   // Project the four viewport corners onto the ground plane. For the rig's
-  // fixed pitch and fixed FOV every ray points below the horizon (pitch 35 >
-  // fov/2 = 14), so the footprint is a finite trapezoid; `footprintHalfX/Z` are
-  // measured from the focus, `maxDepth` is the farthest camera-to-corner
-  // distance used for `far`, and `minDepth` is the nearest VISIBLE ground
-  // distance used to keep the near plane from clipping the backdrop on-screen.
+  // clamped pitch and fixed FOV every ray points below the horizon
+  // (minPitchDegrees 25 > fov/2 = 14), so the footprint is a finite trapezoid;
+  // `footprintHalfX/Z` are measured from the focus, `maxDepth` is the farthest
+  // camera-to-corner distance used for `far`, and `minDepth` is the nearest
+  // VISIBLE ground distance used to keep the near plane from clipping the
+  // backdrop on-screen.
   let footprintHalfX = 0;
   let footprintHalfZ = 0;
   let maxDepth = 0;
@@ -959,8 +990,9 @@ export function perspectiveFrustum(options: {
       const dirZ = forwardZ + rightZ * (u * tanHalfFov * aspect) + upZ * (v * tanHalfFov);
       if (dirY >= -1e-9) {
         // A ray at/above the horizon never meets the ground: the footprint is
-        // unbounded. Cannot happen for the fixed rig (pitch 35 > fov/2 = 14),
-        // but keep the guard so a future FOV/pitch change cannot produce NaN.
+        // unbounded. Cannot happen for the clamped rig
+        // (minPitchDegrees 25 > fov/2 = 14), but keep the guard so a future
+        // FOV/pitch change cannot produce NaN.
         parallelToGround = true;
         continue;
       }
@@ -1581,9 +1613,10 @@ export function createThreeRuntime(options: {
 
   // Rig state. `cameraFocus` is the world point the rig is centred on (also the
   // smooth-follow target); the camera itself is a fixed local child. The pitch is
-  // a fixed composition constant (see {@link RENDER_CAMERA.pitchDegrees}): it is
-  // deliberately not a mutable rig state, so there is no way to tilt at runtime.
-  const pitchDegrees = RENDER_CAMERA.pitchDegrees;
+  // a mutable, clamped rig parameter (see {@link RENDER_CAMERA}); it starts at the
+  // default and only `setCameraPitch` changes it — `setCameraOrientation` remains
+  // yaw-only so a canvas drag can never tilt the view.
+  let pitchDegrees: number = RENDER_CAMERA.pitchDegrees;
   let yawDegrees = 0;
   let zoom = 1;
   const cameraFocus = new Vector3(worldCenterX, groundY, worldCenterZ);
@@ -2318,14 +2351,29 @@ export function createThreeRuntime(options: {
   }
 
   /**
-   * Set the rig's yaw. Pitch is a fixed composition constant and is deliberately
-   * NOT settable (see {@link RENDER_CAMERA.pitchDegrees}); yaw is normalised to
-   * `[0, 360)`. Rotating the rig never changes world coordinates.
+   * Set the rig's yaw. This is deliberately yaw-only: the pitch has its own
+   * explicit setter ({@link setCameraPitch}) and is never read from this shape,
+   * so a drag can never tilt the view. Yaw is normalised to `[0, 360)`. Rotating
+   * the rig never changes world coordinates.
    */
   function setCameraOrientation(orientation: { yawDegrees?: number }): void {
     if (orientation.yawDegrees !== undefined) {
       yawDegrees = normalizeYawDegrees(orientation.yawDegrees);
     }
+    applyCameraTransform();
+  }
+
+  /**
+   * Set the rig's downward pitch (degrees), clamped to the documented range and
+   * re-run through the SAME reframe path as yaw/zoom so the orbit distance, the
+   * camera transform/height, the backdrop and near/far all follow. A
+   * non-finite input is ignored rather than poisoning the projection.
+   */
+  function setCameraPitch(degrees: number): void {
+    if (!Number.isFinite(degrees)) {
+      return;
+    }
+    pitchDegrees = clamp(degrees, RENDER_CAMERA.minPitchDegrees, RENDER_CAMERA.maxPitchDegrees);
     applyCameraTransform();
   }
 
@@ -2514,6 +2562,7 @@ export function createThreeRuntime(options: {
     setFollowTarget,
     getCameraState,
     setCameraOrientation,
+    setCameraPitch,
     setZoom,
     setGridOverlayVisible,
     setHighlightedCell,

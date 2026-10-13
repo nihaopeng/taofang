@@ -342,6 +342,108 @@ body {
   color: var(--soil);
 }
 
+.world__hud-actions {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+
+/*
+ * The in-world settings control group. The wrapper stays input-transparent (it
+ * inherits `pointer-events: none`); only the button and the panel, both
+ * `world__hud-control`, re-enable pointer events, so a drag on the canvas
+ * outside the panel still reaches the world.
+ */
+.world__settings {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+}
+
+.world__settings-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  height: 2.25rem;
+  padding: 0 0.75rem;
+  border: 1px solid var(--leaf);
+  border-radius: 0.4rem;
+  background: rgb(42 33 25 / 80%);
+  color: var(--wheat);
+  font: inherit;
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+  touch-action: none;
+  user-select: none;
+}
+
+.world__settings-button[aria-expanded='true'] {
+  background: var(--leaf);
+  color: var(--soil);
+}
+
+/*
+ * The camera settings panel. It is a `world__hud-control`, so it captures
+ * pointer events; a drag on the pitch slider therefore never reaches the canvas
+ * and can never rotate the camera, pick, or emit an Organizer intent.
+ */
+.world__settings-panel {
+  position: absolute;
+  top: calc(2.25rem + 0.35rem);
+  right: 0;
+  width: 16rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid #55432f;
+  border-radius: 0.5rem;
+  background: var(--soil-raised);
+  box-shadow: 0 0.75rem 2rem rgb(0 0 0 / 30%);
+}
+
+.world__settings-heading {
+  margin: 0 0 0.5rem;
+  font-size: 0.9rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--leaf);
+}
+
+.world__settings-field {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.4rem;
+}
+
+.world__settings-field label {
+  flex: 0 0 auto;
+  font-size: 0.85rem;
+}
+
+.world__settings-slider {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.world__settings-value {
+  flex: 0 0 auto;
+  min-width: 2.5rem;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.world__settings-range,
+.world__settings-note {
+  margin: 0;
+  font-size: 0.75rem;
+  color: #b9a583;
+}
+
+.world__settings-note {
+  margin-top: 0.25rem;
+}
+
 .world__hud-status {
   margin: 0;
   align-self: flex-start;

@@ -9,9 +9,10 @@
  * Server packages, or call `fetch` / WebSocket. It also never reaches into the
  * render runtime's internals.
  *
- * The only state here is **presentational**: which tool slot is highlighted and
- * whether the bag panel is open. No gameplay meaning is attached to either, and
- * no item, count or inventory is invented.
+ * The only state here is **presentational**: which tool slot is highlighted,
+ * whether the bag panel is open, and whether the settings panel is open. No
+ * gameplay meaning is attached to any of them, and no item, count or inventory is
+ * invented.
  *
  * FUTURE DATA RULE
  * ----------------
@@ -20,8 +21,17 @@
  * through the Organizer: state comes IN as a view model / selector and actions
  * go OUT as Organizer intents. The HUD must not become a second source of truth
  * for world/entity state, and must not call the backend itself.
+ *
+ * CAMERA RIG RULE (hard)
+ * ----------------------
+ * Camera rig parameters — pitch, zoom and yaw — are **presentation**, not game
+ * state. They are NOT Organizer data and must NEVER become a Protocol field. The
+ * in-world settings panel therefore drives the render rig straight through the
+ * rig API (`setCameraPitch`) via the `onPitchChange` callback it is handed; it
+ * emits no Organizer intent. Gameplay actions (move/interact) remain the only
+ * things that go through the Organizer.
  */
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 
 import type { StreamStatus } from '../organizer';
 
@@ -55,19 +65,42 @@ export interface HudProps {
   streamStatus: StreamStatus;
   /** Transient Organizer refusal message, or `null`; display only. */
   notice: string | null;
+  /** Live camera pitch, in degrees, as reported by the render rig. */
+  pitchDegrees: number;
+  /** The rig's clamp range, in degrees (`RENDER_CAMERA` min/max). */
+  pitchRange: { readonly min: number; readonly max: number };
+  /** Pitch a reload resets to; stated plainly because nothing is persisted. */
+  defaultPitchDegrees: number;
+  /** Drive the render rig's pitch directly. Never an Organizer intent. */
+  onPitchChange: (degrees: number) => void;
 }
 
 /**
- * Presentational HUD chrome: a tool toolbar, a bag button + panel, and the
- * server connection / notice readouts. It receives only display values, exposes
- * no imperative surface, and cannot reach the canvas, the runtime or the
- * backend; the overlay itself is `pointer-events: none` in CSS so canvas
- * drag/click/wheel still pass through everywhere except the controls.
+ * Presentational HUD chrome: a tool toolbar, a bag button + panel, the in-world
+ * settings button + camera-pitch panel, and the server connection / notice
+ * readouts. It receives display values and one presentation callback
+ * (`onPitchChange`), exposes no other imperative surface, and cannot reach the
+ * canvas, the runtime or the backend; the overlay itself is `pointer-events:
+ * none` in CSS so canvas drag/click/wheel still pass through everywhere except
+ * the controls.
+ *
+ * Pitch persistence: there is NONE. The value lives in the render rig and resets
+ * to the default on reload; the panel says so rather than pretending otherwise.
  */
 export function Hud(props: HudProps) {
-  const { streamStatus, notice } = props;
+  const { streamStatus, notice, pitchDegrees, pitchRange, defaultPitchDegrees, onPitchChange } =
+    props;
   const [selectedToolId, setSelectedToolId] = useState<string | null>(null);
   const [bagOpen, setBagOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const settingsButtonRef = useRef<HTMLButtonElement>(null);
+
+  const closeSettings = (): void => {
+    setSettingsOpen(false);
+    // Return focus to the control that opened the panel so keyboard users do not
+    // lose their place when Escape closes it.
+    settingsButtonRef.current?.focus();
+  };
 
   return (
     <div className="world__hud" role="group" aria-label="World overlay" data-testid="world-hud">
@@ -95,20 +128,99 @@ export function Hud(props: HudProps) {
           })}
         </div>
 
-        <button
-          type="button"
-          className="world__hud-control world__bag-button"
-          aria-label="Bag"
-          aria-expanded={bagOpen}
-          aria-controls="world-bag-panel"
-          data-testid="bag-button"
-          onClick={() => {
-            setBagOpen((open) => !open);
-          }}
-        >
-          <span aria-hidden="true">{'\u{1F392}'}</span>
-          <span className="world__bag-button-label">Bag</span>
-        </button>
+        <div className="world__hud-actions">
+          {/*
+            The settings panel holds ONLY camera-rig presentation controls (the
+            pitch today). It is a real keyboard-reachable form control set: the
+            button is focusable, the slider is a native range input, and Escape
+            closes the panel. It emits no Organizer intent.
+          */}
+          <div
+            className="world__settings"
+            onKeyDown={(event) => {
+              if (event.key === 'Escape' && settingsOpen) {
+                event.stopPropagation();
+                closeSettings();
+              }
+            }}
+          >
+            <button
+              ref={settingsButtonRef}
+              type="button"
+              className="world__hud-control world__settings-button"
+              aria-label="Settings"
+              aria-expanded={settingsOpen}
+              aria-controls="world-settings-panel"
+              data-testid="settings-button"
+              onClick={() => {
+                setSettingsOpen((open) => !open);
+              }}
+            >
+              <span aria-hidden="true">{'\u2699'}</span>
+              <span className="world__settings-button-label">Settings</span>
+            </button>
+
+            {settingsOpen ? (
+              <div
+                id="world-settings-panel"
+                className="world__hud-control world__settings-panel"
+                role="group"
+                aria-label="Camera settings"
+                data-hud-form="settings"
+                data-testid="settings-panel"
+              >
+                <h3 className="world__settings-heading">Settings</h3>
+                <div className="world__settings-field">
+                  <label htmlFor="world-camera-pitch">Camera pitch</label>
+                  <input
+                    id="world-camera-pitch"
+                    className="world__settings-slider"
+                    type="range"
+                    min={pitchRange.min}
+                    max={pitchRange.max}
+                    step={1}
+                    value={pitchDegrees}
+                    aria-valuetext={`${pitchDegrees} degrees`}
+                    data-testid="camera-pitch"
+                    onChange={(event) => {
+                      // Presentation only: this drives the render rig through the
+                      // callback the HUD was handed. It is never a wire field.
+                      onPitchChange(Number(event.target.value));
+                    }}
+                  />
+                  <output
+                    className="world__settings-value"
+                    htmlFor="world-camera-pitch"
+                    data-testid="camera-pitch-value"
+                  >
+                    {pitchDegrees}°
+                  </output>
+                </div>
+                <p className="world__settings-range" data-testid="camera-pitch-range">
+                  Allowed range {pitchRange.min}°–{pitchRange.max}°.
+                </p>
+                <p className="world__settings-note">
+                  Not saved: a reload resets the camera pitch to {defaultPitchDegrees}°.
+                </p>
+              </div>
+            ) : null}
+          </div>
+
+          <button
+            type="button"
+            className="world__hud-control world__bag-button"
+            aria-label="Bag"
+            aria-expanded={bagOpen}
+            aria-controls="world-bag-panel"
+            data-testid="bag-button"
+            onClick={() => {
+              setBagOpen((open) => !open);
+            }}
+          >
+            <span aria-hidden="true">{'\u{1F392}'}</span>
+            <span className="world__bag-button-label">Bag</span>
+          </button>
+        </div>
       </div>
 
       <p

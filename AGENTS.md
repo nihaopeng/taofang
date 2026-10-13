@@ -146,6 +146,10 @@ UI renders and collects intent. It does not know how the backend is called.
 
 UI talks to Organizer through view models, selectors, actions, commands, callbacks, or a similarly explicit client application API.
 
+**UI placement policy (owner decision):** feature UI lives **inside the world window**, as DOM/CSS layered over the WebGL canvas (the in-world HUD overlay), not in panels beside or below the canvas. An affordance may live outside the HUD **only** when it is explicitly debug-only. Consequence for delegation: a new user-facing control is a HUD task, and "add a panel under the canvas" is not an acceptable default.
+
+Camera rig parameters (pitch/yaw/zoom) are **presentation**, not game state: the HUD drives them straight into the render layer's rig API, exactly as drag-orbit and wheel-zoom already do. Gameplay actions (move/interact) still go through the Organizer. A camera setting must never be modelled as a Protocol field.
+
 ### Organizer
 Organizer is the client application layer.
 

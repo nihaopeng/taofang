@@ -289,11 +289,13 @@ false world-space boundary that reads as a tapering trapezoid — 73% of the flo
 
 ### Final rig parameters (Wave D + phase-12 flattened pitch, measured)
 
-- **Camera**: `PerspectiveCamera`, pitch 35 (**fixed**, no adjustable path: `setCameraOrientation` accepts
-  yaw only and the pitch is reported but never set), roll 0, yaw free, orthographic shadow camera unchanged.
-  Phase 12 lowered the locked pitch 58 -> 45, and phase 12b lowered it again 45 -> 35 to lay the camera
-  flatter still (a larger pitch is a HIGHER, more top-down view; 90 = straight down, 0 = level). It is still
-  one named constant in `RENDER_CAMERA`, not a range or an adjustable path.
+- **Camera**: `PerspectiveCamera`, pitch **35 by default and ADJUSTABLE at runtime since phase 13** via
+  `setCameraPitch`, clamped to `[RENDER_CAMERA.minPitchDegrees, maxPitchDegrees] = [25, 75]`; the live value
+  is reported in `inspect().camera.pitchDegrees`. `setCameraOrientation` still accepts **yaw only**, so drag
+  can never tilt the view - the settings control is the sole way to change the pitch (see phase 13).
+  Phase 12 lowered the pitch 58 -> 45, and phase 12b lowered it again 45 -> 35 to lay the camera
+  flatter still (a larger pitch is a HIGHER, more top-down view; 90 = straight down, 0 = level). 35 is now
+  the pinned default/initial value, not a lock.
 - **FOV is a FIXED constant**: 28 degrees at every yaw. Wave C derived the FOV per yaw (20.2854..28.0000)
   to keep the world's projected bounding box inside the frame; a per-yaw FOV is a per-yaw **zoom**, so a
   fixed-size object appeared ~38% larger at axis-aligned yaws than at the diagonals (the reported "map pulls
@@ -373,6 +375,114 @@ measurable effects, all of which the harness already reports:
   re-banded to half the newly measured span whenever the pitch moves.
 
 Never flatten by scaling tiles, changing the FOV per yaw, or adding a per-tile offset.
+
+## Phase 13 frozen design — settable camera pitch in the in-world HUD
+
+Phase 13 makes the camera pitch a real, adjustable presentation parameter and
+pins down where feature UI is allowed to live. Two rules and one rig API
+addition.
+
+### UI placement policy (owner decision)
+
+Feature UI lives **inside the world window**, as DOM/CSS layered over the WebGL
+canvas (the in-world HUD overlay), **not** in panels beside or below the canvas.
+The world canvas and its overlay share one positioned container, so the overlay
+can be positioned relative to the canvas and the camera it frames. An affordance
+may live outside the HUD **only** when it is explicitly debug-only. A new
+user-facing control is therefore a HUD task; "add a panel under the canvas" is
+not an acceptable default. The settings button + camera-pitch panel are the
+first feature controls placed this way.
+
+The HUD is input-transparent except for its own controls: the overlay is
+`pointer-events: none` and only the controls re-enable `pointer-events: auto`,
+so a click on empty HUD area still reaches the canvas underneath. The keyboard
+half of the same isolation is `isHudFormTarget()` in `WorldView.tsx`: a keydown
+whose target is (or is inside) an `input`, `textarea`, `select`, or
+`[data-hud-form]` returns before the movement / Q-E / G handlers run, and before
+`preventDefault`, so a focused range input keeps native arrow-key behaviour and a
+stray letter can never walk the actor, rotate the rig, or toggle the grid.
+
+### Camera rig parameters are presentation, never Protocol
+
+Pitch, yaw and zoom are **presentation parameters of the render rig**. They are
+driven straight from the HUD into the rig API (the same way drag-orbit and
+wheel-zoom already drive yaw/zoom) and are **never** modelled as a Protocol
+field: the server neither knows nor cares where the camera is, and no command
+message may carry a camera/pitch/zoom field. The settings panel calls
+`runtime.setCameraPitch(degrees)` directly through a callback handed down to the
+HUD; it never touches the Organizer or the wire.
+
+### `setCameraPitch(degrees)` — clamp 25..75
+
+`RenderRuntime.setCameraPitch(degrees)` clamps to
+`[RENDER_CAMERA.minPitchDegrees = 25, RENDER_CAMERA.maxPitchDegrees = 75]` and
+re-runs the **same** reframe path as yaw/zoom (`applyCameraTransform()` ->
+`reframe()`), so distance, camera height, `near`/`far`, the backdrop size and the
+frustum all follow the pitch. The default stays 35.
+
+Why this range:
+
+- **Low end 25.** The visible ground distance grows like
+  `1 / tan(pitch - fov/2)`. At `pitch = fov/2 = 14` the top viewport ray is
+  parallel to the ground and meets the horizon (the footprint becomes
+  unbounded); below it the ray points above the horizon. 25 leaves
+  `25 - 14 = 11` degrees below horizontal at the top of the frame, so the
+  footprint stays finite and the composition stays a framed world rather than an
+  edge toward infinity.
+- **High end 75.** 75 is a steep, near top-down view; 90 (straight down) is
+  deliberately excluded.
+
+`setCameraOrientation` remains **yaw-only**: a canvas drag can still never tilt
+the view. The pitch is the single new adjustable path.
+
+### Measured at both clamp ends (phase-13 harness)
+
+Swept over every yaw in 15-degree steps at zoom 0.25 / 1 / 8 for pitches 25, 35
+(default) and 75 (`apps/web/test/three-runtime.test.ts`, phase-13 report). Both
+clamp ends compose: the whole 12x12 world fits the frame at the composition zoom
+(zoom 1) at BOTH ends.
+
+| pitch | composition frame utilisation (zoom 1) | visible near clearance | visible far margin | near/far ratio band | bounds corners behind camera at max zoom 8 |
+| --- | --- | --- | --- | --- | --- |
+| 25 (min) | 0.8462 | 11.85 | 64.15 | 4.00..29.92 | 28 (every yaw) |
+| 35 (default) | 0.8420 | 12.21 | 33.91 | 2.55..22.17 | 20 |
+| 75 (max) | 0.7815 | 15.77 | 14.89 | 1.54..17.09 | 0 |
+
+At every pitch and zoom: FOV is constant 28, and orbit distance, camera height,
+`near` and `far` are constant across yaw to 1e-9. Visible-ground hits are
+strictly inside the single backdrop (< 1 normalised distance), every corner ray
+points below the horizon, and ground hits land inside `near..far`. Terrain
+invariants (scale 1, footprint == cellSize, no inset/crack) hold at every
+pitch/zoom/yaw.
+
+Backdrop (yaw 0, aspect 1) and far plane: pitch 25 -> 99.53 x 219.12, far 112.68
+at zoom 1, and 22.94 x 37.89, far 14.96 at zoom 8; pitch 75 -> 59.30 x 60.97, far
+61.35 at zoom 1, and 17.91 x 18.12, far 8.54 at zoom 8.
+
+### The whole-world-fit assertion is scoped to where it is meaningful
+
+The phase-13 harness asserts "every world-bounds corner is inside the frame and in
+front of the camera (with near/far margins)" only when that is meaningful: every
+corner in front of the camera AND the camera outside the world bounding box. It
+is NOT asserted once the rig has moved inside the world.
+
+This is not a loosened tolerance; it is a corrected domain. At `maxZoom = 8` the
+orbit distance is ~5.1 while the world is 12x12, so the camera is legitimately
+inside the world. Some bounds corners then fall **behind** the camera, and
+projecting a behind-camera point produces a meaningless huge NDC. The harness
+catches that explicitly: when any corner is behind the camera (or the camera is
+inside the world) it asserts that this only happens because the rig moved inside
+the world, i.e. `zoom > 1` — zooming in deliberately trades "the whole world is
+visible" for "the focus is close", so "the whole world fits the frame" is not a
+required property there. At the composition zoom 1 both clamp ends DO fit
+(0.8462 at 25, 0.7815 at 75).
+
+### The pitch is not persisted
+
+The live pitch is React-mirrored in `WorldView` only so the HUD can display it;
+the runtime remains the single source of truth. It is deliberately **not saved**
+anywhere: a reload returns to `RENDER_CAMERA.pitchDegrees = 35`. There is no
+Protocol field, no localStorage, and no Organizer state for it.
 
 ## Phase 8 frozen design — GLB asset pipeline + mouse-first input
 

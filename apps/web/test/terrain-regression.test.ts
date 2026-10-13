@@ -90,43 +90,25 @@ const ORTHO_RATIO_TOLERANCE = 1e-9;
  */
 const PERSPECTIVE_MIN_NEAR_FAR_RATIO = 1.02;
 /**
- * Phase-11 perspective acceptance band around the measured near/far ratio
- * reference.
+ * The perspective acceptance band around the measured near/far ratio reference is
+ * a SMOKE CHECK, not the structural guarantee. The guarantees that actually catch
+ * a regression are asserted exactly elsewhere in this file: at each SELECTED
+ * pitch the camera FOV, near, far, distance and height are CONSTANT across the
+ * whole yaw sweep ({@link ORBIT_CONSTANCE_TOLERANCE} /
+ * {@link PROJECTION_CONSTANCE_TOLERANCE}, 1e-9), a fixed-size focus-plane segment
+ * projects to a yaw-invariant NDC length, the projection self-calibrates against
+ * the runtime's own `pick()`, the near edge is strictly longer than the far edge
+ * at every yaw, and the terrain footprint/boundary/scale errors are all exactly 0.
  *
- * This tolerance is a SMOKE CHECK, not the structural guarantee. The guarantees
- * that actually catch a regression are asserted exactly elsewhere in this file:
- * the camera FOV, near, far, distance and height are CONSTANT across the whole
- * yaw sweep ({@link ORBIT_CONSTANCE_TOLERANCE} / {@link PROJECTION_CONSTANCE_TOLERANCE},
- * 1e-9), a fixed-size focus-plane segment projects to a yaw-invariant NDC length,
- * the projection self-calibrates against the runtime's own `pick()`, the near
- * edge is strictly longer than the far edge at every yaw, and the terrain
- * footprint/boundary/scale errors are all exactly 0. Those pin a constant
- * projection independently of any ratio band.
- *
- * Why the ratio band is this wide (do NOT "tighten" this by mistake):
- * (a) The residual near/far variation is GEOMETRIC and yaw-dependent. With the
- *     camera distance fixed, the compared parallel world edges are
- *     `12 * cos(pitch) = 9.83` apart in depth at the axis-aligned yaws but
- *     `12 * cos(pitch) * cos(45 deg) = 6.95` at the diagonals (pitch 35), so the
- *     axis ratio (1.2736) is inherently larger than the diagonal ratio (1.0916).
- *     Phase 12 flattened the pitch from 58 to 45, then to 35; the axis-aligned
- *     depth spread went from `12 * cos(58) = 6.36` to `8.49` (45) to `9.83` (35),
- *     and the measured band went from 0.0712 (1.0977..1.1689 at pitch 58) to
- *     0.1262 (1.1056..1.2319 at pitch 45) to 0.1821 (1.0916..1.2736 at pitch
- *     35), and those effects are one and the same geometry.
- * (b) The near/far ratio is FOV-INDEPENDENT (both edge lengths scale by the same
- *     `1 / tan(fov/2)` factor), so NO FOV choice could flatten it.
- * (c) The only way to flatten it is a much larger camera distance: ~145 world
- *     units (a ~8 degree FOV) for a +/-0.02 band, which would abandon the
- *     requested 20.3..28 degree composition.
- * (d) Fixing the distance already collapsed Wave B's dolly-driven span from
- *     0.146 (1.0977..1.2434) to 0.0712 (1.0977..1.1689): the diagonal ratio is
- *     unchanged because Wave B already sat at that distance there, while the
- *     axis ratio fell as the camera stopped dollying in to 29.3.
- * The tolerance below is half the measured span (0.1821 / 2 = 0.0910) with
- * margin.
+ * Why the ratio band is width-dependent on pitch (do NOT "tighten" this by
+ * mistake): the residual near/far variation is GEOMETRIC and FOV-independent.
+ * With the camera distance fixed, the compared parallel world edges are
+ * `12 * cos(pitch)` apart in depth at the axis-aligned yaws but
+ * `12 * cos(pitch) * cos(45 deg)` at the diagonals, so the axis ratio is
+ * inherently larger. A flatter camera (lower pitch) widens that spread; the
+ * per-pitch tolerances live in `perspectiveRatioTolerance` in the test body,
+ * re-measured at the phase-13 clamp ends (25 and 75) and the default (35).
  */
-const PERSPECTIVE_RATIO_REFERENCE_TOLERANCE = 0.1;
 /**
  * Wave D orbit/projection assertion: the camera FOV, near, far, distance and
  * height must be CONSTANT across the whole yaw sweep (a pure orbit with no dolly
@@ -666,6 +648,12 @@ interface BaselineRow {
   readonly focusSegmentNdc: number;
   /** Largest `|ndc|` over the world ground corners (frame utilisation, < 1). */
   readonly frameUtilisation: number;
+  /**
+   * How far the visible viewport ground reaches into the backdrop, as the max
+   * ratio of `|ground - backdrop centre| / backdrop half-extent`. `< 1` means the
+   * floor's silhouette edge is off-screen (never visible) at this yaw.
+   */
+  readonly backdropMargin: number;
   readonly yawClass: 'axis' | 'diagonal' | 'other';
   readonly groundError: number;
   readonly roundTripError: number;
@@ -678,22 +666,27 @@ interface BaselineRow {
  * Build the minimal scene and sweep yaw 0..345 in 15° steps, asserting all five
  * rules at every yaw and returning the measured baseline.
  */
-function sweepScene(appearanceAt: AppearancePicker): BaselineRow[] {
+function sweepScene(appearanceAt: AppearancePicker, pitchDegrees: number): BaselineRow[] {
   const runtime = createThreeRuntime({ bounds: BOUNDS, grid: GRID });
   runtime.apply(buildTerrainFrame(appearanceAt));
+  // Select the pitch for this sweep through the phase-13 rig setter. The world is
+  // reframed exactly once here; every yaw below must then leave the projection
+  // constant at THIS pitch.
+  runtime.setCameraPitch(pitchDegrees);
   assertTerrainOnly(runtime);
 
   const rows: BaselineRow[] = [];
   try {
     for (let yaw = 0; yaw < 360; yaw += YAW_STEP_DEGREES) {
       runtime.setCameraOrientation({ yawDegrees: yaw });
-      const camera = runtime.inspect().camera as CameraSnapshot;
+      const inspection = runtime.inspect();
+      const camera = inspection.camera as CameraSnapshot;
       const view = cameraView(camera);
 
-      // The pitch is the single locked composition constant (phase 12: 35
-      // degrees). It is reported exactly and can never be set; a reintroduced
-      // adjustable path or a drifting rig changes this value.
-      expect(camera.pitchDegrees).toBe(RENDER_CAMERA.pitchDegrees);
+      // The pitch is a selected, clamped rig parameter (phase 13). It is
+      // reported exactly and every yaw must leave it constant; a drifting rig or
+      // a yaw trying to tilt the view changes this value.
+      expect(camera.pitchDegrees).toBe(pitchDegrees);
 
       // Rule 1, precondition: the reconstructed projection must be the one the
       // runtime actually picks with.
@@ -724,6 +717,29 @@ function sweepScene(appearanceAt: AppearancePicker): BaselineRow[] {
       // leaves air around it. (`< 1` is the strict-inside guarantee.)
       expect(utilisation).toBeLessThanOrEqual(1 + GEOMETRY_TOLERANCE);
 
+      // The floor's edge is never visible: every visible viewport ground point
+      // lies strictly inside the single backdrop rectangle.
+      let backdropMargin = 0;
+      const backdrop = inspection.backdrop;
+      expect(backdrop).not.toBeNull();
+      if (backdrop !== null && backdrop.sizeX > 0 && backdrop.sizeZ > 0) {
+        for (const ndcX of [-1, 1]) {
+          for (const ndcY of [-1, 1]) {
+            const ground = ndcToGround({ x: ndcX, y: ndcY }, view, GRID.origin.y);
+            expect(ground).not.toBeNull();
+            if (ground === null) {
+              continue;
+            }
+            backdropMargin = Math.max(
+              backdropMargin,
+              Math.abs(ground.x - backdrop.center.x) / (backdrop.sizeX / 2),
+              Math.abs(ground.z - backdrop.center.z) / (backdrop.sizeZ / 2),
+            );
+          }
+        }
+      }
+      expect(backdropMargin).toBeLessThan(1);
+
       // Rules 2-4: geometry is camera-independent, asserted at every yaw anyway.
       const boundaryError = maxBoundaryError(runtime);
       const footprintError = maxFootprintError(runtime);
@@ -746,6 +762,7 @@ function sweepScene(appearanceAt: AppearancePicker): BaselineRow[] {
         far: camera.far ?? 0,
         focusSegmentNdc,
         frameUtilisation: utilisation,
+        backdropMargin,
         yawClass: yawClass(yaw),
         groundError: calibration.maxGroundError,
         roundTripError: calibration.maxRoundTripError,
@@ -781,6 +798,8 @@ interface BaselineSummary {
   /** Max frame utilisation over diagonal yaws (45/135/225/315). */
   readonly diagonalUtilisation: number;
   readonly maxFrameUtilisation: number;
+  /** Max `backdropMargin` over the sweep; must be `< 1` (edge off-screen). */
+  readonly maxBackdropMargin: number;
   readonly maxGroundError: number;
   readonly maxRoundTripError: number;
   readonly maxFootprintError: number;
@@ -832,6 +851,7 @@ function summarize(rows: readonly BaselineRow[]): BaselineSummary {
       (row) => row.yawClass === 'diagonal',
     ),
     maxFrameUtilisation: maxOver(rows, (row) => row.frameUtilisation),
+    maxBackdropMargin: maxOver(rows, (row) => row.backdropMargin),
     maxGroundError: Math.max(...rows.map((row) => row.groundError)),
     maxRoundTripError: Math.max(...rows.map((row) => row.roundTripError)),
     maxFootprintError: Math.max(...rows.map((row) => row.footprintError)),
@@ -856,6 +876,7 @@ function formatRows(label: string, rows: readonly BaselineRow[]): string {
     'far'.padStart(12),
     'seg ndc'.padStart(11),
     'frame util'.padStart(11),
+    'backdrop in'.padStart(12),
     'calib world'.padStart(13),
     'calib ndc'.padStart(12),
     'footprint err'.padStart(15),
@@ -878,6 +899,7 @@ function formatRows(label: string, rows: readonly BaselineRow[]): string {
       row.far.toFixed(9).padStart(12),
       row.focusSegmentNdc.toFixed(12).padStart(11),
       row.frameUtilisation.toFixed(9).padStart(11),
+      row.backdropMargin.toFixed(9).padStart(12),
       row.groundError.toExponential(3).padStart(13),
       row.roundTripError.toExponential(3).padStart(12),
       row.footprintError.toExponential(3).padStart(15),
@@ -889,27 +911,25 @@ function formatRows(label: string, rows: readonly BaselineRow[]): string {
 }
 
 /** The invariant assertions that must hold for a whole sweep, not just a yaw. */
-function assertSummary(label: string, summary: BaselineSummary): void {
+function assertSummary(label: string, summary: BaselineSummary, ratioTolerance: number): void {
   if (summary.kind === 'orthographic') {
     // Rule 1 (orthographic): exactly 1 to 9 decimals at every yaw.
     expect(summary.ratioMin).toBeGreaterThanOrEqual(1 - ORTHO_RATIO_TOLERANCE);
     expect(summary.ratioMax).toBeLessThanOrEqual(1 + ORTHO_RATIO_TOLERANCE);
   } else {
     // Rule 1 (perspective): stably longer at every yaw. The residual near/far
-    // variation is GEOMETRIC and FOV-independent (the compared parallel world
-    // edges are 9.83 apart in depth at the axis yaws but 6.95 at the diagonals,
-    // so the axis ratio is inherently larger). It must therefore sit in a tight,
-    // documented band around its own reference. Separately, the projection is
-    // COMPLETELY constant: FOV, near, far, distance and height do not move while
-    // rotating (Wave D), which is what actually pins "no zoom pumping".
+    // variation is GEOMETRIC and FOV-independent: with the distance fixed, the
+    // compared parallel world edges are `12*cos(pitch)` apart in depth at the
+    // axis yaws but `12*cos(pitch)*cos(45)` at the diagonals, so the axis ratio is
+    // inherently larger. It must therefore sit in a documented band around its
+    // own reference (a SMOKE CHECK; `ratioTolerance` is per selected pitch).
+    // Separately, the projection is COMPLETELY constant: FOV, near, far, distance
+    // and height do not move while rotating at a fixed pitch, which is what
+    // actually pins "no zoom pumping".
     expect(summary.ratioMin).toBeGreaterThanOrEqual(PERSPECTIVE_MIN_NEAR_FAR_RATIO);
     const reference = (summary.ratioMin + summary.ratioMax) / 2;
-    expect(summary.ratioMax - reference).toBeLessThanOrEqual(
-      PERSPECTIVE_RATIO_REFERENCE_TOLERANCE,
-    );
-    expect(reference - summary.ratioMin).toBeLessThanOrEqual(
-      PERSPECTIVE_RATIO_REFERENCE_TOLERANCE,
-    );
+    expect(summary.ratioMax - reference).toBeLessThanOrEqual(ratioTolerance);
+    expect(reference - summary.ratioMin).toBeLessThanOrEqual(ratioTolerance);
     expect(summary.distanceMax - summary.distanceMin).toBeLessThanOrEqual(
       ORBIT_CONSTANCE_TOLERANCE,
     );
@@ -934,8 +954,9 @@ function assertSummary(label: string, summary: BaselineSummary): void {
   }
   // The world's projected ground outline still fits inside the viewport at every
   // yaw (framing margin), even though its utilisation varies as the square world
-  // turns edge-on vs corner-on.
+  // turns edge-on vs corner-on, and the floor's silhouette edge stays off-screen.
   expect(summary.maxFrameUtilisation).toBeLessThanOrEqual(1 + GEOMETRY_TOLERANCE);
+  expect(summary.maxBackdropMargin).toBeLessThan(1);
   expect(summary.axisUtilisation).toBeGreaterThan(0);
   expect(summary.diagonalUtilisation).toBeGreaterThan(0);
   expect(summary.maxGroundError).toBeLessThanOrEqual(CALIBRATION_WORLD_TOLERANCE);
@@ -952,18 +973,62 @@ function assertSummary(label: string, summary: BaselineSummary): void {
 }
 
 describe('Phase-11 minimal terrain regression scene', () => {
-  it('holds rules 1-5 for a uniform grass grid across the yaw sweep', () => {
-    const rows = sweepScene(uniformGrass);
-    const summary = summarize(rows);
-    console.log(`[terrain-regression] uniform grass baseline\n${formatRows('uniform grass', rows)}`);
-    assertSummary('uniform grass', summary);
+  /**
+   * Selected pitches, in degrees: both clamp ends and the default. Phase 13
+   * reversed the "locked pitch" decision, so the old single-pitch sweep becomes
+   * "constant per selected pitch": the projection must be exactly constant while
+   * YAW rotates *at each* of these pitches.
+   */
+  const SELECTED_PITCHES = [
+    RENDER_CAMERA.minPitchDegrees,
+    RENDER_CAMERA.pitchDegrees,
+    RENDER_CAMERA.maxPitchDegrees,
+  ] as const;
+
+  /**
+   * Near/far ratio smoke-check half-band per selected pitch, in the same units
+   * as the ratio.
+   *
+   * This band is a SMOKE CHECK only; the structural guarantees are the exact
+   * constancy assertions in {@link assertSummary}. The band's width is a real
+   * geometric effect: while yaw rotates, the selected parallel near/far edges are
+   * `12*cos(pitch)` apart in depth at the axis-aligned yaws but
+   * `12*cos(pitch)*cos(45)` at the diagonals, and the residual ratio is
+   * FOV-independent. A flatter camera (smaller pitch) widens the band, which is
+   * why the low clamp end gets the widest tolerance. Values are half the measured
+   * span with margin, re-measured at the phase-13 ends.
+   */
+  function perspectiveRatioTolerance(pitchDegrees: number): number {
+    switch (pitchDegrees) {
+      case RENDER_CAMERA.minPitchDegrees:
+        return 0.22;
+      case RENDER_CAMERA.pitchDegrees:
+        return 0.1;
+      case RENDER_CAMERA.maxPitchDegrees:
+        return 0.06;
+      default:
+        return 0.22;
+    }
+  }
+
+  it('holds rules 1-5 for a uniform grass grid at every selected pitch (clamp ends and default)', () => {
+    for (const pitchDegrees of SELECTED_PITCHES) {
+      const rows = sweepScene(uniformGrass, pitchDegrees);
+      const summary = summarize(rows);
+      const label = `uniform grass @ pitch ${pitchDegrees}`;
+      console.log(`[terrain-regression] ${label} baseline\n${formatRows(label, rows)}`);
+      assertSummary(label, summary, perspectiveRatioTolerance(pitchDegrees));
+    }
   });
 
-  it('holds rules 1-5 for a mixed grass/path/water grid across the yaw sweep', () => {
-    const rows = sweepScene(mixedTerrain);
-    const summary = summarize(rows);
-    console.log(`[terrain-regression] mixed terrain baseline\n${formatRows('mixed terrain', rows)}`);
-    assertSummary('mixed terrain', summary);
+  it('holds rules 1-5 for a mixed grass/path/water grid at every selected pitch', () => {
+    for (const pitchDegrees of SELECTED_PITCHES) {
+      const rows = sweepScene(mixedTerrain, pitchDegrees);
+      const summary = summarize(rows);
+      const label = `mixed terrain @ pitch ${pitchDegrees}`;
+      console.log(`[terrain-regression] ${label} baseline\n${formatRows(label, rows)}`);
+      assertSummary(label, summary, perspectiveRatioTolerance(pitchDegrees));
+    }
     // The mixed case really exercised all three terrain appearances and never
     // the decorative `blocked` prop.
     const appearances = new Set(buildTerrainFrame(mixedTerrain).map((command) => command.appearance));

@@ -43,6 +43,7 @@ import {
   DEFAULT_CELL_SIZE,
   KNOWN_APPEARANCES,
   RENDER_CAMERA,
+  backdropHalfExtents,
   createThreeRuntime,
   perspectiveFrustum,
 } from '../src/render/three/runtime.ts';
@@ -602,23 +603,112 @@ describe('three runtime camera rig', () => {
     runtime.dispose();
   });
 
-  it('locks the pitch as a fixed constant with no adjustable path', () => {
+  it('starts at the default pitch, clamps setCameraPitch to the documented range, and keeps yaw pitch-independent', () => {
     const runtime = makeRuntime();
 
-    // Phase 12: the locked pitch is exactly 35 degrees. It is ONE named constant
-    // in RENDER_CAMERA; the flatter value is a deliberate composition decision.
+    // Phase 13 reverses the earlier "pitch is locked" decision: the pitch is now
+    // a settable rig parameter whose DEFAULT is the long-standing composition
+    // constant (35) and whose safe range is clamped. The default and BOTH clamp
+    // bounds are pinned, so a drifting rig or a disabled clamp fails here.
     expect(RENDER_CAMERA.pitchDegrees).toBe(35);
+    expect(RENDER_CAMERA.minPitchDegrees).toBe(25);
+    expect(RENDER_CAMERA.maxPitchDegrees).toBe(75);
+    expect(RENDER_CAMERA.minPitchDegrees).toBeLessThan(RENDER_CAMERA.pitchDegrees);
+    expect(RENDER_CAMERA.pitchDegrees).toBeLessThan(RENDER_CAMERA.maxPitchDegrees);
+    // Justification for the low clamp: the visible ground distance grows like
+    // 1 / tan(pitch - fov/2), so the top viewport ray must stay strictly below
+    // the horizon (with margin) for the footprint to stay finite.
+    expect(RENDER_CAMERA.minPitchDegrees - RENDER_CAMERA.fovDegrees / 2).toBeGreaterThan(0);
 
-    // The default stance reports the fixed pitch through both accessors.
+    // The default stance reports the default through both accessors.
     expect(runtime.getCameraState().pitchDegrees).toBe(RENDER_CAMERA.pitchDegrees);
     expect(runtime.inspect().camera.pitchDegrees).toBe(RENDER_CAMERA.pitchDegrees);
 
-    // A yaw change (the only orientation field that exists) never drifts the
-    // pitch, and there is no runtime way to set it otherwise.
+    // Yaw (the only `setCameraOrientation` field that exists) never drifts pitch.
     runtime.setCameraOrientation({ yawDegrees: 123 });
     expect(runtime.getCameraState().pitchDegrees).toBe(RENDER_CAMERA.pitchDegrees);
     expect(runtime.inspect().camera.pitchDegrees).toBe(RENDER_CAMERA.pitchDegrees);
     expect(runtime.getCameraState().yawDegrees).toBe(123);
+
+    // The setter clamps at BOTH ends and reports the live value.
+    runtime.setCameraPitch(1000);
+    expect(runtime.getCameraState().pitchDegrees).toBe(RENDER_CAMERA.maxPitchDegrees);
+    expect(runtime.inspect().camera.pitchDegrees).toBe(RENDER_CAMERA.maxPitchDegrees);
+    runtime.setCameraPitch(-1000);
+    expect(runtime.getCameraState().pitchDegrees).toBe(RENDER_CAMERA.minPitchDegrees);
+    expect(runtime.inspect().camera.pitchDegrees).toBe(RENDER_CAMERA.minPitchDegrees);
+    // A non-finite value is ignored rather than poisoning the projection.
+    runtime.setCameraPitch(Number.NaN);
+    expect(runtime.getCameraState().pitchDegrees).toBe(RENDER_CAMERA.minPitchDegrees);
+
+    // Pitch and yaw are independent rig axes: setting one never disturbs the other.
+    runtime.setCameraPitch(40);
+    expect(runtime.getCameraState().pitchDegrees).toBe(40);
+    runtime.setCameraOrientation({ yawDegrees: 10 });
+    expect(runtime.getCameraState().pitchDegrees).toBe(40);
+    expect(runtime.getCameraState().yawDegrees).toBe(10);
+
+    runtime.dispose();
+  });
+
+  it('re-derives distance, height, backdrop and near/far through the same reframe path when the pitch changes', () => {
+    const runtime = makeRuntime();
+
+    const sample = (pitchDegrees: number) => {
+      runtime.setCameraPitch(pitchDegrees);
+      const { camera, backdrop } = runtime.inspect();
+      const frustum = perspectiveFrustum({
+        bounds: BOUNDS,
+        aspect: 1,
+        pitchDegrees,
+        yawDegrees: runtime.getCameraState().yawDegrees,
+        zoom: runtime.getCameraState().zoom,
+      });
+      const extents = backdropHalfExtents({
+        bounds: BOUNDS,
+        aspect: 1,
+        pitchDegrees,
+        yawDegrees: runtime.getCameraState().yawDegrees,
+        zoom: runtime.getCameraState().zoom,
+        overshoot: 2,
+      });
+      return { camera, backdrop, frustum, extents };
+    };
+
+    const low = sample(RENDER_CAMERA.minPitchDegrees);
+    const mid = sample(RENDER_CAMERA.pitchDegrees);
+    const high = sample(RENDER_CAMERA.maxPitchDegrees);
+
+    for (const current of [low, mid, high]) {
+      expect(current.camera.fovDegrees).toBe(RENDER_CAMERA.fovDegrees);
+      // Exact agreement with the pure derivation proves the setter re-ran the
+      // SAME reframe path rather than only storing a number.
+      expect(current.camera.near).toBe(current.frustum.near);
+      expect(current.camera.far).toBe(current.frustum.far);
+      const distance = Math.hypot(
+        current.camera.position.x,
+        current.camera.position.y,
+        current.camera.position.z,
+      );
+      expect(distance).toBeCloseTo(current.frustum.distance, 9);
+      expect(current.camera.position.y).toBeCloseTo(
+        current.frustum.distance *
+          Math.sin((current.camera.pitchDegrees * Math.PI) / 180),
+        9,
+      );
+      expect(current.backdrop).not.toBeNull();
+      expect(current.backdrop?.sizeX).toBeCloseTo(current.extents.halfX * 2, 9);
+      expect(current.backdrop?.sizeZ).toBeCloseTo(current.extents.halfZ * 2, 9);
+    }
+
+    // The pitch is a genuine derivation input: the camera height, the backdrop
+    // and the near/far distances all move between the clamp ends.
+    expect(low.camera.position.y).not.toBeCloseTo(mid.camera.position.y, 3);
+    expect(high.camera.position.y).not.toBeCloseTo(mid.camera.position.y, 3);
+    expect(low.backdrop?.sizeZ).not.toBeCloseTo(high.backdrop?.sizeZ ?? 0, 3);
+    // A flatter camera (lower pitch) sees farther along the ground, so its
+    // ground footprint (and therefore backdrop) must be larger.
+    expect(low.extents.halfZ).toBeGreaterThan(high.extents.halfZ);
 
     runtime.dispose();
   });
@@ -1199,7 +1289,7 @@ describe('three runtime rotation stability (phase 11: perspective)', () => {
       // Phase 11 deliberately gives up "the projection is affine". Across the
       // view (vertical NDC), equal NDC steps map to LARGER world steps farther
       // from the camera — real foreshortening, not a restated identity. The step
-      // is kept small (0.1) because at the flatter phase-12 pitch (45) the
+      // is kept small (0.1) because at the flatter phase-12/13 pitch (35) the
       // visible ground reaches much farther, so a larger NDC would project past
       // the world bounds and `pick()` would (correctly) return `null`.
       const first = runtime.pick(0, 0);
@@ -1408,6 +1498,355 @@ describe('three runtime unbounded backdrop and framing margin (phase 11)', () =>
 
     runtime.dispose();
     expect(runtime.inspect().backdrop).toBeNull();
+  });
+});
+
+describe('three runtime pitch clamp composition (phase 13)', () => {
+  const PITCHES = [
+    RENDER_CAMERA.minPitchDegrees,
+    RENDER_CAMERA.pitchDegrees,
+    RENDER_CAMERA.maxPitchDegrees,
+  ] as const;
+  const ZOOMS = [RENDER_CAMERA.minZoom, 1, RENDER_CAMERA.maxZoom] as const;
+  /** The default composition zoom: the rig orbits outside the 12x12 world here. */
+  const COMPOSITION_ZOOM = 1;
+  const YAW_STEP = 15;
+  const COMPOSITION_TOLERANCE = 1e-9;
+
+  function groundCorner(x: number, z: number): Vec3 {
+    return { x, y: BOUNDS.min.y, z };
+  }
+
+  /**
+   * Intersect the NDC ray with the mathematical ground plane.
+   *
+   * Returns the ground point plus the raw ray direction, so callers can assert
+   * the ray points below the horizon and the hit lands inside the near/far band.
+   */
+  function groundFromNdc(
+    camera: RenderInspection['camera'],
+    ndcX: number,
+    ndcY: number,
+  ): { point: Vec3; dir: Vec3 } | null {
+    const right = cameraRight(camera);
+    const tanHalfFov = Math.tan((camera.fovDegrees * Math.PI) / 360);
+    const dir: Vec3 = {
+      x:
+        camera.forward.x +
+        right.x * ndcX * tanHalfFov * camera.aspect +
+        camera.up.x * ndcY * tanHalfFov,
+      y: camera.forward.y + camera.up.y * ndcY * tanHalfFov,
+      z:
+        camera.forward.z +
+        right.z * ndcX * tanHalfFov * camera.aspect +
+        camera.up.z * ndcY * tanHalfFov,
+    };
+    if (Math.abs(dir.y) < 1e-12) {
+      return null;
+    }
+    const t = (BOUNDS.min.y - camera.position.y) / dir.y;
+    const point: Vec3 = {
+      x: camera.position.x + dir.x * t,
+      y: camera.position.y + dir.y * t,
+      z: camera.position.z + dir.z * t,
+    };
+    return { point, dir };
+  }
+
+  /**
+   * Whether the camera origin sits inside the world's bounding box. At the
+   * composition zoom the rig orbits well outside the world; zooming in past it
+   * drives the camera INTO the world, which is the only way the whole world can
+   * legitimately fail to fit the frame.
+   */
+  function cameraInsideWorld(camera: RenderInspection['camera']): boolean {
+    const position = camera.position;
+    return (
+      position.x >= BOUNDS.min.x &&
+      position.x <= BOUNDS.max.x &&
+      position.y >= BOUNDS.min.y &&
+      position.y <= BOUNDS.max.y &&
+      position.z >= BOUNDS.min.z &&
+      position.z <= BOUNDS.max.z
+    );
+  }
+
+  it('keeps the world framed, the floor edge hidden and every node unclipped at both clamp ends across yaw and zoom', () => {
+    const runtime = makeRuntime();
+    // A tall prop and an actor at opposite corners, plus a terrain plate, so
+    // "nothing is clipped" covers props/actors as well as the ground.
+    runtime.apply([
+      createCommand('entity:tree' as NodeId, 'object', appearanceTree, { x: 5, y: 0, z: 5 }),
+      createCommand('entity:actor' as NodeId, 'object', appearanceCharacter, { x: -5, y: 0, z: -5 }),
+      createCommand('tile:0,0' as NodeId, 'base', appearanceGrass, { x: -5.5, y: 0, z: -5.5 }),
+    ]);
+
+    const report: unknown[] = [];
+    try {
+      for (const pitchDegrees of PITCHES) {
+        const perZoom: unknown[] = [];
+        // The frame-utilisation guarantee is only meaningful at the composition
+        // zoom, where the rig orbits outside the world, so report it per pitch.
+        let compositionFrameUtilisation = 0;
+        let cornersBehindAtMaxZoom = 0;
+        let anyCornerBehindAtMaxZoom = false;
+        let minVisibleNearClearance = Number.POSITIVE_INFINITY;
+        let minVisibleFarMargin = Number.POSITIVE_INFINITY;
+        let minGroundNearClearance = Number.POSITIVE_INFINITY;
+        let minGroundFarMargin = Number.POSITIVE_INFINITY;
+        let maxGroundInsideBackdrop = 0;
+        const farNearRatios: number[] = [];
+
+        for (const zoom of ZOOMS) {
+          let maxFrameUtilisation = 0;
+          let maxNodeNdc = 0;
+          let worldFitsRequired = true;
+          let anyCornerBehindHere = false;
+          let cornersBehindCount = 0;
+          let cameraInsideWorldHere = false;
+          let backdropAtZoom: { sizeX: number; sizeZ: number } | null = null;
+          let nearAtZoom = 0;
+          let farAtZoom = 0;
+
+          // Per-(pitch, zoom) projection constants. These must not drift as the
+          // view yaws: the rig is a constant-radius orbit with a fixed FOV.
+          let orbitDistanceMin = Number.POSITIVE_INFINITY;
+          let orbitDistanceMax = 0;
+          let cameraHeightMin = Number.POSITIVE_INFINITY;
+          let cameraHeightMax = 0;
+          let nearMin = Number.POSITIVE_INFINITY;
+          let nearMax = 0;
+          let farMin = Number.POSITIVE_INFINITY;
+          let farMax = 0;
+
+          for (let yaw = 0; yaw < 360; yaw += YAW_STEP) {
+            runtime.setCameraPitch(pitchDegrees);
+            runtime.setZoom(zoom);
+            runtime.setCameraOrientation({ yawDegrees: yaw });
+            const inspection = runtime.inspect();
+            const camera = inspection.camera;
+            expect(camera.pitchDegrees).toBe(pitchDegrees);
+            expect(camera.fovDegrees).toBe(RENDER_CAMERA.fovDegrees);
+            nearAtZoom = camera.near;
+            farAtZoom = camera.far;
+
+            const focus = camera.focus;
+            const orbitDistance = Math.hypot(
+              camera.position.x - focus.x,
+              camera.position.y - focus.y,
+              camera.position.z - focus.z,
+            );
+            const cameraHeight = camera.position.y - focus.y;
+            orbitDistanceMin = Math.min(orbitDistanceMin, orbitDistance);
+            orbitDistanceMax = Math.max(orbitDistanceMax, orbitDistance);
+            cameraHeightMin = Math.min(cameraHeightMin, cameraHeight);
+            cameraHeightMax = Math.max(cameraHeightMax, cameraHeight);
+            nearMin = Math.min(nearMin, camera.near);
+            nearMax = Math.max(nearMax, camera.near);
+            farMin = Math.min(farMin, camera.far);
+            farMax = Math.max(farMax, camera.far);
+
+            const cameraInside = cameraInsideWorld(camera);
+            cameraInsideWorldHere = cameraInsideWorldHere || cameraInside;
+
+            // (a) WORLD-BOUNDS corners. Projecting a point BEHIND the camera
+            //     yields a meaningless huge NDC, and once the camera is INSIDE
+            //     the 12x12 world the corners legitimately leave the frame. The
+            //     whole-world "fits the frame and the clip planes" guarantee is
+            //     therefore asserted only where it is meaningful: every corner in
+            //     front of the camera AND the camera outside the world.
+            //
+            //     zooming in deliberately pushes the world out of frame, so
+            //     "the whole world fits the frame" is NOT a required property
+            //     there; when it fails, the only truthful cause is that the rig
+            //     moved inside the world, which requires zoom > composition.
+            const cornerMetrics = [
+              groundCorner(BOUNDS.min.x, BOUNDS.min.z),
+              groundCorner(BOUNDS.max.x, BOUNDS.min.z),
+              groundCorner(BOUNDS.min.x, BOUNDS.max.z),
+              groundCorner(BOUNDS.max.x, BOUNDS.max.z),
+            ].map((corner) => {
+              const depth = dot(subtract(corner, camera.position), camera.forward);
+              const ndc = projectToNdc(corner, camera);
+              return { depth, ndc };
+            });
+            const allCornersInFront = cornerMetrics.every(
+              (metric) => metric.depth - camera.near > 0,
+            );
+            const cornersBehind = cornerMetrics.filter((metric) => metric.depth <= 0).length;
+            cornersBehindCount += cornersBehind;
+            anyCornerBehindHere = anyCornerBehindHere || cornersBehind > 0;
+
+            const wholeWorldMustFit = allCornersInFront && !cameraInside;
+            if (wholeWorldMustFit) {
+              for (const metric of cornerMetrics) {
+                maxFrameUtilisation = Math.max(
+                  maxFrameUtilisation,
+                  Math.abs(metric.ndc.x),
+                  Math.abs(metric.ndc.y),
+                );
+                minVisibleNearClearance = Math.min(
+                  minVisibleNearClearance,
+                  metric.depth - camera.near,
+                );
+                minVisibleFarMargin = Math.min(minVisibleFarMargin, camera.far - metric.depth);
+              }
+            } else {
+              // The whole world can only fall outside the frame because the rig
+              // moved INSIDE the world, i.e. because we deliberately zoomed in
+              // past the composition zoom. Assert that structural reason rather
+              // than tolerating an arbitrary miss.
+              expect(zoom).toBeGreaterThan(COMPOSITION_ZOOM);
+            }
+            worldFitsRequired = worldFitsRequired && wholeWorldMustFit;
+
+            if (zoom === COMPOSITION_ZOOM) {
+              for (const metric of cornerMetrics) {
+                compositionFrameUtilisation = Math.max(
+                  compositionFrameUtilisation,
+                  Math.abs(metric.ndc.x),
+                  Math.abs(metric.ndc.y),
+                );
+              }
+            }
+
+            // (b) The floor's edge is never visible: every viewport ground point
+            //     lies strictly inside the single backdrop, the ray points below
+            //     the horizon, and the hit lands inside the near/far clip band.
+            const backdrop = inspection.backdrop;
+            expect(backdrop).not.toBeNull();
+            if (backdrop !== null) {
+              for (const ndcX of [-1, 1]) {
+                for (const ndcY of [-1, 1]) {
+                  const ground = groundFromNdc(camera, ndcX, ndcY);
+                  expect(ground).not.toBeNull();
+                  if (ground === null) {
+                    continue;
+                  }
+                  expect(ground.dir.y).toBeLessThan(0);
+                  // The near plane is derived from the euclidean camera-to-hit
+                  // distance (see `perspectiveFrustum`), so measure the ground
+                  // hit the same way the rig does.
+                  const groundDistance = Math.hypot(
+                    ground.point.x - camera.position.x,
+                    ground.point.y - camera.position.y,
+                    ground.point.z - camera.position.z,
+                  );
+                  minGroundNearClearance = Math.min(
+                    minGroundNearClearance,
+                    groundDistance - camera.near,
+                  );
+                  minGroundFarMargin = Math.min(minGroundFarMargin, camera.far - groundDistance);
+                  maxGroundInsideBackdrop = Math.max(
+                    maxGroundInsideBackdrop,
+                    Math.abs(ground.point.x - backdrop.center.x) / (backdrop.sizeX / 2),
+                    Math.abs(ground.point.z - backdrop.center.z) / (backdrop.sizeZ / 2),
+                  );
+                }
+              }
+              if (yaw === 0) {
+                backdropAtZoom = { sizeX: backdrop.sizeX, sizeZ: backdrop.sizeZ };
+              }
+            }
+
+            // (c) Nodes. While the whole world must fit, every footprint corner
+            //     and visual top stays inside the frame and the clip planes. The
+            //     terrain invariants (scale 1, footprint == cellSize, no inset)
+            //     hold at EVERY pitch/zoom/yaw, independent of the camera domain.
+            for (const node of inspection.nodes) {
+              expect(node.scale.x).toBe(1);
+              expect(node.scale.y).toBe(1);
+              expect(node.scale.z).toBe(1);
+              if (node.layer === 'base') {
+                // Exactly one grid cell with no inset, so neighbouring plates
+                // share edges and no crack opens between them.
+                expect(node.footprintX).toBeCloseTo(DEFAULT_CELL_SIZE, 9);
+                expect(node.footprintZ).toBeCloseTo(DEFAULT_CELL_SIZE, 9);
+              }
+              if (!wholeWorldMustFit) {
+                continue;
+              }
+              for (const signX of [-1, 1]) {
+                for (const signZ of [-1, 1]) {
+                  const point: Vec3 = {
+                    x: node.world.x + (signX * node.footprintX) / 2,
+                    y: node.world.y + node.visualTopY,
+                    z: node.world.z + (signZ * node.footprintZ) / 2,
+                  };
+                  const ndc = projectToNdc(point, camera);
+                  maxNodeNdc = Math.max(maxNodeNdc, Math.abs(ndc.x), Math.abs(ndc.y));
+                  const depth = dot(subtract(point, camera.position), camera.forward);
+                  minVisibleNearClearance = Math.min(minVisibleNearClearance, depth - camera.near);
+                  minVisibleFarMargin = Math.min(minVisibleFarMargin, camera.far - depth);
+                }
+              }
+            }
+          }
+
+          // --- per-(pitch, zoom) structural assertions ------------------------
+          // The rig geometry (orbit distance, height, near, far) is yaw-constant.
+          expect(orbitDistanceMax - orbitDistanceMin).toBeLessThanOrEqual(COMPOSITION_TOLERANCE);
+          expect(cameraHeightMax - cameraHeightMin).toBeLessThanOrEqual(COMPOSITION_TOLERANCE);
+          expect(nearMax - nearMin).toBeLessThanOrEqual(COMPOSITION_TOLERANCE);
+          expect(farMax - farMin).toBeLessThanOrEqual(COMPOSITION_TOLERANCE);
+
+          if (worldFitsRequired) {
+            expect(maxFrameUtilisation).toBeLessThanOrEqual(1 + COMPOSITION_TOLERANCE);
+            expect(maxNodeNdc).toBeLessThanOrEqual(1 + COMPOSITION_TOLERANCE);
+          } else {
+            // The world left the frame only because the camera is inside it.
+            expect(cameraInsideWorldHere || anyCornerBehindHere).toBe(true);
+            expect(zoom).toBeGreaterThan(COMPOSITION_ZOOM);
+          }
+          expect(backdropAtZoom).not.toBeNull();
+
+          if (zoom === RENDER_CAMERA.maxZoom) {
+            cornersBehindAtMaxZoom = cornersBehindCount;
+            anyCornerBehindAtMaxZoom = anyCornerBehindHere;
+          }
+          farNearRatios.push(farAtZoom / nearAtZoom);
+          perZoom.push({
+            zoom,
+            near: nearAtZoom,
+            far: farAtZoom,
+            farNearRatio: farAtZoom / nearAtZoom,
+            backdropAtYaw0: backdropAtZoom,
+            cameraInsideWorld: cameraInsideWorldHere,
+            cornersBehindAtZoom: cornersBehindCount,
+            frameUtilisationMax: maxFrameUtilisation,
+            frameRequired: worldFitsRequired,
+          });
+        }
+
+        // Visible-ground and node clipping are checked across every yaw/zoom.
+        expect(minGroundNearClearance).toBeGreaterThan(0);
+        expect(minGroundFarMargin).toBeGreaterThan(0);
+        expect(minVisibleNearClearance).toBeGreaterThan(0);
+        expect(minVisibleFarMargin).toBeGreaterThan(0);
+        // Strictly inside, so the backdrop silhouette stays off-screen.
+        expect(maxGroundInsideBackdrop).toBeLessThan(1);
+
+        report.push({
+          pitchDegrees,
+          compositionFrameUtilisation,
+          nearFarRatioBand: {
+            min: Math.min(...farNearRatios),
+            max: Math.max(...farNearRatios),
+          },
+          minVisibleNearClearance,
+          minVisibleFarMargin,
+          minGroundNearClearance,
+          minGroundFarMargin,
+          maxGroundInsideBackdrop,
+          cornersBehindAtMaxZoom,
+          anyCornerBehindAtMaxZoom,
+          perZoom,
+        });
+      }
+    } finally {
+      runtime.dispose();
+    }
+    console.log(`[pitch-clamp] composition report:\n${JSON.stringify(report, null, 2)}`);
   });
 });
 

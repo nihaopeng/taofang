@@ -32,6 +32,18 @@ import { App } from '../src/ui/App.tsx';
 // page-shell startup path, not rendering, so the WebGL runtime is replaced with
 // a no-op and the world fetch is stubbed to keep the test hermetic.
 vi.mock('../src/render/three/runtime.ts', () => ({
+  RENDER_CAMERA: {
+    pitchDegrees: 35,
+    minPitchDegrees: 25,
+    maxPitchDegrees: 75,
+    fovDegrees: 28,
+    minNear: 0.5,
+    nearClearance: 1,
+    verticalHeadroom: 1,
+    framingMargin: 1.2,
+    minZoom: 0.25,
+    maxZoom: 8,
+  },
   createThreeRuntime: () => ({
     mount: () => {},
     apply: () => {},
@@ -44,6 +56,7 @@ vi.mock('../src/render/three/runtime.ts', () => ({
       focus: { x: 0, y: 0, z: 0 },
     }),
     setCameraOrientation: () => {},
+    setCameraPitch: () => {},
     setZoom: () => {},
     setGridOverlayVisible: () => {},
     setHighlightedCell: () => {},
