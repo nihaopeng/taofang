@@ -149,7 +149,7 @@ const SERVER_TIME = '2025-01-02T03:04:05.000Z';
 const ARBITRARY_PROTOCOL_VERSION = 1;
 
 const BOUNDS = { min: { x: -6, y: 0, z: -6 }, max: { x: 6, y: 8, z: 6 } };
-const GRID = { origin: { x: -5, y: 0, z: -5 }, width: 10, depth: 10, cellSize: 1 };
+const BLOCK_GRID = { origin: { x: -5, y: 0, z: -5 }, cellSize: 1 };
 
 const VALID_ENTITY = {
   entityId: 'entity-a',
@@ -165,27 +165,10 @@ const VALID_ENTITY = {
 const VALID_SNAPSHOT = {
   worldId: 'world-1',
   bounds: BOUNDS,
-  grid: GRID,
-  tiles: [
-    { cell: { x: 0, z: 0 }, terrain: 'grass' },
-    { cell: { x: 3, z: 4 }, terrain: 'path' },
-  ],
-  surfaces: [
-    {
-      surfaceId: 'surface-1',
-      kind: 'ground',
-      center: { x: 0, y: 0, z: 0 },
-      axisU: { x: 1, y: 0, z: 0 },
-      axisV: { x: 0, y: 0, z: -1 },
-      walkable: true,
-    },
-  ],
-  colliders: [
-    {
-      colliderId: 'collider-1',
-      kind: 'wall',
-      shape: { kind: 'aabb', min: { x: 0, y: 0, z: 0 }, max: { x: 1, y: 2, z: 1 } },
-    },
+  blockGrid: BLOCK_GRID,
+  blocks: [
+    { coord: { x: 0, y: 0, z: 0 }, kind: 'grass', orientation: 0 },
+    { coord: { x: 3, y: 0, z: 4 }, kind: 'path', orientation: 0 },
   ],
   entities: [VALID_ENTITY],
   controlledActorId: 'actor-1',
@@ -201,6 +184,17 @@ const VALID_GAME_INFO_RESPONSE = {
     protocolVersion: ARBITRARY_PROTOCOL_VERSION,
     serverTime: SERVER_TIME,
   },
+  blockKinds: [{ kind: 'grass', orientable: false }],
+  entityKinds: [
+    {
+      kind: 'character',
+      footprintX: 1,
+      footprintZ: 1,
+      height: 1.7,
+      allowedYawSteps: [0, 90, 180, 270],
+      pivot: 'center',
+    },
+  ],
 };
 
 /** Minimal `Response` stand-in: the organizer only reads `ok`, `status`, `json`. */

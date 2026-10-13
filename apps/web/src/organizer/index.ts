@@ -8,7 +8,8 @@
  * module and nothing below it.
  */
 
-export type { ConnectionStatus, GameInfoViewModel } from './view-model';
+export type { GameInfoViewModel } from './view-model';
+export type { ConnectionStatus } from './view-model';
 export type { GameInfoState } from './game-info-store';
 
 export {
@@ -20,16 +21,18 @@ export {
 
 export { useGameInfo } from './use-game-info';
 
-// World / tile / entity / movement-intent / realtime-stream feature.
+// World / block-grid / entity / command / realtime-stream feature.
 export type {
-  AabbColliderShapeViewModel,
+  BlockGridViewModel,
+  BlockKindInfoViewModel,
+  BlockViewModel,
   BoundsViewModel,
-  ColliderShapeViewModel,
-  ColliderViewModel,
+  CellCoordViewModel,
+  EntityKindInfoViewModel,
   EntityViewModel,
-  GridViewModel,
-  SurfaceViewModel,
-  TileViewModel,
+  PlacementValidationViewModel,
+  QuatViewModel,
+  TransformViewModel,
   Vec3ViewModel,
 } from './world-view-model';
 export type { StreamStatus, WorldState, WorldStatus } from './world-store';
@@ -37,11 +40,18 @@ export type { StreamStatus, WorldState, WorldStatus } from './world-store';
 export {
   getWorldState,
   interact,
+  jump,
   loadWorld,
   moveTo,
+  placeEntity,
+  removeBlock,
+  removeEntity,
   resetWorldState,
+  rotateEntity,
+  setBlock,
   setMovementIntent,
   subscribeWorld,
+  validatePlacement,
 } from './world-store';
 
 export { useWorld } from './use-world';

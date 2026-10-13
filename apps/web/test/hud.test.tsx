@@ -50,15 +50,13 @@ import { WorldView } from '../src/ui/WorldView.tsx';
 const SERVER_TIME = '2025-01-02T03:04:05.000Z';
 
 const BOUNDS = { min: { x: -6, y: 0, z: -6 }, max: { x: 6, y: 8, z: 6 } };
-const GRID = { origin: { x: -5, y: 0, z: -5 }, width: 10, depth: 10, cellSize: 1 };
+const BLOCK_GRID = { origin: { x: -5, y: 0, z: -5 }, cellSize: 1 };
 
 const VALID_SNAPSHOT = {
   worldId: 'world-1',
   bounds: BOUNDS,
-  grid: GRID,
-  tiles: [{ cell: { x: 0, z: 0 }, terrain: 'grass' }],
-  surfaces: [],
-  colliders: [],
+  blockGrid: BLOCK_GRID,
+  blocks: [{ coord: { x: 0, y: 0, z: 0 }, kind: 'grass', orientation: 0 }],
   entities: [
     {
       entityId: 'entity-a',

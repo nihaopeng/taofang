@@ -24,7 +24,7 @@ describe('protocol constants', () => {
     expect(STREAM_PATH).toBe('/api/stream');
   });
 
-  it('exposes the phase-14 protocol version (world-geometry layer break)', () => {
-    expect(PROTOCOL_VERSION).toBe(8);
+  it('exposes the phase-15 protocol version (block-spatial kernel break)', () => {
+    expect(PROTOCOL_VERSION).toBe(9);
   });
 });

@@ -29,7 +29,23 @@ const VALID_GAME_INFO = {
   serverTime: '2025-01-02T03:04:05.000Z',
 };
 
-const VALID_RESPONSE = { gameInfo: VALID_GAME_INFO };
+const VALID_RESPONSE = {
+  gameInfo: VALID_GAME_INFO,
+  blockKinds: [
+    { kind: 'grass', orientable: false },
+    { kind: 'stone', orientable: true },
+  ],
+  entityKinds: [
+    {
+      kind: 'tree',
+      footprintX: 1,
+      footprintZ: 1,
+      height: 2,
+      allowedYawSteps: [0],
+      pivot: 'center',
+    },
+  ],
+};
 
 /** Minimal `Response` stand-in: the organizer only reads `ok`, `status`, `json`. */
 function fakeResponse(body: unknown, init: { ok?: boolean; status?: number } = {}): Response {

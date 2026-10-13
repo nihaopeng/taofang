@@ -59,24 +59,31 @@ import { createRenderBridge } from '../src/render/bridge.ts';
 import type { WorldState } from '../src/organizer/index.ts';
 
 // ---------------------------------------------------------------------------
-// Scene definition: a 12x12 terrain grid whose tiles exactly fill the bounds.
+// Scene definition: a 12x12 block ground layer whose tops fill the bounds at
+// y = 0. Blocks are the world geometry now (the phase-14 terrain plates and
+// surfaces are gone), and each block node root sits at its cell CENTRE, so the
+// ground layer lives in cell row y = -1 (centre -0.5) to put its top at y = 0.
 // ---------------------------------------------------------------------------
 
 /** 12x12 cells of 1 unit, spanning world [-6, 6] on both axes. */
-const GRID: RuntimeGridSpec = {
+type FullGridSpec = RuntimeGridSpec & { width: number; depth: number };
+const GRID: FullGridSpec = {
   origin: { x: -6, y: 0, z: -6 },
   width: 12,
   depth: 12,
   cellSize: 1,
 };
 
+/** The integer cell row whose full-cube top face is the ground plane (y = 0). */
+const GROUND_CELL_Y = -1;
+
 /** World AABB the rig frames; its XZ footprint is exactly the grid's. */
 const BOUNDS = { min: { x: -6, y: 0, z: -6 }, max: { x: 6, y: 8, z: 6 } } as const;
 
-const GRASS = 'appearance.terrain.grass' as AppearanceId;
-const PATH = 'appearance.terrain.path' as AppearanceId;
-const WATER = 'appearance.terrain.water' as AppearanceId;
-const BLOCKED = 'appearance.terrain.blocked' as AppearanceId;
+const GRASS = 'appearance.block.grass' as AppearanceId;
+const PATH = 'appearance.block.path' as AppearanceId;
+const WATER = 'appearance.block.water' as AppearanceId;
+const SOIL = 'appearance.block.soil' as AppearanceId;
 
 const UNIT_SCALE: Vec3 = { x: 1, y: 1, z: 1 };
 const IDENTITY = { x: 0, y: 0, z: 0, w: 1 } as const;
@@ -140,9 +147,9 @@ type AppearancePicker = (cellX: number, cellZ: number) => AppearanceId;
 const uniformGrass: AppearancePicker = () => GRASS;
 
 /**
- * Deterministic grass/path/water mix. `blocked` is deliberately absent: it is
- * differentiated by a decorative rock resting on the plate, not by terrain
- * geometry, so it is a prop, not part of this minimal terrain scene.
+ * Deterministic grass/path/water mix. `soil` is deliberately absent: it is a
+ * different full cube, so a mixed case that includes it would not add a
+ * footprint/shape dimension this harness measures.
  */
 const mixedTerrain: AppearancePicker = (cellX, cellZ) => {
   if (cellX === 3 && cellZ === 3) {
@@ -154,27 +161,32 @@ const mixedTerrain: AppearancePicker = (cellX, cellZ) => {
   return GRASS;
 };
 
+/** The world-space centre of the ground-layer cell `(cellX, cellZ)`. */
 function cellCentre(cellX: number, cellZ: number): Vec3 {
   return {
     x: GRID.origin.x + (cellX + 0.5) * GRID.cellSize,
-    y: GRID.origin.y,
+    y: GRID.origin.y + (GROUND_CELL_Y + 0.5) * GRID.cellSize,
     z: GRID.origin.z + (cellZ + 0.5) * GRID.cellSize,
   };
 }
 
-function tileId(cellX: number, cellZ: number): NodeId {
-  return `tile:${cellX},${cellZ}` as NodeId;
+function blockId(cellX: number, cellZ: number): NodeId {
+  return `block:${cellX},${GROUND_CELL_Y},${cellZ}` as NodeId;
 }
 
-/** One base-layer terrain tile per cell, rooted at that cell's exact centre. */
+/**
+ * One object-layer block node per ground cell, rooted at that cell's exact
+ * centre. Every block is a full cube, so its measured footprint is exactly
+ * `cellSize` and its top face is the ground plane.
+ */
 function buildTerrainFrame(appearanceAt: AppearancePicker): NodeCreateCommand[] {
   const frame: NodeCreateCommand[] = [];
   for (let cellZ = 0; cellZ < GRID.depth; cellZ += 1) {
     for (let cellX = 0; cellX < GRID.width; cellX += 1) {
       frame.push({
         type: 'node.create',
-        layer: 'base',
-        nodeId: tileId(cellX, cellZ),
+        layer: 'object',
+        nodeId: blockId(cellX, cellZ),
         appearance: appearanceAt(cellX, cellZ),
         transform: { position: cellCentre(cellX, cellZ), rotation: { ...IDENTITY }, scale: { ...UNIT_SCALE } },
         visible: true,
@@ -362,18 +374,23 @@ interface Calibration {
 
 /**
  * Validate the reconstruction against the runtime's own `pick()`:
- *  - inverse-project each NDC point and compare it with `pick()`'s ground point;
- *  - re-project `pick()`'s ground point and compare it with the input NDC.
+ *  - inverse-project each NDC point and compare it with `pick()`'s hit point;
+ *  - re-project that hit point and compare it with the input NDC.
  * Both errors must be tiny, which is what lets the near/far measurement below be
  * trusted rather than being a restatement of itself.
+ *
+ * The visible ground is now the BLOCK ground layer (object-layer full cubes
+ * whose tops sit exactly on the ground plane at `y = 0`), so `pick()` returns a
+ * `node` hit on a block top rather than a `ground` hit. Both carry a world-space
+ * `point`; the reconstruction is measured against that point at the ground plane.
  */
 function calibrate(runtime: RenderRuntime, view: CameraView, groundY: number): Calibration {
   let maxGroundError = 0;
   let maxRoundTripError = 0;
   for (const ndc of CALIBRATION_NDC) {
     const picked = runtime.pick(ndc.x, ndc.y);
-    expect(picked?.kind).toBe('ground');
-    if (picked?.kind !== 'ground') {
+    expect(picked).not.toBeNull();
+    if (picked === null) {
       continue;
     }
     const reconstructed = ndcToGround(ndc, view, groundY);
@@ -486,9 +503,9 @@ function maxBoundaryError(runtime: RenderRuntime): number {
   let error = 0;
   const step = GRID.cellSize;
   const requireTile = (cellX: number, cellZ: number): NodeGeometry => {
-    const tile = byId.get(tileId(cellX, cellZ));
+    const tile = byId.get(blockId(cellX, cellZ));
     if (tile === undefined) {
-      throw new Error(`terrain tile ${cellX},${cellZ} is missing`);
+      throw new Error(`ground block ${cellX},${cellZ} is missing`);
     }
     return tile;
   };
@@ -527,18 +544,17 @@ function maxFootprintError(runtime: RenderRuntime): number {
 }
 
 /**
- * Rule 2/3 restricted to the plaster (base-layer) tiles.
+ * Rule 2/3 restricted to the BLOCK nodes (the ground layer in this harness).
  *
- * The 3D scene also contains object-layer surface nodes, whose unit prefab is
- * deliberately scaled to the patch and must NOT be held to the terrain
- * `footprint == cellSize` / `scale == 1` invariants. Tile nodes are the only
- * `base`-layer nodes in this harness.
+ * A scene with an actor also contains a non-block entity node, whose prefab is
+ * not held to the `footprint == cellSize` / `scale == 1` block invariants; only
+ * `block:`-namespaced nodes are.
  */
 function maxTileFootprintError(runtime: RenderRuntime): number {
   const step = GRID.cellSize;
   let error = 0;
   for (const node of runtime.inspect().nodes) {
-    if (node.layer !== 'base') {
+    if (!String(node.nodeId).startsWith('block:')) {
       continue;
     }
     error = Math.max(error, Math.abs(node.footprintX - step), Math.abs(node.footprintZ - step));
@@ -546,11 +562,11 @@ function maxTileFootprintError(runtime: RenderRuntime): number {
   return error;
 }
 
-/** Rule 4 restricted to the base-layer terrain tiles (surfaces are scaled). */
+/** Rule 4 restricted to the BLOCK nodes. */
 function maxTileScaleError(runtime: RenderRuntime): number {
   let error = 0;
   for (const node of runtime.inspect().nodes) {
-    if (node.layer !== 'base') {
+    if (!String(node.nodeId).startsWith('block:')) {
       continue;
     }
     error = Math.max(
@@ -578,28 +594,28 @@ function maxScaleError(runtime: RenderRuntime): number {
   return error;
 }
 
-/** Rule 5: the scene contains terrain and nothing else, and the overlay is off. */
+/** Rule 5: the scene contains block ground and nothing else, and the overlay is off. */
 function assertTerrainOnly(runtime: RenderRuntime): void {
   const inspection: RenderInspection = runtime.inspect();
   expect(inspection.nodes).toHaveLength(GRID.width * GRID.depth);
   const allowed = new Set<string>([GRASS, PATH, WATER]);
   for (const node of inspection.nodes) {
-    expect(node.layer).toBe('base');
+    expect(node.layer).toBe('object');
     expect(node.group).toBe('Terrain');
+    expect(String(node.nodeId).startsWith('block:')).toBe(true);
     expect(allowed.has(node.appearance)).toBe(true);
-    expect(node.appearance).not.toBe(BLOCKED);
+    expect(node.appearance).not.toBe(SOIL);
   }
-  expect(inspection.nodes.some((node) => node.layer === 'object')).toBe(false);
   expect(
     inspection.nodes.some(
       (node) => node.group === 'Actors' || node.group === 'WorldObjects' || node.group === 'Effects',
     ),
   ).toBe(false);
   for (const bucket of inspection.buckets) {
-    expect(bucket.key.startsWith('base:appearance.terrain.')).toBe(true);
+    expect(bucket.key.startsWith('object:appearance.block.')).toBe(true);
   }
-  // GridOverlay is a presentation layer built from the grid spec; here it must be
-  // hidden with no highlighted cell, i.e. contributing no scene content.
+  // GridOverlay is a presentation layer built from the block grid; here it must
+  // be hidden with no highlighted cell, i.e. contributing no scene content.
   expect(inspection.gridOverlay.visible).toBe(false);
   expect(inspection.gridOverlay.highlightedCell).toBeNull();
 }
@@ -1022,83 +1038,89 @@ function assertSummary(label: string, summary: BaselineSummary, ratioTolerance: 
 }
 
 // ---------------------------------------------------------------------------
-// Real 3D geometry scene (phase 14): platform + ramp + actor on the platform
+// ---------------------------------------------------------------------------
+// Block-spatial scene: ground + raised blocks at several heights + ramp/stairs.
 // ---------------------------------------------------------------------------
 
-/**
- * The Manager's demo platform, in real 3D world space. A raised flat deck whose
- * top is at `y = 2`, `3 x 1` in full extent, authored as a rectangle so the
- * standard render transform is exact.
- */
-const DEMO_PLATFORM: WorldState['surfaces'][number] = {
-  surfaceId: 'surface-platform',
-  kind: 'platform',
-  center: { x: 3.5, y: 2, z: -4.5 },
-  axisU: { x: 1.5, y: 0, z: 0 },
-  axisV: { x: 0, y: 0, z: -0.5 },
-  walkable: true,
-};
+/** Ground-layer block kinds, deterministic. */
+function groundKindAt(cellX: number, cellZ: number): string {
+  return (cellX + cellZ) % 3 === 0 ? 'path' : 'grass';
+}
 
 /**
- * The Manager's demo ramp: the same rectangular shape TILTED, so `axisV` gains a
- * real `y` component. `|axisV| = 2` and the rise is `2 * axisV.y = 2`, giving the
- * documented 30-degree inclination (`atan(2 / 3.464...)`).
+ * A deterministic raised structure: a 2x2 stone platform at cell row y = 1
+ * (top at y = 2), a stair and a ramp sitting on the ground next to it, and a
+ * slab. This exercises blocks at several heights AND the directional kinds in
+ * one scene, so the camera derivation is measured against real block geometry
+ * rather than a flat plane.
  */
-const DEMO_RAMP: WorldState['surfaces'][number] = {
-  surfaceId: 'surface-ramp',
-  kind: 'ramp',
-  center: { x: 3.5, y: 1, z: -2.267949192431123 },
-  axisU: { x: 1.5, y: 0, z: 0 },
-  axisV: { x: 0, y: 1, z: -1.7320508075688772 },
-  walkable: true,
-};
+interface RaisedBlock {
+  x: number;
+  y: number;
+  z: number;
+  kind: string;
+  orientation: number;
+}
 
-/** The controlled actor standing ON the platform (`position.y = 2` is real state). */
+const RAISED_BLOCKS: readonly RaisedBlock[] = [
+  // 2x2 stone platform, top at y = 2.
+  { x: 3, y: 1, z: 2, kind: 'stone', orientation: 0 },
+  { x: 4, y: 1, z: 2, kind: 'stone', orientation: 0 },
+  { x: 3, y: 1, z: 3, kind: 'stone', orientation: 0 },
+  { x: 4, y: 1, z: 3, kind: 'stone', orientation: 0 },
+  // A stair and a ramp sitting on the ground layer next to the platform.
+  { x: 2, y: 0, z: 3, kind: 'stairs', orientation: 90 },
+  { x: 5, y: 0, z: 3, kind: 'ramp', orientation: 270 },
+  { x: 2, y: 0, z: 2, kind: 'slab', orientation: 0 },
+];
+
+/** The controlled actor standing on top of the raised platform (top y = 2). */
 const DEMO_ACTOR: WorldState['entities'][number] = {
   entityId: 'entity-actor',
   actorId: 'actor-1',
   kind: 'character',
-  position: { x: 3.5, y: 2, z: -4.5 },
+  position: { x: -2, y: 2, z: -2.5 },
   rotation: { x: 0, y: 0, z: 0, w: 1 },
   visible: true,
 };
 
-/**
- * A realistic v8 world: a full grid of `tiles` (gameplay metadata), the matching
- * one-ground-surface-per-cell geometry (which the bridge must NOT render -- tiles
- * already do), the raised platform + ramp, and the actor on the platform.
- */
-function buildWorldState3d(): WorldState {
-  const tiles: WorldState['tiles'][number][] = [];
-  const groundSurfaces: WorldState['surfaces'][number][] = [];
+/** The world-space centre of an arbitrary block cell. */
+function blockCentre(x: number, y: number, z: number): Vec3 {
+  return {
+    x: GRID.origin.x + (x + 0.5) * GRID.cellSize,
+    y: GRID.origin.y + (y + 0.5) * GRID.cellSize,
+    z: GRID.origin.z + (z + 0.5) * GRID.cellSize,
+  };
+}
+
+/** A realistic v9 block world: full ground layer + raised blocks + an actor. */
+function buildBlockWorldState(): WorldState {
+  const blocks: WorldState['blocks'][number][] = [];
   for (let cellZ = 0; cellZ < GRID.depth; cellZ += 1) {
     for (let cellX = 0; cellX < GRID.width; cellX += 1) {
-      const position = cellCentre(cellX, cellZ);
-      tiles.push({
-        cellX,
-        cellZ,
-        position,
-        terrain: (cellX + cellZ) % 3 === 0 ? 'path' : 'grass',
-      });
-      groundSurfaces.push({
-        surfaceId: `surface-ground-${cellX}-${cellZ}`,
-        kind: 'ground',
-        center: { ...position },
-        axisU: { x: GRID.cellSize / 2, y: 0, z: 0 },
-        axisV: { x: 0, y: 0, z: -GRID.cellSize / 2 },
-        walkable: true,
+      blocks.push({
+        coord: { x: cellX, y: GROUND_CELL_Y, z: cellZ },
+        position: blockCentre(cellX, GROUND_CELL_Y, cellZ),
+        kind: groundKindAt(cellX, cellZ),
+        orientation: 0,
       });
     }
+  }
+  for (const block of RAISED_BLOCKS) {
+    blocks.push({
+      coord: { x: block.x, y: block.y, z: block.z },
+      position: blockCentre(block.x, block.y, block.z),
+      kind: block.kind,
+      orientation: block.orientation,
+    });
   }
   return {
     status: 'ready',
     streamStatus: 'live',
-    worldId: 'world-3d',
+    worldId: 'world-blocks',
     bounds: BOUNDS,
-    grid: GRID,
-    tiles,
-    surfaces: [...groundSurfaces, DEMO_PLATFORM, DEMO_RAMP],
-    colliders: [],
+    blockGrid: { origin: { ...GRID.origin }, cellSize: GRID.cellSize },
+    blocks,
     entities: [DEMO_ACTOR],
     controlledActorId: 'actor-1',
     error: null,
@@ -1106,16 +1128,28 @@ function buildWorldState3d(): WorldState {
   };
 }
 
-/** The four real corners of a planar patch: `center ± axisU ± axisV`. */
-function patchCorners3d(surface: WorldState['surfaces'][number]): Vec3[] {
+/**
+ * The VISIBLE silhouette points of one block: its top face always, and (for a
+ * block raised above the ground layer) its exposed side/bottom corners too.
+ *
+ * A ground-layer block's bottom and outward sides are occluded by the ground
+ * layer itself and by the camera being inside the world, so including them would
+ * measure hidden geometry that the framing contract does not cover.
+ */
+function blockVisibleCorners(x: number, y: number, z: number): Vec3[] {
+  const half = GRID.cellSize / 2;
+  const centre = blockCentre(x, y, z);
   const corners: Vec3[] = [];
-  for (const su of [-1, 1]) {
-    for (const sv of [-1, 1]) {
-      corners.push({
-        x: surface.center.x + su * surface.axisU.x + sv * surface.axisV.x,
-        y: surface.center.y + su * surface.axisU.y + sv * surface.axisV.y,
-        z: surface.center.z + su * surface.axisU.z + sv * surface.axisV.z,
-      });
+  const yLevels = y > GROUND_CELL_Y ? [-half, half] : [half];
+  for (const sy of yLevels) {
+    for (const sx of [-1, 1]) {
+      for (const sz of [-1, 1]) {
+        corners.push({
+          x: centre.x + sx * half,
+          y: centre.y + sy,
+          z: centre.z + sz * half,
+        });
+      }
     }
   }
   return corners;
@@ -1123,21 +1157,14 @@ function patchCorners3d(surface: WorldState['surfaces'][number]): Vec3[] {
 
 /**
  * Every point the camera must keep in frame / inside the near-far range: the
- * world's ground corners, every tile centre, the raised platform + ramp patch
- * corners, and the actor from its feet to a conservative `1.7`-unit body top.
- *
- * This is deliberately the FULL, conservative set: the flat-plane assumption
- * being re-verified is that a `y = 0`-based footprint/far derivation also covers
- * the real raised geometry.
+ * world's ground corners, every block cell's AABB corners, and the actor from
+ * feet to a conservative `1.7`-unit body top.
  */
-function buildScene3dPoints(): Vec3[] {
+function buildBlockScenePoints(state: WorldState): Vec3[] {
   const points: Vec3[] = [...worldGroundCorners()];
-  for (let cellZ = 0; cellZ < GRID.depth; cellZ += 1) {
-    for (let cellX = 0; cellX < GRID.width; cellX += 1) {
-      points.push(cellCentre(cellX, cellZ));
-    }
+  for (const block of state.blocks) {
+    points.push(...blockVisibleCorners(block.coord.x, block.coord.y, block.coord.z));
   }
-  points.push(...patchCorners3d(DEMO_PLATFORM), ...patchCorners3d(DEMO_RAMP));
   points.push({ ...DEMO_ACTOR.position });
   points.push({
     x: DEMO_ACTOR.position.x,
@@ -1148,31 +1175,31 @@ function buildScene3dPoints(): Vec3[] {
 }
 
 /**
- * Sweep yaw with the REAL 3D geometry present and assert the camera derivation
- * still holds. The near/far/framing assertions here are the new part: the
- * terrain-only sweep uses `y = 0` analytic ground, this one uses the actual
- * raised platform/ramp/actor points the world snapshot carries.
+ * Sweep yaw with the block-spatial world and assert the camera derivation still
+ * holds. The near/far/framing assertions here are the new part: the terrain-only
+ * sweep uses the `y = 0` analytic ground, this one uses the actual block cells at
+ * several heights and the actor on top of the raised platform.
  */
-function sweepScene3d(pitchDegrees: number): BaselineRow[] {
+function sweepSceneBlocks(pitchDegrees: number): BaselineRow[] {
   const runtime = createThreeRuntime({ bounds: BOUNDS, grid: GRID });
   const bridge = createRenderBridge();
-  runtime.apply(bridge.frameFor(buildWorldState3d()));
+  const state = buildBlockWorldState();
+  runtime.apply(bridge.frameFor(state));
   runtime.setCameraPitch(pitchDegrees);
 
-  // Preconditions: the raised geometry is really present, the ground surfaces
-  // produced NO node (no double-draw), and the actor is on the platform at y=2.
+  // Preconditions: the ground layer really produced one node per cell, the
+  // raised structure is present, and the actor sits on the platform at y = 2.
   const startNodes = runtime.inspect().nodes;
-  expect(startNodes.some((node) => node.appearance === 'appearance.surface.platform')).toBe(true);
-  expect(startNodes.some((node) => node.appearance === 'appearance.surface.ramp')).toBe(true);
-  expect(
-    startNodes.some((node) => String(node.nodeId).startsWith('surface:surface-ground')),
-  ).toBe(false);
-  expect(startNodes.filter((node) => node.layer === 'base')).toHaveLength(GRID.width * GRID.depth);
+  expect(startNodes.filter((node) => String(node.nodeId).startsWith('block:'))).toHaveLength(
+    GRID.width * GRID.depth + RAISED_BLOCKS.length,
+  );
+  expect(startNodes.some((node) => node.appearance === 'appearance.block.ramp')).toBe(true);
+  expect(startNodes.some((node) => node.appearance === 'appearance.block.stairs')).toBe(true);
   const actor = startNodes.find((node) => String(node.nodeId).startsWith('entity:'));
   expect(actor).toBeDefined();
   expect(actor?.world.y).toBeCloseTo(2, 9);
 
-  const scenePoints = buildScene3dPoints();
+  const scenePoints = buildBlockScenePoints(state);
   const rows: BaselineRow[] = [];
   try {
     for (let yaw = 0; yaw < 360; yaw += YAW_STEP_DEGREES) {
@@ -1183,15 +1210,14 @@ function sweepScene3d(pitchDegrees: number): BaselineRow[] {
       expect(camera.pitchDegrees).toBe(pitchDegrees);
 
       // Calibrate the reconstructed projection against the runtime's own
-      // `pick()`. A ray that lands on a raised surface node (or misses) is
-      // skipped; at least one ground hit must remain, or the projection is
-      // unverified and the whole measurement is untrustworthy.
+      // `pick()`. Only hits on the GROUND plane are used (a raised block or the
+      // actor is skipped), and at least one must remain.
       let groundCalibrations = 0;
       let maxGroundError = 0;
       let maxRoundTripError = 0;
       for (const ndc of CALIBRATION_NDC) {
         const picked = runtime.pick(ndc.x, ndc.y);
-        if (picked === null || picked.kind !== 'ground') {
+        if (picked === null || Math.abs(picked.point.y - GRID.origin.y) > 1e-6) {
           continue;
         }
         const reconstructed = ndcToGround(ndc, view, GRID.origin.y);
@@ -1211,23 +1237,31 @@ function sweepScene3d(pitchDegrees: number): BaselineRow[] {
       expect(maxGroundError).toBeLessThanOrEqual(CALIBRATION_WORLD_TOLERANCE);
       expect(maxRoundTripError).toBeLessThanOrEqual(CALIBRATION_NDC_TOLERANCE);
 
-      // near/far/framing over the REAL scene points. The flat-plane assumption
-      // predicts every raised point is in front, inside the frame, and between
-      // near and far; any counterexample fails here with its measurement.
+      // near/far/framing over the REAL block scene points. The flat-plane
+      // assumption predicts every block point is in front, inside the frame, and
+      // between near and far; any counterexample fails here with its measurement.
       let sceneMaxNdc = 0;
       let sceneMinDepth = Number.POSITIVE_INFINITY;
       let sceneMaxDepth = 0;
+      let sceneMaxPoint: Vec3 = { x: 0, y: 0, z: 0 };
       for (const point of scenePoints) {
         const depth = viewDepth(point, view);
         expect(depth).toBeGreaterThan(0);
         sceneMinDepth = Math.min(sceneMinDepth, depth);
         sceneMaxDepth = Math.max(sceneMaxDepth, depth);
         const ndc = projectToNdc(point, view);
-        sceneMaxNdc = Math.max(sceneMaxNdc, Math.abs(ndc.x), Math.abs(ndc.y));
+        const magnitude = Math.max(Math.abs(ndc.x), Math.abs(ndc.y));
+        if (magnitude > sceneMaxNdc) {
+          sceneMaxNdc = magnitude;
+          sceneMaxPoint = point;
+        }
       }
       const near = camera.near ?? 0;
       const far = camera.far ?? Number.POSITIVE_INFINITY;
-      expect(sceneMaxNdc).toBeLessThanOrEqual(1 + GEOMETRY_TOLERANCE);
+      expect(
+        sceneMaxNdc,
+        `yaw ${yaw} max point ${JSON.stringify(sceneMaxPoint)}`,
+      ).toBeLessThanOrEqual(1 + GEOMETRY_TOLERANCE);
       expect(sceneMinDepth).toBeGreaterThanOrEqual(near);
       expect(sceneMaxDepth).toBeLessThanOrEqual(far);
 
@@ -1242,7 +1276,7 @@ function sweepScene3d(pitchDegrees: number): BaselineRow[] {
       const utilisation = frameUtilisation(view);
       expect(utilisation).toBeLessThanOrEqual(1 + GEOMETRY_TOLERANCE);
 
-      // Every visible viewport ground hit must stay strictly inside the single
+      // Every visible viewport ground point must stay strictly inside the single
       // backdrop (the floor edge is never visible).
       let backdropMargin = 0;
       const backdrop = inspection.backdrop;
@@ -1265,7 +1299,7 @@ function sweepScene3d(pitchDegrees: number): BaselineRow[] {
       }
       expect(backdropMargin).toBeLessThan(1);
 
-      // The base tile invariants stay exact even with surfaces in the scene.
+      // The block invariants stay exact even with raised geometry in the scene.
       const boundaryError = maxBoundaryError(runtime);
       const footprintError = maxTileFootprintError(runtime);
       const scaleError = maxTileScaleError(runtime);
@@ -1364,18 +1398,18 @@ describe('Phase-11 minimal terrain regression scene', () => {
       console.log(`[terrain-regression] ${label} baseline\n${formatRows(label, rows)}`);
       assertSummary(label, summary, perspectiveRatioTolerance(pitchDegrees));
     }
-    // The mixed case really exercised all three terrain appearances and never
-    // the decorative `blocked` prop.
+    // The mixed case really exercised all three block appearances and never
+    // the unused `soil` kind.
     const appearances = new Set(buildTerrainFrame(mixedTerrain).map((command) => command.appearance));
     expect(appearances).toEqual(new Set([GRASS, PATH, WATER]));
-    expect(appearances.has(BLOCKED)).toBe(false);
+    expect(appearances.has(SOIL)).toBe(false);
   });
 
-  it('holds the same camera derivation with the real 3D geometry present (platform + ramp + actor on the platform)', () => {
+  it('holds the same camera derivation with BLOCK terrain at different heights (platform + stairs + ramp + actor on the platform)', () => {
     for (const pitchDegrees of SELECTED_PITCHES) {
-      const rows = sweepScene3d(pitchDegrees);
+      const rows = sweepSceneBlocks(pitchDegrees);
       const summary = summarize(rows);
-      const label = `real 3D geometry @ pitch ${pitchDegrees}`;
+      const label = `block terrain @ pitch ${pitchDegrees}`;
       const maxSceneNdc = maxOver(rows, (row) => row.sceneMaxNdc ?? 0);
       const minSceneDepth = Math.min(...rows.map((row) => row.sceneMinDepth ?? Number.NaN));
       const maxSceneDepth = maxOver(rows, (row) => row.sceneMaxDepth ?? 0);

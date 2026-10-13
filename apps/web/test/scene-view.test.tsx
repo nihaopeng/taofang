@@ -37,7 +37,7 @@ import type { SceneViewOptions } from '../src/ui/SceneView.tsx';
 const SERVER_TIME = '2025-01-02T03:04:05.000Z';
 
 const BOUNDS = { min: { x: -6, y: 0, z: -6 }, max: { x: 6, y: 8, z: 6 } };
-const GRID = { origin: { x: -5, y: 0, z: -5 }, width: 10, depth: 10, cellSize: 1 };
+const BLOCK_GRID = { origin: { x: -5, y: 0, z: -5 }, cellSize: 1 };
 
 const ENTITY_A = {
   entityId: 'entity-a',
@@ -50,18 +50,16 @@ const ENTITY_A = {
   visible: true,
 };
 
-const TILES = [
-  { cell: { x: 0, z: 0 }, terrain: 'grass' },
-  { cell: { x: 1, z: 0 }, terrain: 'path' },
+const BLOCKS = [
+  { coord: { x: 0, y: 0, z: 0 }, kind: 'grass', orientation: 0 },
+  { coord: { x: 1, y: 0, z: 0 }, kind: 'path', orientation: 0 },
 ];
 
 const VALID_SNAPSHOT = {
   worldId: 'world-1',
   bounds: BOUNDS,
-  grid: GRID,
-  tiles: TILES,
-  surfaces: [],
-  colliders: [],
+  blockGrid: BLOCK_GRID,
+  blocks: BLOCKS,
   entities: [ENTITY_A],
   controlledActorId: 'actor-1',
   serverTime: SERVER_TIME,
@@ -264,12 +262,15 @@ function creates(
     );
 }
 
-/** A `node.create` for the given layer, or `undefined`. */
+/** A `node.create` for the given layer (and node id when supplied), or `undefined`. */
 function createForLayer(
   recorder: RecordingRuntime,
   layer: 'base' | 'object',
+  nodeId?: string,
 ): Extract<RenderFrame[number], { type: 'node.create' }> | undefined {
-  return creates(recorder).find((command) => command.layer === layer);
+  return creates(recorder).find(
+    (command) => command.layer === layer && (nodeId === undefined || command.nodeId === nodeId),
+  );
 }
 
 /** Stateful fetch: the snapshot for GET, a move ack for POST. */
@@ -335,7 +336,7 @@ afterEach(() => {
 });
 
 describe('SceneView wiring', () => {
-  it('mounts the runtime and pushes base-layer tile creates plus an object-layer actor node', async () => {
+  it('mounts the runtime and pushes block creates plus an entity create', async () => {
     const recorder = createRecordingRuntime();
     installWorldFetch();
     await act(async () => {
@@ -350,17 +351,17 @@ describe('SceneView wiring', () => {
     });
     expect(recorder.mountCalls).toBe(1);
 
-    // Tiles arrive as base-layer nodes at their derived world positions with
-    // terrain-derived appearances; the actor arrives with its authoritative 3D
+    // Blocks arrive as object-layer nodes at their derived world positions with
+    // block-derived appearances; the actor arrives with its authoritative 3D
     // transform.
-    const base = createForLayer(recorder, 'base');
-    expect(base).toMatchObject({
-      nodeId: 'tile:0,0',
-      layer: 'base',
-      appearance: 'appearance.terrain.grass',
-      transform: expect.objectContaining({ position: { x: -4.5, y: 0, z: -4.5 } }),
+    const block = createForLayer(recorder, 'object', 'block:0,0,0');
+    expect(block).toMatchObject({
+      nodeId: 'block:0,0,0',
+      layer: 'object',
+      appearance: 'appearance.block.grass',
+      transform: expect.objectContaining({ position: { x: -4.5, y: 0.5, z: -4.5 } }),
     });
-    expect(createForLayer(recorder, 'object')).toMatchObject({
+    expect(createForLayer(recorder, 'object', 'entity:entity-a')).toMatchObject({
       nodeId: 'entity:entity-a',
       layer: 'object',
       appearance: 'appearance.character',
@@ -389,7 +390,7 @@ describe('SceneView wiring', () => {
     await waitFor(() => {
       expect(recorder.mountCalls).toBe(1);
     });
-    expect(recorder.options).toEqual({ bounds: BOUNDS, grid: GRID });
+    expect(recorder.options).toEqual({ bounds: BOUNDS, blockGrid: BLOCK_GRID });
   });
 
   it('pushes transform.setTarget after the controlled actor moves', async () => {
@@ -496,7 +497,7 @@ describe('SceneView wiring', () => {
       expect(set.runtimes).toHaveLength(1);
     });
     const first = set.runtimes[0];
-    expect(first.options).toEqual({ bounds: BOUNDS, grid: GRID });
+    expect(first.options).toEqual({ bounds: BOUNDS, blockGrid: BLOCK_GRID });
     // The new world is pushed through the bridge into the first runtime.
     expect(first.frames.some((frame) => frameHasType(frame, 'node.create'))).toBe(true);
     expect(first.disposeCalls).toBe(0);
@@ -524,7 +525,7 @@ describe('SceneView wiring', () => {
     expect(first.disposeCalls).toBe(1);
 
     const second = set.runtimes[1];
-    expect(second.options).toEqual({ bounds: smallerBounds, grid: GRID });
+    expect(second.options).toEqual({ bounds: smallerBounds, blockGrid: BLOCK_GRID });
     expect(second.mountCalls).toBe(1);
     // The scene is not left doubled: the live runtime is the second one, and the
     // swap reset the bridge and re-pushed the new world (fresh `node.create`).
@@ -609,14 +610,14 @@ describe('SceneView mouse-first interaction', () => {
     expect(recorder.pickCalls).toHaveLength(1);
   });
 
-  it('maps a walkable surface click to a world-space moveTo at the clicked point (phase 14)', async () => {
+  it('maps a non-entity (block) node click to a world-space moveTo at the clicked point', async () => {
     const recorder = createRecordingRuntime();
-    // A real surface node id from the bridge's `surface:<surfaceId>` namespace.
-    // `pick()` reports the ray intersection point, exactly as it does for a
-    // ground hit, so the UI can move the actor onto the raised geometry.
+    // A real block node id from the bridge's `block:<cellX>,<cellY>,<cellZ>`
+    // namespace. `pick()` reports the ray intersection point, exactly as it does
+    // for a ground hit, so the UI can move the actor onto a block.
     recorder.pickResult = {
       kind: 'node',
-      nodeId: 'surface:surface-platform' as never,
+      nodeId: 'block:0,1,0' as never,
       point: { x: 0.5, y: 1.25, z: -0.75 },
     };
     const requests: CapturedRequest[] = [];
@@ -628,7 +629,7 @@ describe('SceneView mouse-first interaction', () => {
     await waitFor(() => {
       expect(requests).toHaveLength(1);
     });
-    // The bridge's entity mapping returns null for a `surface:` node, so the UI
+    // The bridge's entity mapping returns null for a `block:` node, so the UI
     // must NOT invent an interact intent. It instead emits the same move intent
     // a flat-ground click produces, carrying only the world-space point so the
     // authoritative Manager decides where the actor can actually go.

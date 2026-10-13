@@ -1,8 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
-import { isGameInfo, isHealthStatus, PROTOCOL_VERSION } from '@starvalley/protocol';
+import { isGameInfo, isHealthStatus, PROTOCOL_VERSION, isBlockKindInfo, isEntityKindInfo } from '@starvalley/protocol';
 
-import { createGameInfoManager, SERVER_VERSION } from '../src/index.ts';
+import {
+  BLOCK_DEFINITIONS,
+  ENTITY_DEFINITIONS,
+  createGameInfoManager,
+  SERVER_VERSION,
+} from '../src/index.ts';
 
 const START = new Date('2025-01-02T03:04:05.000Z');
 
@@ -19,6 +24,47 @@ function fakeClock(start: Date) {
     },
   };
 }
+
+describe('static presentation catalogues', () => {
+  it('exposes a valid block catalogue for every kind with no collision fields', () => {
+    const manager = createGameInfoManager();
+    const blockKinds = manager.getBlockKinds();
+    expect(blockKinds.length).toBe(9);
+    for (const entry of blockKinds) {
+      expect(isBlockKindInfo(entry)).toBe(true);
+      expect(Object.keys(entry).sort()).toEqual(['kind', 'orientable']);
+    }
+    expect(blockKinds.find((entry) => entry.kind === 'stairs')?.orientable).toBe(true);
+  });
+
+  it('exposes a valid entity catalogue with placement geometry only', () => {
+    const manager = createGameInfoManager();
+    const entityKinds = manager.getEntityKinds();
+    for (const entry of entityKinds) {
+      expect(isEntityKindInfo(entry)).toBe(true);
+    }
+    const building = entityKinds.find((entry) => entry.kind === 'building');
+    expect(building).toMatchObject({ footprintX: 2, footprintZ: 2, pivot: 'center' });
+  });
+
+  it('returns fresh catalogue copies', () => {
+    const manager = createGameInfoManager();
+    const original = manager.getBlockKinds()[0].orientable;
+    const first = manager.getBlockKinds();
+    first[0].orientable = !original;
+    expect(manager.getBlockKinds()[0].orientable).toBe(original);
+  });
+
+  it('is a bijection with the authoritative registries', () => {
+    const manager = createGameInfoManager();
+    expect(new Set(manager.getBlockKinds().map((entry) => entry.kind))).toEqual(
+      new Set(Object.keys(BLOCK_DEFINITIONS)),
+    );
+    expect(new Set(manager.getEntityKinds().map((entry) => entry.kind))).toEqual(
+      new Set(Object.keys(ENTITY_DEFINITIONS)),
+    );
+  });
+});
 
 describe('SERVER_VERSION', () => {
   it('is the phase-1 server build version', () => {

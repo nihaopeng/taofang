@@ -1,37 +1,38 @@
 /**
  * UI-facing view models for the world feature.
  *
- * Deliberately narrower than the Protocol `WorldSnapshot`: the UI never sees wire
+ * Deliberately narrower than the Protocol payloads: the UI never sees wire
  * fields it does not render (e.g. `serverTime`), and it never depends on Protocol
  * types directly. All coordinates are plain view-model objects so the UI can
  * render them without importing `@starvalley/math` or `@starvalley/protocol`.
  *
- * Phase 7 makes the world a real continuous 3D world. A `TileState` holds a
- * `CellCoord` and **no position**; a tile's world-space centre is *derived* from
- * the `GridSpec` with the frozen rule:
+ * Phase 15 replaces the phase-14 gameplay grid (`GridSpec`/`TileState`) and the
+ * world-geometry layer (`surfaces`/`colliders`) with the **block-spatial kernel**:
+ * a `BlockGrid` (`origin` + `cellSize`) and a **sparse** list of absolute integer
+ * `BlockState`s. A block view model carries its derived **world-space centre**,
+ * computed with the same frozen, `cellSize`-configurable rule the server uses:
  *
  * ```text
- * x = grid.origin.x + (cell.x + 0.5) * grid.cellSize
- * z = grid.origin.z + (cell.z + 0.5) * grid.cellSize
- * y = grid.origin.y
+ * cellCentre.a = origin.a + (cell.a + 0.5) * cellSize    for a in { x, y, z }
  * ```
  *
  * Deriving that centre is a *world fact* (where the cell is), not a gameplay
- * rule, so it lives here rather than being recomputed by every renderer.
+ * rule, so it lives here rather than being recomputed by every renderer. The
+ * derivation delegates to the canonical Protocol helper {@link cellCentre} so the
+ * client and server can never disagree on where a cell is.
  *
- * Terrain stays an **opaque string** at this boundary: mapping a terrain kind to
- * an appearance is the UI/bridge's job, and whether a terrain is walkable is an
- * authoritative Manager rule. The Organizer deliberately encodes neither, so no
- * gameplay or collision rule can leak into client state.
+ * `block.kind` and `entity.kind` stay **opaque strings** at this boundary:
+ * mapping a kind to an appearance is the UI/bridge's job, and whether a
+ * placement is legal is an authoritative Manager rule. The Organizer deliberately
+ * encodes neither, so no gameplay or collision rule can leak into client state.
  *
- * Phase 14 adds the **world-geometry** layer (`surfaces`/`colliders`) as plain
- * view models. `walkable` is passed through as *data*: the Organizer applies no
- * slope/support/traversal rule, selects no support patch and performs no
- * collision test. Deciding what `walkable` means is the Manager's (or the
- * renderer's) business, never this layer's.
+ * The `entityKinds` catalogue is **declarative geometry only** (footprint, height,
+ * allowed yaw steps, pivot) so the client can draw a pending placement ghost
+ * without a second source of truth. It carries no appearance and no legality
+ * rule; `validatePlacement` returns the server's verdict as plain data.
  *
- * Order is normalised deterministically — entities by `entityId`, tiles by
- * `cellZ` then `cellX`, surfaces by `surfaceId`, colliders by `colliderId` — so
+ * Order is normalised deterministically — blocks by layer (`y`), then row (`z`),
+ * then column (`x`); entities by `entityId`; catalogue entries by `kind` — so
  * each array is a stable function of the server state rather than of wire
  * iteration order.
  */
@@ -39,13 +40,13 @@
 import { cellCentre } from '@starvalley/protocol';
 import type { Vec3 } from '@starvalley/math';
 import type {
+  BlockGrid,
+  BlockKindInfo,
+  BlockState,
   CellCoord,
-  ColliderShape,
-  ColliderState,
+  EntityKindInfo,
   EntityState,
-  GridSpec,
-  SurfaceState,
-  TileState,
+  ValidatePlacementResponse,
   WorldBounds,
 } from '@starvalley/protocol';
 
@@ -56,69 +57,57 @@ export interface Vec3ViewModel {
   z: number;
 }
 
+/** Plain 3D rotation (quaternion) for the UI. */
+export interface QuatViewModel {
+  x: number;
+  y: number;
+  z: number;
+  w: number;
+}
+
+/** A continuous world transform (position + rotation) as plain data. */
+export interface TransformViewModel {
+  position: Vec3ViewModel;
+  rotation: QuatViewModel;
+}
+
 /** World AABB for the UI. */
 export interface BoundsViewModel {
   min: Vec3ViewModel;
   max: Vec3ViewModel;
 }
 
-/** Gameplay grid configuration for the UI (origin, extent, cell size). */
-export interface GridViewModel {
+/**
+ * The block grid's pure configuration for the UI: an `origin` corner and a
+ * `cellSize` in world units. It is deliberately NOT the removed `GridSpec` (no
+ * `width`/`depth`): a sparse block world has no fixed extent, only addressing.
+ */
+export interface BlockGridViewModel {
   origin: Vec3ViewModel;
-  width: number;
-  depth: number;
   cellSize: number;
 }
 
+/** An integer cell address in the block grid (all three axes). Plain data. */
+export interface CellCoordViewModel {
+  x: number;
+  y: number;
+  z: number;
+}
+
 /**
- * Presentation-ready static terrain cell.
+ * Presentation-ready block: an absolute integer cell, its derived world-space
+ * centre, an opaque kind, and its yaw-step orientation.
  *
- * `cellX`/`cellZ` are the integer cell indices; `position` is the *derived*
- * world-space centre of the cell. `terrain` stays an opaque string.
+ * `position` is the *derived* centre of the cell, so the render bridge can place
+ * the block without importing the Protocol derivation helper (the bridge may not
+ * import `@starvalley/protocol`). `kind` stays an opaque string and
+ * `orientation` is a plain number (`0 | 90 | 180 | 270`).
  */
-export interface TileViewModel {
-  cellX: number;
-  cellZ: number;
+export interface BlockViewModel {
+  coord: CellCoordViewModel;
   position: Vec3ViewModel;
-  terrain: string;
-}
-
-/**
- * Presentation-ready support patch: one finite, oriented, planar ground patch in
- * world space. Pure geometry + explicit metadata — the Organizer does not decide
- * whether the patch may be traversed.
- *
- * The patch is `center + u*axisU + v*axisV` for `u, v` in `[-1, 1]`; `axisU` and
- * `axisV` are half-edge vectors in world units. `kind` stays an opaque string at
- * the UI boundary and `walkable` is passed through verbatim.
- */
-export interface SurfaceViewModel {
-  surfaceId: string;
   kind: string;
-  center: Vec3ViewModel;
-  axisU: Vec3ViewModel;
-  axisV: Vec3ViewModel;
-  walkable: boolean;
-}
-
-/** Geometry primitive of a collider, mirrored as plain data. Today only `'aabb'`. */
-export interface AabbColliderShapeViewModel {
-  kind: 'aabb';
-  min: Vec3ViewModel;
-  max: Vec3ViewModel;
-}
-
-/** Discriminated union of collider geometry primitives (one member today). */
-export type ColliderShapeViewModel = AabbColliderShapeViewModel;
-
-/**
- * Presentation-ready static blocking volume. `kind` is the gameplay label and
- * stays an opaque string; `shape` is the geometry primitive.
- */
-export interface ColliderViewModel {
-  colliderId: string;
-  kind: string;
-  shape: ColliderShapeViewModel;
+  orientation: number;
 }
 
 /** Presentation-ready world object. `kind` stays a plain string at the UI boundary. */
@@ -127,8 +116,46 @@ export interface EntityViewModel {
   actorId: string | null;
   kind: string;
   position: Vec3ViewModel;
-  rotation: { x: number; y: number; z: number; w: number };
+  rotation: QuatViewModel;
   visible: boolean;
+}
+
+/**
+ * Declarative, presentation-only data for one block kind: its id and whether a
+ * non-default orientation is meaningful. No appearance, no collision, no rule.
+ */
+export interface BlockKindInfoViewModel {
+  kind: string;
+  orientable: boolean;
+}
+
+/**
+ * Declarative, presentation-only placement geometry for one entity kind: pure
+ * geometry sufficient to draw a pending placement ghost. No appearance and no
+ * legality rule.
+ */
+export interface EntityKindInfoViewModel {
+  kind: string;
+  footprintX: number;
+  footprintZ: number;
+  height: number;
+  allowedYawSteps: readonly number[];
+  pivot: 'center';
+}
+
+/**
+ * The server's placement verdict, translated to plain data. `reason` and
+ * `resolvedTransform` are present-and-nullable: `valid: false` carries a non-null
+ * reason and a null transform; `valid: true` the opposite.
+ *
+ * This is a **preview**: the Organizer never caches it as authority and never
+ * derives validity, support, occupancy or permission itself.
+ */
+export interface PlacementValidationViewModel {
+  valid: boolean;
+  reason: string | null;
+  occupiedCells: readonly CellCoordViewModel[];
+  resolvedTransform: TransformViewModel | null;
 }
 
 /** Copy a neutral `Vec3` into a plain view-model object (never shares the wire object). */
@@ -141,14 +168,9 @@ export function toBoundsViewModel(bounds: WorldBounds): BoundsViewModel {
   return { min: toVec3ViewModel(bounds.min), max: toVec3ViewModel(bounds.max) };
 }
 
-/** Map a validated Protocol `GridSpec` into the view model. */
-export function toGridViewModel(grid: GridSpec): GridViewModel {
-  return {
-    origin: toVec3ViewModel(grid.origin),
-    width: grid.width,
-    depth: grid.depth,
-    cellSize: grid.cellSize,
-  };
+/** Map a validated Protocol `BlockGrid` into the view model. */
+export function toBlockGridViewModel(grid: BlockGrid): BlockGridViewModel {
+  return { origin: toVec3ViewModel(grid.origin), cellSize: grid.cellSize };
 }
 
 /**
@@ -159,125 +181,44 @@ export function toGridViewModel(grid: GridSpec): GridViewModel {
  * where a cell is. This is a world fact — where the cell physically is — and
  * deliberately not a walkability/collision rule.
  */
-export function tileWorldPosition(cell: CellCoord, grid: GridSpec): Vec3ViewModel {
+export function cellWorldPosition(grid: BlockGrid, cell: CellCoord): Vec3ViewModel {
   return toVec3ViewModel(cellCentre(grid, cell));
 }
 
 /**
- * Map a validated Protocol `TileState` into a presentation-ready view model,
- * deriving its world position from `grid`.
+ * Map a validated Protocol `BlockState` into a presentation-ready view model,
+ * deriving its world position from the grid.
  */
-export function toTileViewModel(tile: TileState, grid: GridSpec): TileViewModel {
+export function toBlockViewModel(block: BlockState, grid: BlockGrid): BlockViewModel {
   return {
-    cellX: tile.cell.x,
-    cellZ: tile.cell.z,
-    position: tileWorldPosition(tile.cell, grid),
-    terrain: tile.terrain,
+    coord: { x: block.coord.x, y: block.coord.y, z: block.coord.z },
+    position: cellWorldPosition(grid, block.coord),
+    kind: block.kind,
+    orientation: block.orientation,
   };
 }
 
 /**
- * Deterministic tile order: ascending by `cellZ`, then ascending by `cellX`.
- *
- * Row-major order makes the array a stable function of the snapshot rather than
- * of the order tiles happened to cross the wire in.
+ * Deterministic block order: ascending by layer (`y`), then row (`z`), then
+ * column (`x`). Layer-major order makes the array a stable function of the
+ * snapshot rather than of the order blocks happened to cross the wire in.
  */
-export function compareTileViewModels(a: TileViewModel, b: TileViewModel): number {
-  if (a.cellZ !== b.cellZ) {
-    return a.cellZ - b.cellZ;
+export function compareBlockViewModels(a: BlockViewModel, b: BlockViewModel): number {
+  if (a.coord.y !== b.coord.y) {
+    return a.coord.y - b.coord.y;
   }
-  return a.cellX - b.cellX;
-}
-
-/** Map and order a validated tile list into presentation-ready view models. */
-export function toTileViewModels(
-  tiles: readonly TileState[],
-  grid: GridSpec,
-): TileViewModel[] {
-  return tiles.map((tile) => toTileViewModel(tile, grid)).sort(compareTileViewModels);
-}
-
-/**
- * Map a validated Protocol `SurfaceState` into a presentation-ready view model.
- * Every field is copied; no traversal decision is made here.
- */
-export function toSurfaceViewModel(surface: SurfaceState): SurfaceViewModel {
-  return {
-    surfaceId: surface.surfaceId,
-    kind: surface.kind,
-    center: toVec3ViewModel(surface.center),
-    axisU: toVec3ViewModel(surface.axisU),
-    axisV: toVec3ViewModel(surface.axisV),
-    walkable: surface.walkable,
-  };
-}
-
-/** Deterministic surface order: ascending by `surfaceId`. */
-export function compareSurfaceViewModels(a: SurfaceViewModel, b: SurfaceViewModel): number {
-  if (a.surfaceId < b.surfaceId) {
-    return -1;
+  if (a.coord.z !== b.coord.z) {
+    return a.coord.z - b.coord.z;
   }
-  if (a.surfaceId > b.surfaceId) {
-    return 1;
-  }
-  return 0;
+  return a.coord.x - b.coord.x;
 }
 
-/** Map and order a validated surface list into presentation-ready view models. */
-export function toSurfaceViewModels(
-  surfaces: readonly SurfaceState[],
-): SurfaceViewModel[] {
-  return surfaces.map(toSurfaceViewModel).sort(compareSurfaceViewModels);
-}
-
-/**
- * Map a validated Protocol `ColliderShape` into a presentation-ready view model.
- * The `switch` is exhaustive, so a future Protocol shape variant is a compile
- * error until it is mapped here.
- */
-function toColliderShapeViewModel(shape: ColliderShape): ColliderShapeViewModel {
-  switch (shape.kind) {
-    case 'aabb':
-      return {
-        kind: 'aabb',
-        min: toVec3ViewModel(shape.min),
-        max: toVec3ViewModel(shape.max),
-      };
-    default: {
-      // Exhaustiveness: `shape.kind` is `never` once every variant has a case.
-      // Adding a `ColliderShape` variant without a case makes this a compile
-      // error here, exactly like the Protocol guard.
-      const exhaustive: never = shape.kind;
-      return exhaustive;
-    }
-  }
-}
-
-/** Map a validated Protocol `ColliderState` into a presentation-ready view model. */
-export function toColliderViewModel(collider: ColliderState): ColliderViewModel {
-  return {
-    colliderId: collider.colliderId,
-    kind: collider.kind,
-    shape: toColliderShapeViewModel(collider.shape),
-  };
-}
-
-/** Deterministic collider order: ascending by `colliderId`. */
-export function compareColliderViewModels(a: ColliderViewModel, b: ColliderViewModel): number {
-  if (a.colliderId < b.colliderId) {
-    return -1;
-  }
-  if (a.colliderId > b.colliderId) {
-    return 1;
-  }
-  return 0;
-}
-
-/** Map and order a validated collider list into presentation-ready view models. */
-export function toColliderViewModels(
-  colliders: readonly ColliderState[],
-): ColliderViewModel[] {
-  return colliders.map(toColliderViewModel).sort(compareColliderViewModels);
+/** Map and order a validated sparse block list into presentation-ready view models. */
+export function toBlockViewModels(
+  blocks: readonly BlockState[],
+  grid: BlockGrid,
+): BlockViewModel[] {
+  return blocks.map((block) => toBlockViewModel(block, grid)).sort(compareBlockViewModels);
 }
 
 /** Map a validated Protocol `EntityState` into a presentation-ready view model. */
@@ -307,4 +248,90 @@ export function compareEntityViewModels(a: EntityViewModel, b: EntityViewModel):
 /** Map and order a validated entity list into presentation-ready view models. */
 export function toEntityViewModels(entities: readonly EntityState[]): EntityViewModel[] {
   return entities.map(toEntityViewModel).sort(compareEntityViewModels);
+}
+
+/** Map a validated Protocol `BlockKindInfo` into a presentation-ready view model. */
+export function toBlockKindInfoViewModel(info: BlockKindInfo): BlockKindInfoViewModel {
+  return { kind: info.kind, orientable: info.orientable };
+}
+
+/** Deterministic catalogue order: ascending by `kind`. */
+export function compareBlockKindInfoViewModels(
+  a: BlockKindInfoViewModel,
+  b: BlockKindInfoViewModel,
+): number {
+  if (a.kind < b.kind) {
+    return -1;
+  }
+  if (a.kind > b.kind) {
+    return 1;
+  }
+  return 0;
+}
+
+/** Map and order the validated block-kind catalogue into presentation-ready view models. */
+export function toBlockKindInfoViewModels(
+  infos: readonly BlockKindInfo[],
+): BlockKindInfoViewModel[] {
+  return infos.map(toBlockKindInfoViewModel).sort(compareBlockKindInfoViewModels);
+}
+
+/** Map a validated Protocol `EntityKindInfo` into a presentation-ready view model. */
+export function toEntityKindInfoViewModel(info: EntityKindInfo): EntityKindInfoViewModel {
+  return {
+    kind: info.kind,
+    footprintX: info.footprintX,
+    footprintZ: info.footprintZ,
+    height: info.height,
+    allowedYawSteps: [...info.allowedYawSteps],
+    pivot: info.pivot,
+  };
+}
+
+/** Deterministic catalogue order: ascending by `kind`. */
+export function compareEntityKindInfoViewModels(
+  a: EntityKindInfoViewModel,
+  b: EntityKindInfoViewModel,
+): number {
+  if (a.kind < b.kind) {
+    return -1;
+  }
+  if (a.kind > b.kind) {
+    return 1;
+  }
+  return 0;
+}
+
+/** Map and order the validated entity-kind catalogue into presentation-ready view models. */
+export function toEntityKindInfoViewModels(
+  infos: readonly EntityKindInfo[],
+): EntityKindInfoViewModel[] {
+  return infos.map(toEntityKindInfoViewModel).sort(compareEntityKindInfoViewModels);
+}
+
+/**
+ * Map the server's `ValidatePlacementResponse` into plain view-model data.
+ *
+ * Pure translation: the Organizer makes no validity decision and stores nothing.
+ */
+export function toPlacementValidationViewModel(
+  response: ValidatePlacementResponse,
+): PlacementValidationViewModel {
+  return {
+    valid: response.valid,
+    reason: response.reason,
+    occupiedCells: response.occupiedCells.map((cell) => ({ x: cell.x, y: cell.y, z: cell.z })),
+    resolvedTransform:
+      response.resolvedTransform === null
+        ? null
+        : {
+            position: toVec3ViewModel(response.resolvedTransform.position),
+            rotation: {
+              x: response.resolvedTransform.rotation.x,
+              y: response.resolvedTransform.rotation.y,
+              z: response.resolvedTransform.rotation.z,
+              w: response.resolvedTransform.rotation.w,
+            },
+          },
+  };
 }

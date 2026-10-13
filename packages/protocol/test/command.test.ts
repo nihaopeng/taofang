@@ -1,31 +1,66 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  isActorJumpCommand,
+  isBlockRemoveCommand,
+  isBlockSetCommand,
+  isCommandResponse,
+  isEntityPlaceCommand,
+  isEntityRemoveCommand,
+  isEntityRotateCommand,
+  isEntityValidatePlacementCommand,
   isGameCommand,
   isGameEventBatch,
   isInteractCommand,
   isMoveIntentCommand,
   isMoveToCommand,
+  isValidatePlacementResponse,
+  parseActorJumpCommand,
+  parseBlockRemoveCommand,
+  parseBlockSetCommand,
+  parseCommandResponse,
+  parseEntityPlaceCommand,
+  parseEntityRemoveCommand,
+  parseEntityRotateCommand,
+  parseEntityValidatePlacementCommand,
   parseGameCommand,
   parseGameEventBatch,
   parseInteractCommand,
   parseMoveIntentCommand,
   parseMoveToCommand,
+  parseValidatePlacementResponse,
 } from '../src/index.ts';
 import type {
+  ActorJumpCommand,
+  BlockRemoveCommand,
+  BlockSetCommand,
+  CommandResponse,
+  EntityPlaceCommand,
+  EntityRemoveCommand,
+  EntityRotateCommand,
+  EntityValidatePlacementCommand,
   GameCommand,
   GameEventBatch,
   InteractCommand,
   MoveIntentCommand,
   MoveToCommand,
+  ValidatePlacementResponse,
 } from '../src/index.ts';
 import {
   captureParseError,
+  validActorJumpCommand,
+  validBlockRemoveCommand,
+  validBlockSetCommand,
+  validEntityPlaceCommand,
+  validEntityRemoveCommand,
+  validEntityRotateCommand,
+  validEntityValidatePlacementCommand,
   validGameEventBatch,
   validInteractCommand,
   validMoveIntentCommand,
   validMoveToCommand,
   validTransformChangedEvent,
+  validValidatePlacementResponse,
 } from './support.ts';
 
 const nonObjects: Array<[string, unknown]> = [
@@ -301,10 +336,17 @@ describe('presentation-field boundary (no screen/camera/ray data on the wire)', 
 });
 
 describe('isGameCommand', () => {
-  it('accepts all three known commands', () => {
+  it('accepts every known command', () => {
     expect(isGameCommand(validMoveIntentCommand)).toBe(true);
     expect(isGameCommand(validMoveToCommand)).toBe(true);
     expect(isGameCommand(validInteractCommand)).toBe(true);
+    expect(isGameCommand(validActorJumpCommand)).toBe(true);
+    expect(isGameCommand(validBlockSetCommand)).toBe(true);
+    expect(isGameCommand(validBlockRemoveCommand)).toBe(true);
+    expect(isGameCommand(validEntityPlaceCommand)).toBe(true);
+    expect(isGameCommand(validEntityRotateCommand)).toBe(true);
+    expect(isGameCommand(validEntityRemoveCommand)).toBe(true);
+    expect(isGameCommand(validEntityValidatePlacementCommand)).toBe(true);
   });
 
   it.each(nonObjects)('rejects %s', (_label, value) => {
@@ -312,6 +354,7 @@ describe('isGameCommand', () => {
   });
 
   it('rejects an unknown type discriminant, including the deleted `actor.move`', () => {
+    expect(isGameCommand({ type: 'actor.dance' })).toBe(false);
     expect(isGameCommand({ type: 'actor.jump', movement: { x: 1, z: 0 } })).toBe(false);
     expect(isGameCommand({ type: 'unknown' })).toBe(false);
     expect(isGameCommand({ type: 'actor.move', direction: 'north' })).toBe(false);
@@ -356,7 +399,7 @@ describe('parseGameCommand', () => {
   });
 
   it('throws ProtocolParseError for an unknown type discriminant', () => {
-    const error = captureParseError(() => parseGameCommand({ type: 'actor.jump' }));
+    const error = captureParseError(() => parseGameCommand({ type: 'actor.dance' }));
     expect(error.message).toBe('Invalid GameCommand payload');
     expect(error.code).toBe('BAD_REQUEST');
   });
@@ -430,13 +473,345 @@ describe('parseGameEventBatch', () => {
   });
 });
 
+describe('isActorJumpCommand', () => {
+  it('accepts the payload-free jump', () => {
+    expect(isActorJumpCommand(validActorJumpCommand)).toBe(true);
+    expect(isActorJumpCommand({ type: 'actor.jump' })).toBe(true);
+  });
+
+  it('rejects any payload (height/velocity are Manager rules)', () => {
+    expect(isActorJumpCommand({ type: 'actor.jump', height: 2 })).toBe(false);
+    expect(isActorJumpCommand({ type: 'actor.jump', velocity: { x: 0, y: 5, z: 0 } })).toBe(false);
+    expect(isActorJumpCommand({ type: 'actor.jump', actorId: 'actor-1' })).toBe(false);
+    expect(isActorJumpCommand({ type: 'actor.jump', extra: 1 })).toBe(false);
+  });
+
+  it('rejects a wrong discriminant and non-objects', () => {
+    expect(isActorJumpCommand({ type: 'actor.jump ' })).toBe(false);
+    expect(isActorJumpCommand(null)).toBe(false);
+  });
+});
+
+describe('parseActorJumpCommand', () => {
+  it('returns the value unchanged when valid', () => {
+    expect(parseActorJumpCommand(validActorJumpCommand)).toBe(validActorJumpCommand);
+  });
+
+  it('throws ProtocolParseError with a message when invalid', () => {
+    const error = captureParseError(() => parseActorJumpCommand({ type: 'actor.jump', height: 2 }));
+    expect(error.message).toBe('Invalid ActorJumpCommand payload');
+    expect(error.code).toBe('BAD_REQUEST');
+  });
+});
+
+describe('isBlockSetCommand', () => {
+  it('accepts a well-formed block set', () => {
+    expect(isBlockSetCommand(validBlockSetCommand)).toBe(true);
+    // `air` is a legal command kind meaning "remove".
+    expect(isBlockSetCommand({ ...validBlockSetCommand, kind: 'air' })).toBe(true);
+    expect(isBlockSetCommand({ ...validBlockSetCommand, orientation: 270 })).toBe(true);
+  });
+
+  it.each(nonObjects)('rejects %s', (_label, value) => {
+    expect(isBlockSetCommand(value)).toBe(false);
+  });
+
+  it.each(['type', 'coord', 'kind', 'orientation'])('rejects a missing %s', (key) => {
+    const value: Record<string, unknown> = { ...validBlockSetCommand };
+    delete value[key];
+    expect(isBlockSetCommand(value)).toBe(false);
+  });
+
+  it('rejects a 2D coord, a bad kind/orientation, and a client-named actor', () => {
+    expect(isBlockSetCommand({ ...validBlockSetCommand, coord: { x: 1, z: 2 } })).toBe(false);
+    expect(isBlockSetCommand({ ...validBlockSetCommand, kind: 'lava' })).toBe(false);
+    expect(isBlockSetCommand({ ...validBlockSetCommand, orientation: 45 })).toBe(false);
+    expect(isBlockSetCommand({ ...validBlockSetCommand, actorId: 'actor-1' })).toBe(false);
+    expect(isBlockSetCommand({ ...validBlockSetCommand, extra: 1 })).toBe(false);
+  });
+});
+
+describe('parseBlockSetCommand', () => {
+  it('returns the value unchanged when valid', () => {
+    expect(parseBlockSetCommand(validBlockSetCommand)).toBe(validBlockSetCommand);
+  });
+
+  it('throws ProtocolParseError with a message when invalid', () => {
+    expect(captureParseError(() => parseBlockSetCommand({ type: 'block.set' })).message).toBe(
+      'Invalid BlockSetCommand payload',
+    );
+  });
+});
+
+describe('isBlockRemoveCommand', () => {
+  it('accepts a well-formed block remove', () => {
+    expect(isBlockRemoveCommand(validBlockRemoveCommand)).toBe(true);
+  });
+
+  it('rejects missing/extra keys, a 2D coord, and a client-named actor', () => {
+    const missing: Record<string, unknown> = { ...validBlockRemoveCommand };
+    delete missing.coord;
+    expect(isBlockRemoveCommand(missing)).toBe(false);
+    expect(isBlockRemoveCommand({ ...validBlockRemoveCommand, kind: 'grass' })).toBe(false);
+    expect(isBlockRemoveCommand({ ...validBlockRemoveCommand, coord: { x: 1, z: 2 } })).toBe(false);
+    expect(isBlockRemoveCommand({ ...validBlockRemoveCommand, actorId: 'actor-1' })).toBe(false);
+  });
+});
+
+describe('parseBlockRemoveCommand', () => {
+  it('throws ProtocolParseError when invalid', () => {
+    expect(captureParseError(() => parseBlockRemoveCommand(null)).message).toBe(
+      'Invalid BlockRemoveCommand payload',
+    );
+  });
+});
+
+describe('isEntityPlaceCommand', () => {
+  it('accepts a well-formed place request', () => {
+    expect(isEntityPlaceCommand(validEntityPlaceCommand)).toBe(true);
+    expect(isEntityPlaceCommand({ ...validEntityPlaceCommand, yawDegrees: 37.5 })).toBe(true);
+  });
+
+  it.each(nonObjects)('rejects %s', (_label, value) => {
+    expect(isEntityPlaceCommand(value)).toBe(false);
+  });
+
+  it.each(['type', 'kind', 'position', 'yawDegrees'])('rejects a missing %s', (key) => {
+    const value: Record<string, unknown> = { ...validEntityPlaceCommand };
+    delete value[key];
+    expect(isEntityPlaceCommand(value)).toBe(false);
+  });
+
+  it('rejects a bad kind, a 2D position, a non-finite yaw, and a client-named actor', () => {
+    expect(isEntityPlaceCommand({ ...validEntityPlaceCommand, kind: 'npc' })).toBe(false);
+    expect(isEntityPlaceCommand({ ...validEntityPlaceCommand, position: { x: 1, z: 2 } })).toBe(
+      false,
+    );
+    expect(
+      isEntityPlaceCommand({ ...validEntityPlaceCommand, yawDegrees: Number.NaN }),
+    ).toBe(false);
+    expect(
+      isEntityPlaceCommand({ ...validEntityPlaceCommand, yawDegrees: Number.POSITIVE_INFINITY }),
+    ).toBe(false);
+    expect(isEntityPlaceCommand({ ...validEntityPlaceCommand, actorId: 'actor-1' })).toBe(false);
+  });
+});
+
+describe('parseEntityPlaceCommand', () => {
+  it('returns the value unchanged when valid', () => {
+    expect(parseEntityPlaceCommand(validEntityPlaceCommand)).toBe(validEntityPlaceCommand);
+  });
+
+  it('throws ProtocolParseError with a message when invalid', () => {
+    expect(
+      captureParseError(() => parseEntityPlaceCommand({ type: 'entity.place' })).message,
+    ).toBe('Invalid EntityPlaceCommand payload');
+  });
+});
+
+describe('isEntityRotateCommand', () => {
+  it('accepts a well-formed rotate request', () => {
+    expect(isEntityRotateCommand(validEntityRotateCommand)).toBe(true);
+    expect(isEntityRotateCommand({ ...validEntityRotateCommand, yawDegrees: -90 })).toBe(true);
+  });
+
+  it('rejects missing keys, a bad entityId, a non-finite yaw, and extras', () => {
+    expect(isEntityRotateCommand({ type: 'entity.rotate', yawDegrees: 90 })).toBe(false);
+    expect(isEntityRotateCommand({ ...validEntityRotateCommand, entityId: '' })).toBe(false);
+    expect(isEntityRotateCommand({ ...validEntityRotateCommand, entityId: 1 })).toBe(false);
+    expect(
+      isEntityRotateCommand({ ...validEntityRotateCommand, yawDegrees: Number.NaN }),
+    ).toBe(false);
+    expect(isEntityRotateCommand({ ...validEntityRotateCommand, actorId: 'actor-1' })).toBe(false);
+    expect(isEntityRotateCommand({ ...validEntityRotateCommand, extra: 1 })).toBe(false);
+  });
+});
+
+describe('parseEntityRotateCommand', () => {
+  it('throws ProtocolParseError when invalid', () => {
+    expect(captureParseError(() => parseEntityRotateCommand({ type: 'entity.rotate' })).message).toBe(
+      'Invalid EntityRotateCommand payload',
+    );
+  });
+});
+
+describe('isEntityRemoveCommand', () => {
+  it('accepts a well-formed remove request', () => {
+    expect(isEntityRemoveCommand(validEntityRemoveCommand)).toBe(true);
+  });
+
+  it('rejects missing keys, a bad entityId, and extras', () => {
+    expect(isEntityRemoveCommand({ type: 'entity.remove' })).toBe(false);
+    expect(isEntityRemoveCommand({ ...validEntityRemoveCommand, entityId: '' })).toBe(false);
+    expect(isEntityRemoveCommand({ ...validEntityRemoveCommand, actorId: 'actor-1' })).toBe(false);
+    expect(isEntityRemoveCommand({ ...validEntityRemoveCommand, extra: 1 })).toBe(false);
+  });
+});
+
+describe('parseEntityRemoveCommand', () => {
+  it('throws ProtocolParseError when invalid', () => {
+    expect(captureParseError(() => parseEntityRemoveCommand(null)).message).toBe(
+      'Invalid EntityRemoveCommand payload',
+    );
+  });
+});
+
+describe('isEntityValidatePlacementCommand', () => {
+  it('accepts a well-formed validate request', () => {
+    expect(isEntityValidatePlacementCommand(validEntityValidatePlacementCommand)).toBe(true);
+  });
+
+  it.each(['type', 'kind', 'position', 'yawDegrees'])('rejects a missing %s', (key) => {
+    const value: Record<string, unknown> = { ...validEntityValidatePlacementCommand };
+    delete value[key];
+    expect(isEntityValidatePlacementCommand(value)).toBe(false);
+  });
+
+  it('rejects a 2D position, a bad kind, and extras', () => {
+    expect(
+      isEntityValidatePlacementCommand({
+        ...validEntityValidatePlacementCommand,
+        position: { x: 1, z: 2 },
+      }),
+    ).toBe(false);
+    expect(
+      isEntityValidatePlacementCommand({ ...validEntityValidatePlacementCommand, kind: 'npc' }),
+    ).toBe(false);
+    expect(
+      isEntityValidatePlacementCommand({
+        ...validEntityValidatePlacementCommand,
+        actorId: 'actor-1',
+      }),
+    ).toBe(false);
+  });
+});
+
+describe('parseEntityValidatePlacementCommand', () => {
+  it('throws ProtocolParseError when invalid', () => {
+    expect(
+      captureParseError(() => parseEntityValidatePlacementCommand(null)).message,
+    ).toBe('Invalid EntityValidatePlacementCommand payload');
+  });
+});
+
+describe('isValidatePlacementResponse', () => {
+  it('accepts a valid result (non-null resolved transform, null reason)', () => {
+    expect(isValidatePlacementResponse(validValidatePlacementResponse)).toBe(true);
+    expect(
+      isValidatePlacementResponse({ ...validValidatePlacementResponse, occupiedCells: [] }),
+    ).toBe(true);
+  });
+
+  it('accepts an invalid result (non-empty reason, null resolved transform)', () => {
+    expect(
+      isValidatePlacementResponse({
+        valid: false,
+        reason: 'occupied',
+        occupiedCells: [{ x: 2, y: 0, z: 3 }],
+        resolvedTransform: null,
+      }),
+    ).toBe(true);
+  });
+
+  it('rejects a reason/transform inconsistent with `valid`', () => {
+    expect(
+      isValidatePlacementResponse({ ...validValidatePlacementResponse, reason: 'nope' }),
+    ).toBe(false);
+    expect(
+      isValidatePlacementResponse({ ...validValidatePlacementResponse, resolvedTransform: null }),
+    ).toBe(false);
+    expect(
+      isValidatePlacementResponse({ valid: false, reason: null, occupiedCells: [], resolvedTransform: null }),
+    ).toBe(false);
+    expect(
+      isValidatePlacementResponse({ valid: false, reason: '', occupiedCells: [], resolvedTransform: null }),
+    ).toBe(false);
+  });
+
+  it('requires present-and-nullable reason/resolvedTransform (no optional-key special case)', () => {
+    const noReason: Record<string, unknown> = { ...validValidatePlacementResponse };
+    delete noReason.reason;
+    expect(isValidatePlacementResponse(noReason)).toBe(false);
+    const noTransform: Record<string, unknown> = { ...validValidatePlacementResponse };
+    delete noTransform.resolvedTransform;
+    expect(isValidatePlacementResponse(noTransform)).toBe(false);
+  });
+
+  it('rejects a malformed occupiedCells list or extra keys', () => {
+    expect(isValidatePlacementResponse({ ...validValidatePlacementResponse, occupiedCells: null })).toBe(
+      false,
+    );
+    expect(
+      isValidatePlacementResponse({
+        ...validValidatePlacementResponse,
+        occupiedCells: [{ x: 1, z: 2 }],
+      }),
+    ).toBe(false);
+    expect(isValidatePlacementResponse({ ...validValidatePlacementResponse, extra: 1 })).toBe(false);
+  });
+});
+
+describe('parseValidatePlacementResponse', () => {
+  it('returns the value unchanged when valid', () => {
+    const parsed: ValidatePlacementResponse = parseValidatePlacementResponse(
+      validValidatePlacementResponse,
+    );
+    expect(parsed).toBe(validValidatePlacementResponse);
+  });
+
+  it('throws ProtocolParseError with a message when invalid', () => {
+    expect(captureParseError(() => parseValidatePlacementResponse({})).message).toBe(
+      'Invalid ValidatePlacementResponse payload',
+    );
+  });
+});
+
+describe('isCommandResponse / parseCommandResponse', () => {
+  it('accepts both disjoint success bodies', () => {
+    expect(isCommandResponse(validGameEventBatch)).toBe(true);
+    expect(isCommandResponse(validValidatePlacementResponse)).toBe(true);
+    expect(isCommandResponse({ events: [], serverTime: '2025-01-02T03:04:05.000Z' })).toBe(true);
+  });
+
+  it('rejects a malformed envelope or a hybrid', () => {
+    expect(isCommandResponse(null)).toBe(false);
+    expect(isCommandResponse({})).toBe(false);
+    expect(isCommandResponse({ ...validGameEventBatch, valid: true })).toBe(false);
+    expect(
+      isCommandResponse({ ...validValidatePlacementResponse, events: [] }),
+    ).toBe(false);
+  });
+
+  it('parse returns the narrowed response unchanged', () => {
+    const parsed: CommandResponse = parseCommandResponse(validValidatePlacementResponse);
+    expect(parsed).toBe(validValidatePlacementResponse);
+  });
+
+  it('throws ProtocolParseError when invalid', () => {
+    expect(captureParseError(() => parseCommandResponse({})).message).toBe(
+      'Invalid CommandResponse payload',
+    );
+  });
+});
+
 /**
- * Type-level exactness guard: `GameCommand` must stay exactly one member. The
- * literal tuple and the `Exact` comparison fail `tsc` if a member is added or
- * removed, so "no new instruction" is enforced by the compiler, not just
- * asserted in prose.
+ * Type-level exactness guard: `GameCommand` must stay exactly the listed
+ * members. The literal tuple and the `Exact` comparison fail `tsc` if a member
+ * is added or removed, so the command vocabulary is enforced by the compiler,
+ * not just asserted in prose.
  */
-const gameCommandTypes = ['actor.moveIntent', 'actor.moveTo', 'actor.interact'] as const;
+const gameCommandTypes = [
+  'actor.moveIntent',
+  'actor.moveTo',
+  'actor.interact',
+  'actor.jump',
+  'block.set',
+  'block.remove',
+  'entity.place',
+  'entity.rotate',
+  'entity.remove',
+  'entity.validatePlacement',
+] as const;
 type ListedGameCommandType = (typeof gameCommandTypes)[number];
 type Exact<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
 
@@ -447,18 +822,90 @@ export const gameCommandTypesAreExact: Exact<GameCommand['type'], ListedGameComm
 export const moveIntentCommandType: MoveIntentCommand['type'] = 'actor.moveIntent';
 export const moveToCommandType: MoveToCommand['type'] = 'actor.moveTo';
 export const interactCommandType: InteractCommand['type'] = 'actor.interact';
+export const actorJumpCommandType: ActorJumpCommand['type'] = 'actor.jump';
+export const blockSetCommandType: BlockSetCommand['type'] = 'block.set';
+export const blockRemoveCommandType: BlockRemoveCommand['type'] = 'block.remove';
+export const entityPlaceCommandType: EntityPlaceCommand['type'] = 'entity.place';
+export const entityRotateCommandType: EntityRotateCommand['type'] = 'entity.rotate';
+export const entityRemoveCommandType: EntityRemoveCommand['type'] = 'entity.remove';
+export const entityValidatePlacementCommandType: EntityValidatePlacementCommand['type'] =
+  'entity.validatePlacement';
 
 describe('GameCommand exact shape', () => {
-  it('is exactly three members and has no catch-all', () => {
+  it('is exactly ten members and has no catch-all', () => {
     expect(gameCommandTypesAreExact).toBe(true);
-    expect(gameCommandTypes).toHaveLength(3);
+    expect(gameCommandTypes).toHaveLength(10);
     expect([...gameCommandTypes].sort()).toEqual([
       'actor.interact',
+      'actor.jump',
       'actor.moveIntent',
       'actor.moveTo',
+      'block.remove',
+      'block.set',
+      'entity.place',
+      'entity.remove',
+      'entity.rotate',
+      'entity.validatePlacement',
     ]);
     expect(moveIntentCommandType).toBe('actor.moveIntent');
     expect(moveToCommandType).toBe('actor.moveTo');
     expect(interactCommandType).toBe('actor.interact');
+    expect(actorJumpCommandType).toBe('actor.jump');
+    expect(blockSetCommandType).toBe('block.set');
+    expect(blockRemoveCommandType).toBe('block.remove');
+    expect(entityPlaceCommandType).toBe('entity.place');
+    expect(entityRotateCommandType).toBe('entity.rotate');
+    expect(entityRemoveCommandType).toBe('entity.remove');
+    expect(entityValidatePlacementCommandType).toBe('entity.validatePlacement');
+  });
+});
+
+/**
+ * `parseGameCommand` must narrow each new member without a cast, and every
+ * command must keep the "identity comes from transport context" invariant.
+ */
+describe('parseGameCommand new members', () => {
+  it('parses block/placement/jump members into the discriminated union', () => {
+    const block: GameCommand = parseGameCommand(validBlockSetCommand);
+    if (block.type === 'block.set') {
+      const coord: { x: number; y: number; z: number } = block.coord;
+      expect(coord).toEqual({ x: 2, y: 0, z: 3 });
+    } else {
+      throw new Error('unreachable: expected block.set');
+    }
+
+    const place: GameCommand = parseGameCommand(validEntityPlaceCommand);
+    if (place.type === 'entity.place') {
+      const position: { x: number; y: number; z: number } = place.position;
+      expect(position).toEqual({ x: 2.5, y: 0, z: 3.5 });
+    } else {
+      throw new Error('unreachable: expected entity.place');
+    }
+
+    const validate: GameCommand = parseGameCommand(validEntityValidatePlacementCommand);
+    if (validate.type === 'entity.validatePlacement') {
+      expect(validate.kind).toBe('chest');
+    } else {
+      throw new Error('unreachable: expected entity.validatePlacement');
+    }
+
+    const jump: GameCommand = parseGameCommand(validActorJumpCommand);
+    expect(jump.type).toBe('actor.jump');
+  });
+
+  it('rejects a client-named actor on every command (identity is from transport)', () => {
+    const commands: Array<Record<string, unknown>> = [
+      { ...validBlockSetCommand, actorId: 'actor-1' },
+      { ...validBlockRemoveCommand, actorId: 'actor-1' },
+      { ...validEntityPlaceCommand, actorId: 'actor-1' },
+      { ...validEntityRotateCommand, playerId: 'player-1' },
+      { ...validEntityRemoveCommand, actorId: 'actor-1' },
+      { ...validEntityValidatePlacementCommand, actorId: 'actor-1' },
+      { ...validActorJumpCommand, actorId: 'actor-1' },
+    ];
+    for (const command of commands) {
+      expect(isGameCommand(command)).toBe(false);
+      expect(captureParseError(() => parseGameCommand(command)).code).toBe('BAD_REQUEST');
+    }
   });
 });

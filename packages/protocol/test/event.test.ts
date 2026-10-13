@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  isBlockChangedEvent,
   isEntityRemovedEvent,
   isEntitySpawnedEvent,
   isGameEvent,
   isTransformChangedEvent,
+  parseBlockChangedEvent,
   parseEntityRemovedEvent,
   parseEntitySpawnedEvent,
   parseGameEvent,
@@ -13,6 +15,7 @@ import {
 import type { GameEvent, Transform } from '../src/index.ts';
 import {
   captureParseError,
+  validBlockChangedEvent,
   validEntityRemovedEvent,
   validEntitySpawnedEvent,
   validEntityState,
@@ -167,11 +170,45 @@ describe('parseTransformChangedEvent', () => {
   });
 });
 
+describe('isBlockChangedEvent', () => {
+  it('accepts a well-formed block change', () => {
+    expect(isBlockChangedEvent(validBlockChangedEvent)).toBe(true);
+  });
+
+  it('ACCEPTS `air` to mean the block was removed', () => {
+    expect(isBlockChangedEvent({ ...validBlockChangedEvent, kind: 'air' })).toBe(true);
+  });
+
+  it('rejects missing keys, complete unknowns, and a 2D coord', () => {
+    const missing: Record<string, unknown> = { ...validBlockChangedEvent };
+    delete missing.orientation;
+    expect(isBlockChangedEvent(missing)).toBe(false);
+    expect(isBlockChangedEvent({ ...validBlockChangedEvent, coord: { x: 1, z: 2 } })).toBe(false);
+    expect(isBlockChangedEvent({ ...validBlockChangedEvent, kind: 'lava' })).toBe(false);
+    expect(isBlockChangedEvent({ ...validBlockChangedEvent, orientation: 45 })).toBe(false);
+    expect(isBlockChangedEvent({ ...validBlockChangedEvent, extra: 1 })).toBe(false);
+    expect(isBlockChangedEvent(null)).toBe(false);
+  });
+});
+
+describe('parseBlockChangedEvent', () => {
+  it('returns the value unchanged when valid', () => {
+    expect(parseBlockChangedEvent(validBlockChangedEvent)).toBe(validBlockChangedEvent);
+  });
+
+  it('throws ProtocolParseError with a message when invalid', () => {
+    const error = captureParseError(() => parseBlockChangedEvent({ type: 'block.changed' }));
+    expect(error.message).toBe('Invalid BlockChangedEvent payload');
+    expect(error.code).toBe('BAD_REQUEST');
+  });
+});
+
 describe('isGameEvent', () => {
   it('accepts every known event member', () => {
     expect(isGameEvent(validEntitySpawnedEvent)).toBe(true);
     expect(isGameEvent(validEntityRemovedEvent)).toBe(true);
     expect(isGameEvent(validTransformChangedEvent)).toBe(true);
+    expect(isGameEvent(validBlockChangedEvent)).toBe(true);
   });
 
   it.each(nonObjects)('rejects %s', (_label, value) => {
@@ -210,6 +247,16 @@ describe('parseGameEvent', () => {
     expect(error.code).toBe('BAD_REQUEST');
   });
 
+  it('parses the block-change member without a cast', () => {
+    const changed: GameEvent = parseGameEvent(validBlockChangedEvent);
+    if (changed.type === 'block.changed') {
+      expect(changed.kind).toBe('stone');
+      expect(changed.coord).toEqual({ x: 2, y: 0, z: 3 });
+    } else {
+      throw new Error('unreachable: expected block.changed');
+    }
+  });
+
   it('throws ProtocolParseError for non-objects', () => {
     expect(captureParseError(() => parseGameEvent(null)).message).toBe('Invalid GameEvent payload');
     expect(captureParseError(() => parseGameEvent('entity.spawned')).message).toBe(
@@ -219,15 +266,15 @@ describe('parseGameEvent', () => {
 });
 
 /**
- * Type-level exactness guard: `GameEvent` must stay exactly three members. The
+ * Type-level exactness guard: `GameEvent` must stay exactly four members. The
  * literal tuple and the `Exact` comparison fail `tsc` if a member is added or
- * removed, so "no new event" is enforced by the compiler, not just asserted in
- * prose.
+ * removed, so the event vocabulary is enforced by the compiler.
  */
 const gameEventTypes = [
   'entity.spawned',
   'entity.removed',
   'transform.changed',
+  'block.changed',
 ] as const;
 type ListedGameEventType = (typeof gameEventTypes)[number];
 type Exact<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
@@ -236,8 +283,8 @@ type Exact<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
 export const gameEventTypesAreExact: Exact<GameEvent['type'], ListedGameEventType> = true;
 
 describe('GameEvent exact shape', () => {
-  it('is exactly three members and has no catch-all', () => {
+  it('is exactly four members and has no catch-all', () => {
     expect(gameEventTypesAreExact).toBe(true);
-    expect(gameEventTypes).toHaveLength(3);
+    expect(gameEventTypes).toHaveLength(4);
   });
 });

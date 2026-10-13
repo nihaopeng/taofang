@@ -3,14 +3,25 @@
  *
  * Owns the world request lifecycle (`idle -> loading -> ready | error`) for the
  * one-shot snapshot, the realtime stream lifecycle (`idle -> connecting -> live |
- * error`), the movement-intent pipeline, subscriptions, and the mapping from
- * internal transport failures to user-presentable strings.
+ * error`), the command pipeline, subscriptions, and the mapping from internal
+ * transport failures to user-presentable strings.
  *
  * The client is **authoritative-only**: it never predicts and never interpolates.
- * A snapshot and a stream `events` message are the *only* things that move an
- * entity; `setMovementIntent` sends a direction and changes no client position.
- * Smoothing/interpolation between authoritative transforms is the renderer's job
- * (Render ISA `transform.setTarget`), not the Organizer's.
+ * A snapshot, a stream `events` batch, or a command ack are the *only* things that
+ * move an entity or change a block; an intent changes no client state. Smoothing/
+ * interpolation between authoritative transforms is the renderer's job, not the
+ * Organizer's.
+ *
+ * ## Phase 15 block-spatial kernel
+ *
+ * The v9 snapshot is `{ worldId, bounds, blockGrid, blocks, entities,
+ * controlledActorId, serverTime }`. `blocks` is a **sparse** list of non-air
+ * `BlockState`s with absolute integer cells (`air` is absence); `blockGrid`
+ * (`origin` + `cellSize`) is the pure addressing configuration. `surfaces`/
+ * `colliders`/`tiles`/`grid` no longer exist. The store holds `blockGrid` and the
+ * block list as plain view models (a derived world-space centre per block), and
+ * applies `block.changed` incrementally - adding/replacing/removing exactly one
+ * block keyed by its absolute `coord` - **without refetching the world**.
  *
  * ## Realtime stream
  *
@@ -26,46 +37,69 @@
  * (`parseWorldStreamMessage`); a malformed frame is ignored and never corrupts
  * state. This module never invents a wire field.
  *
- * ## Movement intent
+ * ## Commands
  *
  * `setMovementIntent({ x, z })` is level-triggered: the UI posts only when the
  * input *changes*, and the Manager stores the latest intent per actor. The body
- * is exactly `{ type: 'actor.moveIntent', movement: { x, z } }` — no actor field
- * (the actor is resolved from transport context) and no position (the client is
- * never trusted with one). Requests are serialised with a single in-flight slot
- * and latest-wins coalescing so rapid input cannot storm the network.
+ * is exactly `{ type: 'actor.moveIntent', movement: { x, z } }` - no actor field
+ * (the actor is resolved from transport context) and no position. Requests are
+ * serialised with a single in-flight slot and latest-wins coalescing so rapid
+ * input cannot storm the network.
  *
- * ## One-shot intents (`moveTo` / `interact`)
- *
- * `moveTo({ x, y, z })` and `interact(entityId)` post the canonical
- * `actor.moveTo` / `actor.interact` commands. Both take **world-space gameplay
- * data only**: the store never sees a camera, NDC, pointer coordinate or ray,
- * and it sends no actor id and no position. Neither changes any local position;
- * only a validated snapshot or event batch moves an entity (no prediction).
+ * The one-shot actor intents `moveTo` / `interact` / `jump` and the block/entity
+ * edits `setBlock` / `removeBlock` / `placeEntity` / `rotateEntity` /
+ * `removeEntity` are thin: each maps a plain intent to its canonical Protocol
+ * command and submits it through the existing transport. They carry no actor id
+ * and no gameplay rule. Their authoritative events are reconciled like any other
+ * delta.
  *
  * A *rejected* intent (the server refuses a well-formed request because it is
  * illegal against the current world state, `CONFLICT`/409, or names a gone
- * target, `NOT_FOUND`/404) is surfaced through `WorldState.notice` — a short,
- * user-presentable string. The reason is read from the canonical `ProtocolError`
- * body (the machine-readable `code` plus the server-authored `message`), not from
- * the status alone, so an out-of-range and a non-interactable 409 stay
- * distinguishable. It deliberately does **not** touch `status` or `error`: a
- * rejected intent is not a broken world, and flipping `status` here
- * was exactly the phase-7 bug that gated movement. `notice` clears on the next
- * successful intent and on `resetWorldState()`.
+ * target, `NOT_FOUND`/404) is surfaced through `WorldState.notice` - a short,
+ * user-presentable string read from the canonical `ProtocolError` body, not from
+ * the status alone. It deliberately does **not** touch `status` or `error`: a
+ * rejected intent is not a broken world. `notice` clears on the next successful
+ * intent and on `resetWorldState()`.
  *
- * Terrain is **static**: no event carries it, so `tiles`/`grid`/`bounds` are only
+ * ## Placement preview (`validatePlacement`)
+ *
+ * `validatePlacement(kind, position, yawDegrees)` is the **preview** path. It
+ * posts the canonical `entity.validatePlacement` query and returns the server's
+ * `ValidatePlacementResponse` mapped to plain view-model data, so the UI can
+ * debounce/cancel stale requests itself. The store makes **no** validity decision
+ * (support, occupancy conflict, terrain permission, permissions are Manager
+ * rules), caches nothing, and treats the verdict as a non-authoritative preview.
+ *
+ * Block grid and bounds are **static**: no event carries them, so they are only
  * ever replaced by a fresh snapshot and are carried over reference-identically by
- * the event applier. The same holds for the world-geometry layer
- * (`surfaces`/`colliders`): no event replaces it, and the applier passes it
- * through untouched. `terrain` stays an opaque string; walkability is an
- * authoritative Manager rule, so the store derives no collision rule of its own.
+ * the event applier. Blocks are mutated only by `block.changed`.
  */
 
-import { parseEntityId, parseWorldStreamMessage } from '@starvalley/protocol';
+import {
+  parseBlockKind,
+  parseBlockOrientation,
+  parseCellCoord,
+  parseEntityId,
+  parseEntityKind,
+  parseWorldStreamMessage,
+} from '@starvalley/protocol';
 import type {
+  ActorJumpCommand,
+  BlockKind,
+  BlockOrientation,
+  BlockRemoveCommand,
+  BlockSetCommand,
+  CellCoord,
+  CommandResponse,
   EntityId,
+  EntityKind,
+  EntityPlaceCommand,
+  EntityRemoveCommand,
+  EntityRotateCommand,
+  EntityValidatePlacementCommand,
+  GameCommand,
   GameEvent,
+  GameEventBatch,
   InteractCommand,
   MoveIntentCommand,
   MoveToCommand,
@@ -78,22 +112,22 @@ import { fetchWorld, submitCommand } from './world-api-client';
 import { createWorldEventSource } from './world-stream';
 import type { EventSourceLike } from './world-stream';
 import {
+  compareBlockViewModels,
   compareEntityViewModels,
+  toBlockGridViewModel,
+  toBlockViewModel,
+  toBlockViewModels,
   toBoundsViewModel,
-  toColliderViewModels,
   toEntityViewModels,
   toEntityViewModel,
-  toGridViewModel,
-  toSurfaceViewModels,
-  toTileViewModels,
+  toPlacementValidationViewModel,
 } from './world-view-model';
 import type {
+  BlockGridViewModel,
+  BlockViewModel,
   BoundsViewModel,
-  ColliderViewModel,
   EntityViewModel,
-  GridViewModel,
-  SurfaceViewModel,
-  TileViewModel,
+  PlacementValidationViewModel,
 } from './world-view-model';
 
 /** Snapshot request lifecycle as observed by the UI. */
@@ -105,6 +139,12 @@ export type StreamStatus = 'idle' | 'connecting' | 'live' | 'error';
 /** Desired horizontal movement direction, each component in `[-1, 1]`. */
 type MovementIntent = { x: number; z: number };
 
+/** Plain world-space vector accepted by the placement/rotate intents. */
+type PlainVec3 = { x: number; y: number; z: number };
+
+/** Plain integer cell accepted by the block intents. */
+type PlainCell = { x: number; y: number; z: number };
+
 /** Observable state. */
 export interface WorldState {
   status: WorldStatus;
@@ -113,21 +153,13 @@ export interface WorldState {
   worldId: string | null;
   /** The world's AABB, or `null` while no snapshot is `ready`. */
   bounds: BoundsViewModel | null;
-  /** The gameplay grid configuration, or `null` while no snapshot is `ready`. */
-  grid: GridViewModel | null;
-  /** Static terrain, ordered deterministically by `cellZ` then `cellX`. */
-  tiles: readonly TileViewModel[];
+  /** The block grid's addressing configuration, or `null` while not `ready`. */
+  blockGrid: BlockGridViewModel | null;
   /**
-   * World-geometry support patches, ordered deterministically by `surfaceId`.
-   * `walkable` is passed through as data; the Organizer makes no traversal,
-   * slope or support-selection decision.
+   * Authoritative non-air blocks, ordered deterministically by layer (`y`), then
+   * row (`z`), then column (`x`). `air` is absence and is never present.
    */
-  surfaces: readonly SurfaceViewModel[];
-  /**
-   * World-geometry static blocking volumes, ordered deterministically by
-   * `colliderId`. Geometry only; the Organizer performs no collision test.
-   */
-  colliders: readonly ColliderViewModel[];
+  blocks: readonly BlockViewModel[];
   /** Authoritative entities, ordered deterministically by `entityId`. */
   entities: readonly EntityViewModel[];
   /** The actor the caller controls, or `null` when the caller controls nothing. */
@@ -137,7 +169,7 @@ export interface WorldState {
   /**
    * Short, user-presentable message for a *rejected intent* (e.g. out of range),
    * or `null`. Never used for a broken world: a rejection leaves `status`/`error`
-   * untouched so movement stays usable. Cleared by the next successful intent
+   * untouched so the game stays usable. Cleared by the next successful intent
    * and by `resetWorldState()`.
    */
   notice: string | null;
@@ -150,9 +182,7 @@ const NOTICE_NOT_FOUND = 'That is gone.';
 const NOTICE_GENERIC = 'Could not do that.';
 
 /** Shared empty lists so idle/loading states are reference-stable. */
-const NO_TILES: readonly TileViewModel[] = Object.freeze([]);
-const NO_SURFACES: readonly SurfaceViewModel[] = Object.freeze([]);
-const NO_COLLIDERS: readonly ColliderViewModel[] = Object.freeze([]);
+const NO_BLOCKS: readonly BlockViewModel[] = Object.freeze([]);
 const NO_ENTITIES: readonly EntityViewModel[] = Object.freeze([]);
 
 /** Canonical initial state. Reused so `getWorldState` is reference-stable. */
@@ -161,10 +191,8 @@ const IDLE_STATE: WorldState = {
   streamStatus: 'idle',
   worldId: null,
   bounds: null,
-  grid: null,
-  tiles: NO_TILES,
-  surfaces: NO_SURFACES,
-  colliders: NO_COLLIDERS,
+  blockGrid: null,
+  blocks: NO_BLOCKS,
   entities: NO_ENTITIES,
   controlledActorId: null,
   error: null,
@@ -264,7 +292,7 @@ export function resetWorldState(): void {
  * (`ready` or `error`). Idempotent: concurrent calls share the same promise, and
  * a call while a stream is already `connecting`/`live` is a no-op (it does not
  * re-fetch or restart the stream). A successful snapshot **replaces** the world,
- * bounds, grid, tile, and entity state wholesale.
+ * bounds, block grid, block, and entity state wholesale.
  */
 export function loadWorld(): Promise<void> {
   if (inFlightLoad !== null) {
@@ -299,10 +327,8 @@ async function runLoad(requestGeneration: number): Promise<void> {
     streamStatus: 'idle',
     worldId: null,
     bounds: null,
-    grid: null,
-    tiles: NO_TILES,
-    surfaces: NO_SURFACES,
-    colliders: NO_COLLIDERS,
+    blockGrid: null,
+    blocks: NO_BLOCKS,
     entities: NO_ENTITIES,
     controlledActorId: null,
     error: null,
@@ -325,10 +351,8 @@ async function runLoad(requestGeneration: number): Promise<void> {
       streamStatus: 'idle',
       worldId: null,
       bounds: null,
-      grid: null,
-      tiles: NO_TILES,
-      surfaces: NO_SURFACES,
-      colliders: NO_COLLIDERS,
+      blockGrid: null,
+      blocks: NO_BLOCKS,
       entities: NO_ENTITIES,
       controlledActorId: null,
       error: describeApiError(error, 'Something went wrong while loading the world.'),
@@ -338,10 +362,10 @@ async function runLoad(requestGeneration: number): Promise<void> {
 }
 
 /**
- * Project a validated snapshot into client state. Bounds/grid are mapped fresh,
- * tiles get their world positions derived from the grid, and entities are mapped
- * with their full 3D transform. World geometry (surfaces/colliders) is mapped as
- * plain view-model data; no traversal or collision rule is applied here.
+ * Project a validated snapshot into client state. Bounds/blockGrid are mapped
+ * fresh, blocks get their world-space centres derived from the grid, and
+ * entities are mapped with their full 3D transform. No traversal or collision
+ * rule is applied here.
  */
 function fromSnapshot(
   snapshot: WorldSnapshot,
@@ -354,10 +378,8 @@ function fromSnapshot(
     streamStatus,
     worldId: snapshot.worldId,
     bounds: toBoundsViewModel(snapshot.bounds),
-    grid: toGridViewModel(snapshot.grid),
-    tiles: toTileViewModels(snapshot.tiles, snapshot.grid),
-    surfaces: toSurfaceViewModels(snapshot.surfaces),
-    colliders: toColliderViewModels(snapshot.colliders),
+    blockGrid: toBlockGridViewModel(snapshot.blockGrid),
+    blocks: toBlockViewModels(snapshot.blocks, snapshot.blockGrid),
     entities: toEntityViewModels(snapshot.entities),
     controlledActorId: snapshot.controlledActorId,
     error,
@@ -509,6 +531,23 @@ function setStreamStatus(next: StreamStatus): void {
   setState({ ...state, streamStatus: next });
 }
 
+// --- Command response narrowing --------------------------------------------
+
+/**
+ * Narrow the `CommandResponse` union to its event-batch arm.
+ *
+ * Every mutating command's success body is a `GameEventBatch`; only
+ * `entity.validatePlacement` returns the other arm. A validate response on a
+ * mutating path is a contract violation, so it is surfaced as an `ApiError` the
+ * existing error/notice handling can classify.
+ */
+function asEventBatch(response: CommandResponse): GameEventBatch {
+  if ('events' in response) {
+    return response;
+  }
+  throw new ApiError('contract', 'Game server sent an unexpected response.');
+}
+
 // --- Movement intent -------------------------------------------------------
 
 /**
@@ -520,12 +559,12 @@ function setStreamStatus(next: StreamStatus): void {
  * sent (and none may be invented here), and the client never sends a position.
  * Semantics:
  *
- * - **No world loaded yet:** safe no-op that resolves without sending anything.
+ * - **No controlled actor yet:** safe no-op that resolves without sending.
  * - **A request already in flight:** no second concurrent request; the latest
  *   movement is queued and dispatched when the current request settles.
  * - **Never rejects:** failures settle the store into `error` and resolve.
  *
- * It changes no client position: only the authoritative events returned by the
+ * It changes no client state: only the authoritative events returned by the
  * server (or the stream) move an entity. There is no prediction.
  */
 export function setMovementIntent(movement: { x: number; z: number }): Promise<void> {
@@ -616,14 +655,14 @@ async function performIntent(
   };
 
   try {
-    const batch = await submitCommand(command);
+    const response = await submitCommand(command);
     if (loopGeneration !== generation) {
       return;
     }
     if (state.controlledActorId === null) {
       return;
     }
-    applyEvents(batch.events);
+    applyEvents(asEventBatch(response).events);
     if (loopGeneration !== generation) {
       return;
     }
@@ -653,7 +692,7 @@ function toMoveErrorMessage(error: unknown): string {
   return describeApiError(error, 'Something went wrong while sending movement.');
 }
 
-// --- One-shot intents: moveTo / interact -----------------------------------
+// --- One-shot actor intents: moveTo / interact / jump ----------------------
 
 /**
  * UI intent: "steer the actor I control toward this world-space point".
@@ -666,9 +705,9 @@ function toMoveErrorMessage(error: unknown): string {
  *
  * It changes no client position (no prediction) and, like `setMovementIntent`,
  * is a safe no-op before a controlled actor exists. A rejected goal sets
- * `notice` only — it never flips `status` or `error`. Never rejects.
+ * `notice` only - it never flips `status` or `error`. Never rejects.
  */
-export function moveTo(target: { x: number; y: number; z: number }): Promise<void> {
+export function moveTo(target: PlainVec3): Promise<void> {
   if (state.controlledActorId === null) {
     return Promise.resolve();
   }
@@ -684,10 +723,10 @@ export function moveTo(target: { x: number; y: number; z: number }): Promise<voi
  * UI intent: "interact with this world entity".
  *
  * The store builds and posts exactly `{ type: 'actor.interact', targetEntityId }`.
- * The Manager validates existence, range and interactability; today the only
- * observed effect is an authoritative `transform.changed` (face + stop), which is
- * reconciled like any other event. Any refusal is surfaced through `notice`, never
- * by corrupting a position locally. Never rejects.
+ * The Manager validates existence, range and interactability; the observed effect
+ * (an authoritative `transform.changed`) is reconciled like any other event. Any
+ * refusal is surfaced through `notice`, never by corrupting state locally. Never
+ * rejects.
  */
 export function interact(targetEntityId: string): Promise<void> {
   if (state.controlledActorId === null) {
@@ -708,21 +747,37 @@ export function interact(targetEntityId: string): Promise<void> {
 }
 
 /**
+ * UI intent: "jump".
+ *
+ * The store builds and posts exactly `{ type: 'actor.jump' }` - no payload. The
+ * jump height, velocity, gravity and the grounded check are Manager rules. A safe
+ * no-op before a controlled actor exists; a refusal is a `notice`, never a broken
+ * world. Never rejects.
+ */
+export function jump(): Promise<void> {
+  if (state.controlledActorId === null) {
+    return Promise.resolve();
+  }
+  const command: ActorJumpCommand = { type: 'actor.jump' };
+  return submitPlayerIntent(command);
+}
+
+/**
  * Submit a one-shot player intent and reconcile its outcome.
  *
  * Success applies the authoritative event delta (which is the only thing that may
- * move anything) and clears any stale `notice`. A rejection carries no events and
+ * change state) and clears any stale `notice`. A rejection carries no events and
  * must not be treated as a broken world: it maps to a short `notice` while
  * `status`/`error` are left exactly as they were.
  */
-async function submitPlayerIntent(command: MoveToCommand | InteractCommand): Promise<void> {
+async function submitPlayerIntent(command: GameCommand): Promise<void> {
   const intentGeneration = generation;
   try {
-    const batch = await submitCommand(command);
+    const response = await submitCommand(command);
     if (intentGeneration !== generation) {
       return;
     }
-    applyEvents(batch.events);
+    applyEvents(asEventBatch(response).events);
     if (intentGeneration !== generation) {
       return;
     }
@@ -735,20 +790,234 @@ async function submitPlayerIntent(command: MoveToCommand | InteractCommand): Pro
   }
 }
 
+// --- Block / entity edit intents -------------------------------------------
+
+/**
+ * UI intent: "set the block at this absolute cell".
+ *
+ * Thin wrapper over `{ type: 'block.set', coord, kind, orientation }`. `kind:
+ * 'air'` means "remove" on the wire, though `removeBlock` is the explicit
+ * spelling. The Organizer validates the shape only (branded ids/kinds); whether
+ * the edit is permitted is the Manager's rule. The authoritative result arrives
+ * as a `block.changed` event in the ack and is reconciled incrementally.
+ */
+export function setBlock(
+  coord: PlainCell,
+  kind: string,
+  orientation: number,
+): Promise<void> {
+  if (state.worldId === null) {
+    return Promise.resolve();
+  }
+  let cell: CellCoord;
+  let blockKind: BlockKind;
+  let blockOrientation: BlockOrientation;
+  try {
+    cell = parseCellCoord(coord);
+    blockKind = parseBlockKind(kind);
+    blockOrientation = parseBlockOrientation(orientation);
+  } catch {
+    setNotice(NOTICE_GENERIC);
+    return Promise.resolve();
+  }
+  const command: BlockSetCommand = {
+    type: 'block.set',
+    coord: cell,
+    kind: blockKind,
+    orientation: blockOrientation,
+  };
+  return submitEditIntent(command);
+}
+
+/**
+ * UI intent: "remove the block at this absolute cell".
+ *
+ * Thin wrapper over `{ type: 'block.remove', coord }`. Permission is a Manager
+ * rule; the result arrives as a `block.changed` with `kind: 'air'`.
+ */
+export function removeBlock(coord: PlainCell): Promise<void> {
+  if (state.worldId === null) {
+    return Promise.resolve();
+  }
+  let cell: CellCoord;
+  try {
+    cell = parseCellCoord(coord);
+  } catch {
+    setNotice(NOTICE_GENERIC);
+    return Promise.resolve();
+  }
+  const command: BlockRemoveCommand = { type: 'block.remove', coord: cell };
+  return submitEditIntent(command);
+}
+
+/**
+ * UI intent: "place an entity near this requested anchor".
+ *
+ * Thin wrapper over `{ type: 'entity.place', kind, position, yawDegrees }`.
+ * `position` is a *requested* anchor, not a committed transform: the Manager's
+ * Placement Resolver snaps and validates it. The Organizer performs no snapping
+ * and makes no legality decision.
+ */
+export function placeEntity(
+  kind: string,
+  position: PlainVec3,
+  yawDegrees: number,
+): Promise<void> {
+  if (state.worldId === null) {
+    return Promise.resolve();
+  }
+  let entityKind: EntityKind;
+  try {
+    entityKind = parseEntityKind(kind);
+  } catch {
+    setNotice(NOTICE_GENERIC);
+    return Promise.resolve();
+  }
+  const command: EntityPlaceCommand = {
+    type: 'entity.place',
+    kind: entityKind,
+    position: { x: position.x, y: position.y, z: position.z },
+    yawDegrees,
+  };
+  return submitEditIntent(command);
+}
+
+/**
+ * UI intent: "rotate this entity to this requested yaw".
+ *
+ * Thin wrapper over `{ type: 'entity.rotate', entityId, yawDegrees }`.
+ * `yawDegrees` is a requested facing, not a guarantee: the Manager may snap the
+ * committed transform as part of the rotation.
+ */
+export function rotateEntity(entityId: string, yawDegrees: number): Promise<void> {
+  if (state.worldId === null) {
+    return Promise.resolve();
+  }
+  let id: EntityId;
+  try {
+    id = parseEntityId(entityId);
+  } catch {
+    setNotice(NOTICE_GENERIC);
+    return Promise.resolve();
+  }
+  const command: EntityRotateCommand = {
+    type: 'entity.rotate',
+    entityId: id,
+    yawDegrees,
+  };
+  return submitEditIntent(command);
+}
+
+/**
+ * UI intent: "remove this entity".
+ *
+ * Thin wrapper over `{ type: 'entity.remove', entityId }`. The authoritative
+ * result arrives as an `entity.removed` event.
+ */
+export function removeEntity(entityId: string): Promise<void> {
+  if (state.worldId === null) {
+    return Promise.resolve();
+  }
+  let id: EntityId;
+  try {
+    id = parseEntityId(entityId);
+  } catch {
+    setNotice(NOTICE_GENERIC);
+    return Promise.resolve();
+  }
+  const command: EntityRemoveCommand = { type: 'entity.remove', entityId: id };
+  return submitEditIntent(command);
+}
+
+/**
+ * Submit a block/entity edit intent and reconcile its outcome like a one-shot
+ * player intent: the authoritative events apply on success and a refusal becomes
+ * a short `notice` without touching `status`/`error`.
+ */
+async function submitEditIntent(command: GameCommand): Promise<void> {
+  const intentGeneration = generation;
+  try {
+    const response = await submitCommand(command);
+    if (intentGeneration !== generation) {
+      return;
+    }
+    applyEvents(asEventBatch(response).events);
+    if (intentGeneration !== generation) {
+      return;
+    }
+    clearNotice();
+  } catch (error) {
+    if (intentGeneration !== generation) {
+      return;
+    }
+    setNotice(toIntentNotice(error));
+  }
+}
+
+// --- Placement preview -----------------------------------------------------
+
+/**
+ * UI intent: "would this placement be legal, and where would it land?".
+ *
+ * This is the **preview** path: it posts the canonical
+ * `{ type: 'entity.validatePlacement', kind, position, yawDegrees }` query and
+ * returns the server's verdict mapped to plain view-model data, or `null` when no
+ * world is loaded / the query could not be completed.
+ *
+ * The store makes **no** validity decision and caches **no** verdict: support,
+ * occupancy conflicts, terrain permission and permissions are Manager rules, and
+ * `valid` is the server's answer. The verdict is a non-authoritative preview -
+ * the caller (UI) owns debouncing and discarding stale responses.
+ */
+export async function validatePlacement(
+  kind: string,
+  position: PlainVec3,
+  yawDegrees: number,
+): Promise<PlacementValidationViewModel | null> {
+  if (state.worldId === null) {
+    return null;
+  }
+  let entityKind: EntityKind;
+  try {
+    entityKind = parseEntityKind(kind);
+  } catch {
+    return null;
+  }
+  const command: EntityValidatePlacementCommand = {
+    type: 'entity.validatePlacement',
+    kind: entityKind,
+    position: { x: position.x, y: position.y, z: position.z },
+    yawDegrees,
+  };
+  const intentGeneration = generation;
+  try {
+    const response = await submitCommand(command);
+    if (intentGeneration !== generation) {
+      return null;
+    }
+    // A validate query must answer with a verdict; any other arm is not a
+    // usable preview and is ignored rather than cached as authority.
+    if (!('valid' in response)) {
+      return null;
+    }
+    return toPlacementValidationViewModel(response);
+  } catch {
+    if (intentGeneration !== generation) {
+      return null;
+    }
+    return null;
+  }
+}
+
 /**
  * Map a one-shot intent failure to a short, user-presentable `notice`.
  *
  * The *reason* is taken from the canonical `ProtocolError` body, never from the
  * HTTP status alone: a `409 CONFLICT` is a well-formed request that is illegal
- * against the current world state, which covers several distinct refusals (out of
- * range, non-interactable, ...). The server authors a short, user-presentable
- * `message` for exactly that case, so it is surfaced verbatim. When the body is
- * missing/unparseable, or the status is neither 404 nor 409, fall back to a
- * generic, non-technical phrase.
- *
- * - `CONFLICT` (409): the server's message, else the generic phrase.
- * - `NOT_FOUND` (404): "That is gone."
- * - Anything else: the generic phrase.
+ * against the current world state, which covers several distinct refusals. The
+ * server authors a short, user-presentable `message` for exactly that case, so it
+ * is surfaced verbatim. When the body is missing/unparseable, or the status is
+ * neither 404 nor 409, fall back to a generic, non-technical phrase.
  */
 function toIntentNotice(error: unknown): string {
   if (error instanceof ApiError && error.kind === 'status') {
@@ -779,18 +1048,20 @@ function clearNotice(): void {
 // --- Event reconciliation --------------------------------------------------
 
 /**
- * Reconcile an authoritative event delta into entity state.
+ * Reconcile an authoritative event delta into block/entity state.
  *
  * - `transform.changed` updates exactly that entity; it never creates one.
  * - `entity.spawned` adds (or replaces) the entity.
  * - `entity.removed` drops the entity.
+ * - `block.changed` adds/replaces the block at `coord`, or - when `kind` is
+ *   `'air'` - removes it. No world refetch is triggered.
  *
  * An **empty** event list is the server refusing a command: it is not an error,
  * the status stays `ready`, the error stays `null`, and nothing changes. Events
  * that would produce no observable change are ignored so the state object (and
  * therefore the `useSyncExternalStore` snapshot) stays reference-stable.
  *
- * Static tiles/grid/bounds are carried over reference-identically: no event
+ * Static bounds/blockGrid are carried over reference-identically: no event
  * replaces them, only a fresh snapshot does.
  *
  * Exported as an internal seam only (it is deliberately **not** re-exported from
@@ -807,8 +1078,14 @@ export function applyEvents(events: readonly GameEvent[]): void {
   for (const entity of state.entities) {
     byId.set(entity.entityId, entity);
   }
+  const blocksByKey = new Map<string, BlockViewModel>();
+  for (const block of state.blocks) {
+    blocksByKey.set(blockKey(block.coord), block);
+  }
+  const grid = state.blockGrid;
 
-  let changed = false;
+  let entitiesChanged = false;
+  let blocksChanged = false;
   for (const event of events) {
     switch (event.type) {
       case 'entity.spawned': {
@@ -816,13 +1093,13 @@ export function applyEvents(events: readonly GameEvent[]): void {
         const previous = byId.get(next.entityId);
         if (previous === undefined || !entityEquals(previous, next)) {
           byId.set(next.entityId, next);
-          changed = true;
+          entitiesChanged = true;
         }
         break;
       }
       case 'entity.removed': {
         if (byId.delete(event.entityId)) {
-          changed = true;
+          entitiesChanged = true;
         }
         break;
       }
@@ -846,7 +1123,30 @@ export function applyEvents(events: readonly GameEvent[]): void {
           };
           if (!entityEquals(previous, next)) {
             byId.set(event.entityId, next);
-            changed = true;
+            entitiesChanged = true;
+          }
+        }
+        break;
+      }
+      case 'block.changed': {
+        // A block delta is only meaningful once a snapshot supplied the grid.
+        if (grid === null) {
+          break;
+        }
+        const key = blockKey(event.coord);
+        if (event.kind === 'air') {
+          if (blocksByKey.delete(key)) {
+            blocksChanged = true;
+          }
+        } else {
+          const next = toBlockViewModel(
+            { coord: event.coord, kind: event.kind, orientation: event.orientation },
+            { origin: grid.origin, cellSize: grid.cellSize },
+          );
+          const previous = blocksByKey.get(key);
+          if (previous === undefined || !blockEquals(previous, next)) {
+            blocksByKey.set(key, next);
+            blocksChanged = true;
           }
         }
         break;
@@ -868,21 +1168,28 @@ export function applyEvents(events: readonly GameEvent[]): void {
     }
   }
 
-  if (!changed) {
+  if (!entitiesChanged && !blocksChanged) {
     return;
   }
 
   setState({
     ...state,
     status: 'ready',
-    tiles: state.tiles,
-    surfaces: state.surfaces,
-    colliders: state.colliders,
-    grid: state.grid,
+    blockGrid: state.blockGrid,
     bounds: state.bounds,
-    entities: [...byId.values()].sort(compareEntityViewModels),
+    blocks: blocksChanged
+      ? [...blocksByKey.values()].sort(compareBlockViewModels)
+      : state.blocks,
+    entities: entitiesChanged
+      ? [...byId.values()].sort(compareEntityViewModels)
+      : state.entities,
     error: null,
   });
+}
+
+/** Stable key for an absolute cell, used to reconcile block deltas by coord. */
+function blockKey(coord: PlainCell): string {
+  return `${coord.x},${coord.y},${coord.z}`;
 }
 
 function entityEquals(a: EntityViewModel, b: EntityViewModel): boolean {
@@ -898,6 +1205,16 @@ function entityEquals(a: EntityViewModel, b: EntityViewModel): boolean {
     a.rotation.y === b.rotation.y &&
     a.rotation.z === b.rotation.z &&
     a.rotation.w === b.rotation.w
+  );
+}
+
+function blockEquals(a: BlockViewModel, b: BlockViewModel): boolean {
+  return (
+    a.coord.x === b.coord.x &&
+    a.coord.y === b.coord.y &&
+    a.coord.z === b.coord.z &&
+    a.kind === b.kind &&
+    a.orientation === b.orientation
   );
 }
 

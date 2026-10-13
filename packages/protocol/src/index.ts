@@ -10,13 +10,13 @@
  * pair. Commands and events are discriminated unions on `type`; there is no
  * `action: string` + `args: unknown` catch-all.
  *
- * Phase 7 models a real continuous 3D world. The gameplay grid is a separate
- * interaction layer (`GridSpec`/`CellCoord`/`TileState`); it is never the
- * Actor's motion coordinate system. Phase 14 makes that explicit: the snapshot
- * carries a **world-geometry** layer (`surfaces`/`colliders`) in which `y` is a
- * real coordinate, the gameplay grid is demoted to metadata, and the actor's
- * `Transform.position.y` is authoritative. `Vec3`/`Quat` are re-exported here so
- * consumers keep a single import site.
+ * Phase 15 models a block-spatial kernel: the world converges on a Minecraft-
+ * style **spatial** model (borrowing the spatial/collision idea only, never
+ * Minecraft content, code or art). Two orthogonal systems share one real 3D
+ * coordinate system (`+X` East, `+Y` Up, `+Z` South): the discrete Block World
+ * (integer `CellCoord` grids, chunks, topology) and the continuous Entity World
+ * (`Vec3` + `Quat` transforms, entities, placement). `Vec3`/`Quat` are
+ * re-exported here so consumers keep a single import site.
  */
 
 export {
@@ -27,6 +27,18 @@ export {
   STREAM_PATH,
   WORLD_PATH,
 } from './constants.ts';
+
+export {
+  isBlockKind,
+  isBlockOrientation,
+  isBlockState,
+  isYawStep,
+  parseBlockKind,
+  parseBlockOrientation,
+  parseBlockState,
+  parseYawStep,
+} from './block.ts';
+export type { BlockKind, BlockOrientation, BlockState, YawStep } from './block.ts';
 
 export {
   isEntityKind,
@@ -42,16 +54,19 @@ export { ProtocolParseError, toProtocolError } from './errors.ts';
 export type { ProtocolError, ProtocolErrorCode } from './errors.ts';
 
 export {
+  isBlockChangedEvent,
   isEntityRemovedEvent,
   isEntitySpawnedEvent,
   isGameEvent,
   isTransformChangedEvent,
+  parseBlockChangedEvent,
   parseEntityRemovedEvent,
   parseEntitySpawnedEvent,
   parseGameEvent,
   parseTransformChangedEvent,
 } from './event.ts';
 export type {
+  BlockChangedEvent,
   EntityRemovedEvent,
   EntitySpawnedEvent,
   GameEvent,
@@ -59,58 +74,103 @@ export type {
 } from './event.ts';
 
 export {
+  isActorJumpCommand,
+  isBlockRemoveCommand,
+  isBlockSetCommand,
+  isCommandResponse,
+  isEntityPlaceCommand,
+  isEntityRemoveCommand,
+  isEntityRotateCommand,
+  isEntityValidatePlacementCommand,
   isGameCommand,
   isGameEventBatch,
   isInteractCommand,
   isMoveIntentCommand,
   isMoveToCommand,
+  isValidatePlacementResponse,
+  parseActorJumpCommand,
+  parseBlockRemoveCommand,
+  parseBlockSetCommand,
+  parseCommandResponse,
+  parseEntityPlaceCommand,
+  parseEntityRemoveCommand,
+  parseEntityRotateCommand,
+  parseEntityValidatePlacementCommand,
   parseGameCommand,
   parseGameEventBatch,
   parseInteractCommand,
   parseMoveIntentCommand,
   parseMoveToCommand,
+  parseValidatePlacementResponse,
 } from './command.ts';
 export type {
+  ActorJumpCommand,
+  BlockRemoveCommand,
+  BlockSetCommand,
+  CommandResponse,
+  EntityPlaceCommand,
+  EntityRemoveCommand,
+  EntityRotateCommand,
+  EntityValidatePlacementCommand,
   GameCommand,
   GameEventBatch,
   InteractCommand,
   MoveIntentCommand,
   MoveToCommand,
+  ValidatePlacementResponse,
 } from './command.ts';
 
 export {
+  isBlockKindInfo,
+  isEntityKindInfo,
   isGameInfo,
   isGetGameInfoResponse,
+  parseBlockKindInfo,
+  parseEntityKindInfo,
   parseGameInfo,
   parseGetGameInfoResponse,
 } from './game-info.ts';
-export type { GameInfo, GetGameInfoResponse } from './game-info.ts';
+export type {
+  BlockKindInfo,
+  EntityKindInfo,
+  GameInfo,
+  GetGameInfoResponse,
+} from './game-info.ts';
 
 export { isHealthStatus, parseHealthStatus } from './health.ts';
 export type { HealthStatus } from './health.ts';
 
 export {
   isActorId,
-  isColliderId,
   isEntityId,
   isPlayerId,
-  isSurfaceId,
   isWorldId,
   parseActorId,
-  parseColliderId,
   parseEntityId,
   parsePlayerId,
-  parseSurfaceId,
   parseWorldId,
 } from './identity.ts';
-export type {
-  ActorId,
-  ColliderId,
-  EntityId,
-  PlayerId,
-  SurfaceId,
-  WorldId,
-} from './identity.ts';
+export type { ActorId, EntityId, PlayerId, WorldId } from './identity.ts';
+
+export {
+  CHUNK_SIZE,
+  cellCentre,
+  cellOf,
+  cellToChunk,
+  cellToLocal,
+  chunkLocalToCell,
+  chunkOriginCell,
+  isBlockGrid,
+  isCellCoord,
+  isChunkCoord,
+  isFootprintExtents,
+  parseBlockGrid,
+  parseCellCoord,
+  parseChunkCoord,
+  parseFootprintExtents,
+  snapFootprintCentre,
+} from './grid.ts';
+export type { BlockGrid, CellCoord, ChunkCoord, FootprintExtents } from './grid.ts';
 
 export { isQuat, isVec3, parseQuat, parseVec3 } from './math.ts';
 export type { Quat, Vec3 } from './math.ts';
@@ -119,43 +179,11 @@ export { isWorldStreamMessage, parseWorldStreamMessage } from './stream.ts';
 export type { WorldStreamMessage } from './stream.ts';
 
 export {
-  cellCentre,
-  cellOf,
-  isCellCoord,
-  isColliderKind,
-  isColliderShape,
-  isColliderState,
   isGetWorldResponse,
-  isGridSpec,
-  isSurfaceKind,
-  isSurfaceState,
-  isTerrainKind,
-  isTileState,
   isWorldBounds,
   isWorldSnapshot,
-  parseCellCoord,
-  parseColliderKind,
-  parseColliderState,
   parseGetWorldResponse,
-  parseGridSpec,
-  parseSurfaceKind,
-  parseSurfaceState,
-  parseTerrainKind,
-  parseTileState,
   parseWorldBounds,
   parseWorldSnapshot,
 } from './world.ts';
-export type {
-  CellCoord,
-  ColliderKind,
-  ColliderShape,
-  ColliderState,
-  GetWorldResponse,
-  GridSpec,
-  SurfaceKind,
-  SurfaceState,
-  TerrainKind,
-  TileState,
-  WorldBounds,
-  WorldSnapshot,
-} from './world.ts';
+export type { GetWorldResponse, WorldBounds, WorldSnapshot } from './world.ts';

@@ -22,7 +22,36 @@ const VALID_GAME_INFO = {
   serverTime: '2025-01-02T03:04:05.000Z',
 };
 
-const VALID_RESPONSE = { gameInfo: VALID_GAME_INFO };
+// Phase-15 static presentation catalogues. Deliberately scrambled so the mapper's
+// deterministic `kind` ordering is observable.
+const VALID_BLOCK_KINDS = [
+  { kind: 'stone', orientable: true },
+  { kind: 'grass', orientable: false },
+];
+const VALID_ENTITY_KINDS = [
+  {
+    kind: 'building',
+    footprintX: 2,
+    footprintZ: 3,
+    height: 4,
+    allowedYawSteps: [0, 90, 180, 270],
+    pivot: 'center',
+  },
+  {
+    kind: 'tree',
+    footprintX: 1,
+    footprintZ: 1,
+    height: 2,
+    allowedYawSteps: [0],
+    pivot: 'center',
+  },
+];
+
+const VALID_RESPONSE = {
+  gameInfo: VALID_GAME_INFO,
+  blockKinds: VALID_BLOCK_KINDS,
+  entityKinds: VALID_ENTITY_KINDS,
+};
 
 interface FakeResponseInit {
   ok?: boolean;
@@ -88,6 +117,63 @@ describe('loadGameInfo', () => {
     expect(state.data?.lastSyncedAt).toMatch(
       /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
     );
+  });
+
+  it('maps and deterministically orders the static block/entity catalogues', async () => {
+    setGameInfoFetch(async () => fakeResponse(VALID_RESPONSE));
+
+    await loadGameInfo();
+
+    const data = getGameInfoState().data;
+    expect(data?.blockKinds).toEqual([
+      { kind: 'grass', orientable: false },
+      { kind: 'stone', orientable: true },
+    ]);
+    expect(data?.entityKinds).toEqual([
+      {
+        kind: 'building',
+        footprintX: 2,
+        footprintZ: 3,
+        height: 4,
+        allowedYawSteps: [0, 90, 180, 270],
+        pivot: 'center',
+      },
+      {
+        kind: 'tree',
+        footprintX: 1,
+        footprintZ: 1,
+        height: 2,
+        allowedYawSteps: [0],
+        pivot: 'center',
+      },
+    ]);
+  });
+
+  it('rejects a game-info payload whose catalogues are missing (no catalogues leak through)', async () => {
+    setGameInfoFetch(async () => fakeResponse({ gameInfo: VALID_GAME_INFO }));
+
+    await loadGameInfo();
+
+    const state = getGameInfoState();
+    expect(state.status).toBe('error');
+    expect(state.data).toBeNull();
+    expect(state.error).toBeTruthy();
+  });
+
+  it('rejects an entity-kind catalogue entry with a non-positive footprint', async () => {
+    setGameInfoFetch(async () =>
+      fakeResponse({
+        gameInfo: VALID_GAME_INFO,
+        blockKinds: VALID_BLOCK_KINDS,
+        entityKinds: [{ ...VALID_ENTITY_KINDS[1], footprintX: 0 }],
+      }),
+    );
+
+    await loadGameInfo();
+
+    const state = getGameInfoState();
+    expect(state.status).toBe('error');
+    expect(state.data).toBeNull();
   });
 
   it('maps a network rejection to an error state with no data and a user message', async () => {
@@ -219,12 +305,22 @@ describe('loadGameInfo', () => {
 
     // Resolve the superseded request first: its payload must be ignored and
     // the store must keep `connecting` for the newer request.
-    firstDeferred.resolve(fakeResponse({ gameInfo: { ...VALID_GAME_INFO, gameName: 'First' } }));
+    firstDeferred.resolve(
+      fakeResponse({
+        gameInfo: { ...VALID_GAME_INFO, gameName: 'First' },
+        blockKinds: VALID_BLOCK_KINDS,
+        entityKinds: VALID_ENTITY_KINDS,
+      }),
+    );
     await first;
     expect(getGameInfoState().status).toBe('connecting');
 
     secondDeferred.resolve(
-      fakeResponse({ gameInfo: { ...VALID_GAME_INFO, gameName: 'Second' } }),
+      fakeResponse({
+        gameInfo: { ...VALID_GAME_INFO, gameName: 'Second' },
+        blockKinds: VALID_BLOCK_KINDS,
+        entityKinds: VALID_ENTITY_KINDS,
+      }),
     );
     await second;
 

@@ -1,6 +1,10 @@
+import { isBlockKind, isBlockOrientation } from './block.ts';
+import type { BlockKind, BlockOrientation } from './block.ts';
 import { ProtocolParseError } from './errors.ts';
 import { isEntityState, isTransform } from './entity.ts';
 import type { EntityState, Transform } from './entity.ts';
+import { isCellCoord } from './grid.ts';
+import type { CellCoord } from './grid.ts';
 import { isEntityId } from './identity.ts';
 import type { EntityId } from './identity.ts';
 import { hasExactKeys, isRecord } from './internal.ts';
@@ -28,17 +32,38 @@ export interface TransformChangedEvent {
 }
 
 /**
+ * One block in the discrete Block World changed. `kind: 'air'` means the block
+ * at `coord` was removed (air is absence in a snapshot, but a block-change event
+ * spells removal explicitly). Absolute integer `coord`; never chunk-local.
+ */
+export interface BlockChangedEvent {
+  type: 'block.changed';
+  coord: CellCoord;
+  kind: BlockKind;
+  orientation: BlockOrientation;
+}
+
+/**
  * Discriminated union of authoritative world deltas, dispatched on `type`.
  *
  * Events are the *delta*; `WorldSnapshot` is the full state. A command that the
  * server refuses produces no events at all (an empty array), never a negative
  * event.
+ *
+ * There is deliberately **no occupancy event**: occupancy (which cells an entity
+ * covers) is a SERVER-ONLY derived index, it is not carried in the snapshot in
+ * v1, and the client learns it from `entity.validatePlacement` instead.
  */
-export type GameEvent = EntitySpawnedEvent | EntityRemovedEvent | TransformChangedEvent;
+export type GameEvent =
+  | EntitySpawnedEvent
+  | EntityRemovedEvent
+  | TransformChangedEvent
+  | BlockChangedEvent;
 
 const ENTITY_SPAWNED_KEYS = ['type', 'entity'] as const;
 const ENTITY_REMOVED_KEYS = ['type', 'entityId'] as const;
 const TRANSFORM_CHANGED_KEYS = ['type', 'entityId', 'transform'] as const;
+const BLOCK_CHANGED_KEYS = ['type', 'coord', 'kind', 'orientation'] as const;
 
 /** Structural guard for `EntitySpawnedEvent`. */
 export function isEntitySpawnedEvent(value: unknown): value is EntitySpawnedEvent {
@@ -96,6 +121,30 @@ export function parseTransformChangedEvent(value: unknown): TransformChangedEven
 }
 
 /**
+ * Structural guard for `BlockChangedEvent`
+ * (exactly `{ type, coord, kind, orientation }`). `kind: 'air'` IS accepted here
+ * to express removal.
+ */
+export function isBlockChangedEvent(value: unknown): value is BlockChangedEvent {
+  return (
+    isRecord(value) &&
+    hasExactKeys(value, BLOCK_CHANGED_KEYS) &&
+    value.type === 'block.changed' &&
+    isCellCoord(value.coord) &&
+    isBlockKind(value.kind) &&
+    isBlockOrientation(value.orientation)
+  );
+}
+
+/** Parse and validate `BlockChangedEvent`, throwing `ProtocolParseError` on mismatch. */
+export function parseBlockChangedEvent(value: unknown): BlockChangedEvent {
+  if (!isBlockChangedEvent(value)) {
+    throw new ProtocolParseError('Invalid BlockChangedEvent payload');
+  }
+  return value;
+}
+
+/**
  * Structural guard for `GameEvent`.
  *
  * Dispatches on the `type` discriminant. An unknown `type` (or any malformed
@@ -112,6 +161,8 @@ export function isGameEvent(value: unknown): value is GameEvent {
       return isEntityRemovedEvent(value);
     case 'transform.changed':
       return isTransformChangedEvent(value);
+    case 'block.changed':
+      return isBlockChangedEvent(value);
     default:
       return false;
   }
@@ -132,6 +183,8 @@ export function parseGameEvent(value: unknown): GameEvent {
         return parseEntityRemovedEvent(value);
       case 'transform.changed':
         return parseTransformChangedEvent(value);
+      case 'block.changed':
+        return parseBlockChangedEvent(value);
       default:
         break;
     }

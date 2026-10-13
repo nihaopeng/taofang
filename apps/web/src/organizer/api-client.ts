@@ -13,7 +13,7 @@
  */
 
 import { GAME_INFO_PATH, parseGetGameInfoResponse } from '@starvalley/protocol';
-import type { GameInfo } from '@starvalley/protocol';
+import type { GetGameInfoResponse } from '@starvalley/protocol';
 
 import { defaultFetch, parseContract, requestJson, resolveApiUrl } from './transport';
 import type { FetchLike } from './transport';
@@ -41,12 +41,14 @@ export function resetGameInfoFetch(): void {
 }
 
 /**
- * Fetch and validate game info.
+ * Fetch and validate game info plus its static presentation catalogues.
  *
- * Resolves the Protocol `GameInfo` (not the envelope, never the raw response).
- * Rejects only with `GameInfoApiError` so the caller can classify the failure.
+ * Resolves the whole validated `GetGameInfoResponse` (`gameInfo` + `blockKinds`
+ * + `entityKinds`), never the raw response: the catalogues travel with the same
+ * payload and are validated by the same canonical guard. Rejects only with
+ * `GameInfoApiError` so the caller can classify the failure.
  */
-export async function fetchGameInfo(): Promise<GameInfo> {
+export async function fetchGameInfo(): Promise<GetGameInfoResponse> {
   const payload = await requestJson(fetchImpl, resolveGameInfoUrl(), {
     method: 'GET',
     headers: { Accept: 'application/json' },
@@ -54,7 +56,7 @@ export async function fetchGameInfo(): Promise<GameInfo> {
 
   return parseContract(
     payload,
-    (value) => parseGetGameInfoResponse(value).gameInfo,
+    (value) => parseGetGameInfoResponse(value),
     'Game server response did not match the protocol.',
   );
 }

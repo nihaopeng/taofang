@@ -4,11 +4,16 @@
  * `PROTOCOL_VERSION` is the client/server compatibility marker carried in
  * `GameInfo`. Bump it only for breaking wire changes.
  *
- * Version 8 is the phase-14 break: `WorldSnapshot` gained the world-geometry
- * layer `surfaces`/`colliders` (real 3D support patches and `y`-ranged
- * colliders). The old snapshot shape is rejected by the exact-key guards.
+ * Version 9 is the phase-15 break: the world kernel converges on a
+ * block-spatial model. `WorldSnapshot` drops the phase-14 world-geometry layer
+ * (`surfaces`/`colliders`) and the gameplay grid (`grid`/`tiles`) and gains
+ * `blockGrid` + a sparse `blocks` list of 3D integer cells; `CellCoord` becomes
+ * 3D; `EntityKind` grows; the placement/block commands and the `block.changed`
+ * event are added; the GameInfo payload gains the static `blockKinds`/
+ * `entityKinds` presentation catalogues. The old snapshot shape is rejected by
+ * the exact-key guards.
  */
-export const PROTOCOL_VERSION = 8;
+export const PROTOCOL_VERSION = 9;
 
 /** Wire path for the game-info endpoint. Transport-neutral: Router maps it. */
 export const GAME_INFO_PATH = '/api/game-info';

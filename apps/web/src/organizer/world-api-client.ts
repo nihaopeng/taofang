@@ -22,10 +22,10 @@
 import {
   COMMAND_PATH,
   WORLD_PATH,
-  parseGameEventBatch,
+  parseCommandResponse,
   parseGetWorldResponse,
 } from '@starvalley/protocol';
-import type { GameCommand, GameEventBatch, WorldSnapshot } from '@starvalley/protocol';
+import type { CommandResponse, GameCommand, WorldSnapshot } from '@starvalley/protocol';
 
 import { defaultFetch, parseContract, requestJson, resolveApiUrl } from './transport';
 import type { FetchLike } from './transport';
@@ -72,16 +72,18 @@ export async function fetchWorld(): Promise<WorldSnapshot> {
 }
 
 /**
- * Send a gameplay command and validate the authoritative event delta.
+ * Send a gameplay command and validate the authoritative success body.
  *
  * The command is a canonical Protocol `GameCommand` (`actor.moveIntent`,
- * `actor.moveTo` or `actor.interact`) built by the store from world-space intent
- * only; the actor is resolved server-side from transport context, so this adapter
- * must not add an actor/player field, and the client never sends a position.
- * Resolves the Protocol `GameEventBatch` (not the raw response). Rejects only with
- * `ApiError`.
+ * `actor.moveTo`, `actor.interact`, `actor.jump`, `block.*`, `entity.*`) built by
+ * the store from world-space intent only; the actor is resolved server-side from
+ * transport context, so this adapter must not add an actor/player field, and the
+ * client never sends a position. Resolves the Protocol `CommandResponse` union
+ * (an event batch for every mutating command, or a `ValidatePlacementResponse`
+ * for `entity.validatePlacement`) - never the raw response. The store narrows the
+ * union on the command path. Rejects only with `ApiError`.
  */
-export async function submitCommand(command: GameCommand): Promise<GameEventBatch> {
+export async function submitCommand(command: GameCommand): Promise<CommandResponse> {
   const payload = await requestJson(fetchImpl, resolveCommandUrl(), {
     method: 'POST',
     headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
@@ -90,7 +92,7 @@ export async function submitCommand(command: GameCommand): Promise<GameEventBatc
 
   return parseContract(
     payload,
-    (value) => parseGameEventBatch(value),
+    (value) => parseCommandResponse(value),
     'Game server response did not match the command protocol.',
   );
 }

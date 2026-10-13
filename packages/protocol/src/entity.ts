@@ -8,10 +8,12 @@ import type { Quat, Vec3 } from './math.ts';
 /**
  * Canonical 3D transform: a continuous world-space `position` and a `rotation`.
  *
- * `Transform` superseded the phase-3 `Position` and the 2D integer tile
- * coordinate that phases 4-6 mistakenly used. The world is a real continuous 3D
- * world; the gameplay grid is a separate interaction layer (`TileState` holds a
- * `CellCoord`, never a transform).
+ * `Transform` belongs to the **continuous Entity World**. Its `position` is
+ * NEVER a cell/tile/block coordinate and is never snapped in storage: the
+ * canonical position is a continuous `Vec3`. Even for a grid-snapped placeable,
+ * the committed transform is the resolved continuous centre of its footprint;
+ * the integer occupancy is DERIVED from the transform + placement definition,
+ * never stored back into it.
  *
  * There is deliberately **no visual `scale`**: scale has no gameplay semantics
  * yet, so it does not belong in the Game transform. Current gameplay may only
@@ -27,13 +29,15 @@ export interface Transform {
 }
 
 /**
- * Closed union of entity kinds: `'character' | 'tree'`. It grows only as
- * features land, and because the payload guards match keys exactly, adding a
- * kind is a breaking wire change.
+ * Closed union of entity kinds: `'character' | 'tree' | 'rock' | 'chest' |
+ * 'building'`. It grows only as features land, and because the payload guards
+ * match keys exactly, adding a kind is a breaking wire change.
  *
- * A kind is a *game* label; what it looks like is decided by the render bridge.
+ * A kind is a *game* label; what it looks like and its declarative placement
+ * geometry are carried by the static `entityKinds` catalogue in GameInfo, never
+ * here.
  */
-export type EntityKind = 'character' | 'tree';
+export type EntityKind = 'character' | 'tree' | 'rock' | 'chest' | 'building';
 
 /**
  * A world object as exposed on the wire.
@@ -72,9 +76,15 @@ export function parseTransform(value: unknown): Transform {
   return value;
 }
 
-/** Structural guard for `EntityKind` (exactly `'character' | 'tree'` today). */
+/** Structural guard for `EntityKind` (the closed union above). */
 export function isEntityKind(value: unknown): value is EntityKind {
-  return value === 'character' || value === 'tree';
+  return (
+    value === 'character' ||
+    value === 'tree' ||
+    value === 'rock' ||
+    value === 'chest' ||
+    value === 'building'
+  );
 }
 
 /** Parse and validate `EntityKind`, throwing `ProtocolParseError` on mismatch. */

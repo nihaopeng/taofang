@@ -484,7 +484,199 @@ the runtime remains the single source of truth. It is deliberately **not saved**
 anywhere: a reload returns to `RENDER_CAMERA.pitchDegrees = 35`. There is no
 Protocol field, no localStorage, and no Organizer state for it.
 
+## Phase 15 frozen contract — the block-spatial kernel (Block World + Entity World)
+
+Owner directive: the world kernel converges on a Minecraft-style **spatial**
+kernel — borrowing only the spatial/collision ideas, never Minecraft content,
+code or art. Core principle: **World topology is discrete; Entity motion is
+continuous.**
+
+### Two orthogonal systems, one coordinate system
+
+```text
+                 shared real 3D coordinate system
+                 +X = East   +Y = Up   +Z = South
+   ┌──────────────────────────┬───────────────────────────────┐
+   │ Block World (discrete)   │ Entity World (continuous)     │
+   │ integer CellCoord XYZ    │ Vec3 position + Quat rotation │
+   │ static TOPOLOGY: terrain │ actors/NPCs/trees/rocks/...   │
+   │ platform/wall/stairs     │ gameplay state, interaction   │
+   │ block collision, chunks  │ entity colliders              │
+   │ world editing            │ OPTIONAL grid-snapped place   │
+   └──────────────────────────┴───────────────────────────────┘
+```
+
+There is exactly one coordinate system. The Block World addresses it with
+integer cells; the Entity World moves through it with continuous transforms.
+`cellSize` is configuration (default one world unit): **no algorithm may
+hardcode `1`**.
+
+### Block World (discrete topology)
+
+```ts
+interface BlockGrid { origin: Vec3; cellSize: number }   // replaces GridSpec
+interface CellCoord { x: number; y: number; z: number }  // INTEGER on all three axes
+interface ChunkCoord { x: number; y: number; z: number }
+const CHUNK_SIZE = 16;
+type BlockKind = 'air' | 'grass' | 'soil' | 'stone' | 'path' | 'water' | 'slab' | 'stairs' | 'ramp';
+type BlockOrientation = 0 | 90 | 180 | 270;
+interface BlockState { coord: CellCoord; kind: BlockKind; orientation: BlockOrientation }
+```
+
+`CellCoord` is 3D and replaced the old 2D `{ x, z }` tile coordinate. The frozen
+derivation rule is configurable-by-`cellSize` and applies to **all three axes**:
+
+```text
+cellCentre.a = origin.a + (cell.a + 0.5) * cellSize    for a in { x, y, z }
+cellOf(position).a = floor((position.a - origin.a) / cellSize)
+```
+
+`orientation` is **required** (default yaw `0` for non-directional blocks): the
+default is explicit, so the guard is exact-key with no optional-key special case
+and a directional block never silently loses its facing.
+
+**Sparsity / air invariant.** `air` is the *absence* of a block: a snapshot never
+carries an `air` entry. A `WorldSnapshot` whose sparse `blocks` list contains an
+`air` entry (or a duplicate absolute `CellCoord`) is REJECTED. Commands MAY send
+`kind: 'air'` to mean "remove".
+
+**Chunks are the storage/addressing/rebuild boundary, not a wire encoding in
+v1.** The snapshot carries absolute cells; no chunk field exists. Pure shared
+conversions (floor division, correct for negative coordinates — not truncation):
+
+```ts
+cellToChunk(cell: CellCoord): ChunkCoord
+cellToLocal(cell: CellCoord): CellCoord
+chunkLocalToCell(chunk: ChunkCoord, local: CellCoord): CellCoord
+chunkOriginCell(chunk: ChunkCoord): CellCoord
+```
+
+### Entity World (continuous)
+
+`EntityState.transform` stays a continuous `{ position: Vec3; rotation: Quat }`.
+The canonical position is **NEVER** a cell/tile/block coordinate. `EntityKind` is
+`'character' | 'tree' | 'rock' | 'chest' | 'building'`.
+
+Three DISTINCT concepts must never be collapsed:
+
+```text
+Transform            = continuous authoritative motion state (Vec3 + Quat)
+Placement occupancy  = integer cells an entity's committed transform covers,
+                       DERIVED from the transform + placement definition
+Collider             = a blocking volume (v1 has NO collider type on the wire)
+```
+
+The dependency direction is always `committed Transform -> deriveOccupancy`,
+never the reverse.
+
+### Placement semantics
+
+The Placement Resolver and all validity judgement live in the Manager (wave 2+);
+Protocol freezes only the semantics, the shapes, and the pure geometry helper.
+
+v1 `pivot = 'center'`: the committed transform sits at the geometric centre of
+the entity's current integer footprint. Rotation of a grid-snapped placeable is
+a **placement operation** that atomically changes rotation AND position:
+
+```text
+requested position/orientation
+  -> Placement Resolver
+  -> resolved snapped Transform
+  -> commit authoritative Transform
+  -> deriveOccupancy(Transform, PlacementDefinition)
+```
+
+The invariant is "a committed grid-placeable Transform must lie on the valid snap
+lattice for its current footprint/orientation", **NOT** "rotation never moves the
+position".
+
+**Lattice rule.** For a footprint extent `E` on an axis, the centre on that axis
+must be a **cell centre** when `E` is odd and a **cell boundary** when `E` is
+even. Consequently a rotation that changes parity on an axis shifts that axis by
+exactly half a cell; rotation never moves an axis whose parity is unchanged.
+So 2x2, 2x4 and 1x3 rotate with an UNCHANGED position, while 1x2 and 2x3 shift
+deterministically (2x3 on BOTH axes). Mixed-parity footprints (1x2, 2x3, 3x4)
+are legal and required.
+
+The half-way tie-break is explicit and deterministic: **round half up on the
+lattice index**. The shared pure helper below is deliberately shared so the
+client's pending placement ghost aligns identically without duplicating the
+rule; it answers "where" only, never "is it legal". It snaps the horizontal
+footprint axes (`x`/`z`); `y` is passed through, because vertical placement is
+resolved by the server's support query, not by a footprint lattice:
+
+```ts
+snapFootprintCentre(centre: Vec3, extents: FootprintExtents, grid: BlockGrid): Vec3
+```
+
+Validity (support, occupancy conflict, terrain permission, permissions) stays a
+server-only Manager judgement, surfaced through `entity.validatePlacement`.
+
+### Wire contract (`PROTOCOL_VERSION` 8 -> 9)
+
+```ts
+interface WorldSnapshot {
+  worldId: WorldId;
+  bounds: WorldBounds;
+  blockGrid: BlockGrid;      // replaces GridSpec
+  blocks: BlockState[];      // SPARSE, non-air, ABSOLUTE CellCoord
+  entities: EntityState[];
+  controlledActorId: ActorId | null;
+  serverTime: string;        // ISO-8601 UTC
+}
+```
+
+Commands (`GameCommand`): the existing `actor.moveIntent` / `actor.moveTo` /
+`actor.interact`, plus `actor.jump`, `block.set`, `block.remove`,
+`entity.place`, `entity.rotate`, `entity.remove`, `entity.validatePlacement`.
+Identity still comes from transport context, never from a command field.
+
+`entity.validatePlacement` is a pure query; its success body is
+`ValidatePlacementResponse { valid, reason, occupiedCells, resolvedTransform }`.
+`reason` and `resolvedTransform` are **present-and-nullable** (never optional)
+so the guard stays exact-key; `valid: false` carries a non-null reason and a null
+transform, `valid: true` the opposite. The command endpoint's success body is
+`CommandResponse = GameEventBatch | ValidatePlacementResponse`.
+
+Events: `entity.spawned`, `entity.removed`, `transform.changed`, and
+`block.changed { coord, kind, orientation }` (`kind: 'air'` means removed). There
+is deliberately **NO occupancy event**: occupancy is a SERVER-ONLY derived index
+and is not carried in the snapshot in v1; the client learns it from
+`entity.validatePlacement`.
+
+**Static presentation catalogues.** The static `GET /api/game-info` payload
+(`GetGameInfoResponse`) carries `blockKinds` (`{ kind, orientable }`) and
+`entityKinds` (`{ kind, footprintX, footprintZ, height, allowedYawSteps,
+ pivot }`). These are **declarative geometry only** so the client can draw a
+placement ghost without a second source of truth.
+
+### What is deliberately NOT on the wire
+
+- **No collision shape / collider type.** `BlockDefinition`,
+  `BlockCollisionShape`, `BlockTag`, `EntityDefinition`,
+  `EntityPlacementDefinition` and `EntityCollider` are SERVER-side gameplay
+  types and must not enter this package.
+- **No gameplay rule.** Support, occupancy, permissions, terrain permission and
+  step/slope/gravity are Manager runtime rules.
+- **No occupancy index.** It is server-derived and not serialized.
+- **No appearance/material/asset data.** The catalogues carry geometry, never
+  appearance.
+- **No chunk encoding** and no infinite world / chunk streaming / LOD /
+  interest management / greedy meshing / rigid-body physics.
+
+### Removed in this version
+
+`SurfaceState`, `ColliderState`, `SurfaceId`, `ColliderId`, `TileState`,
+`GridSpec`, `TerrainKind`, the `surfaces` / `colliders` / `tiles` / `grid`
+snapshot fields, and their guards, parsers and exports. No parallel authority or
+wire adapter is kept. A v8 snapshot fixture pins the 8 -> 9 break.
+
 ## Phase 14 frozen contract — real 3D world geometry; the grid is demoted to gameplay metadata
+
+> **SUPERSEDED by phase 15.** The phase-14 `surfaces`/`colliders` world-geometry
+> layer, the `GridSpec`/`TileState` gameplay grid, 2D `CellCoord`, `SurfaceId`,
+> `ColliderId` and `TerrainKind` were all removed by the block-spatial kernel.
+> This section is kept as history; the phase-15 contract above is canonical.
 
 Owner directive (verbatim intent): do **not** model height as a `TileState.level`
 integer or a heightmap. The goal is a general real 3D world. Height is a natural

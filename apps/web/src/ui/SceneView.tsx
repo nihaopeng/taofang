@@ -53,23 +53,22 @@ import { useEffect, useRef } from 'react';
 import type { MutableRefObject, PointerEvent as ReactPointerEvent } from 'react';
 
 import { interact, moveTo, useWorld } from '../organizer';
-import type { BoundsViewModel, GridViewModel } from '../organizer';
+import type { BlockGridViewModel, BoundsViewModel } from '../organizer';
 import { controlledActorNodeId, createRenderBridge, entityIdOfNodeId } from '../render/bridge';
 import type { RenderBridge } from '../render/bridge';
 import { createThreeRuntime } from '../render/three/runtime';
 import type { RenderRuntime } from '../render/three/runtime';
 
 /**
- * Authoritative world extent and grid handed to the runtime factory.
+ * Authoritative world extent and block grid handed to the runtime factory.
  *
- * `grid` is presentation-relevant now: the runtime builds its terrain plates and
- * its `GridOverlay` from it, so a non-default `cellSize`/origin is honoured. It is
- * still just a world fact (the frozen grid -> world formula lives in the
- * Organizer), not a gameplay rule.
+ * `blockGrid` is presentation-relevant now: the runtime builds its `GridOverlay`
+ * from `origin`/`cellSize`. It is still just a world fact (the frozen grid ->
+ * world formula lives in the Organizer), not a gameplay rule.
  */
 export interface SceneViewOptions {
   bounds: BoundsViewModel;
-  grid: GridViewModel;
+  blockGrid: BlockGridViewModel;
 }
 
 /** One wheel notch's zoom factor. */
@@ -265,26 +264,26 @@ export function SceneView(props: {
   }
 
   const bounds = state.bounds;
-  const grid = state.grid;
-  // A stable primitive key: a stream snapshot replaces `bounds`/`grid` with fresh
-  // but equal objects, and that must not tear down and rebuild the whole runtime.
+  const blockGrid = state.blockGrid;
+  // A stable primitive key: a stream snapshot replaces `bounds`/`blockGrid` with
+  // fresh but equal objects, and that must not tear down/rebuild the whole runtime.
   const boundsKey =
     bounds === null
       ? null
       : `${bounds.min.x},${bounds.min.y},${bounds.min.z},${bounds.max.x},${bounds.max.y},${bounds.max.z}`;
-  const gridKey =
-    grid === null
+  const blockGridKey =
+    blockGrid === null
       ? null
-      : `${grid.origin.x},${grid.origin.y},${grid.origin.z},${grid.width},${grid.depth},${grid.cellSize}`;
+      : `${blockGrid.origin.x},${blockGrid.origin.y},${blockGrid.origin.z},${blockGrid.cellSize}`;
   const runtimeKey =
-    boundsKey === null || gridKey === null ? null : `${boundsKey}|${gridKey}`;
+    boundsKey === null || blockGridKey === null ? null : `${boundsKey}|${blockGridKey}`;
 
   useEffect(() => {
     const currentBounds = stateRef.current.bounds;
-    const currentGrid = stateRef.current.grid;
+    const currentBlockGrid = stateRef.current.blockGrid;
     const canvas = canvasRef.current;
     const bridge = bridgeRef.current;
-    if (runtimeKey === null || currentBounds === null || currentGrid === null) {
+    if (runtimeKey === null || currentBounds === null || currentBlockGrid === null) {
       return undefined;
     }
     if (canvas === null || bridge === null) {
@@ -292,11 +291,11 @@ export function SceneView(props: {
     }
 
     const factory = createRuntimeRef.current;
-    const options: SceneViewOptions = { bounds: currentBounds, grid: currentGrid };
+    const options: SceneViewOptions = { bounds: currentBounds, blockGrid: currentBlockGrid };
     const runtime =
       factory !== undefined
         ? factory(options)
-        : createThreeRuntime({ bounds: currentBounds, grid: currentGrid });
+        : createThreeRuntime({ bounds: currentBounds, grid: currentBlockGrid });
 
     runtimeRef.current = runtime;
     runtime.mount(canvas);

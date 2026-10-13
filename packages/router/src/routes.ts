@@ -8,7 +8,7 @@ import {
 } from '@starvalley/protocol';
 import type {
   ActorId,
-  GameEventBatch,
+  CommandResponse,
   GetGameInfoResponse,
   GetWorldResponse,
   HealthStatus,
@@ -34,10 +34,16 @@ export interface RouteContext {
   readonly body: unknown;
 }
 
-/** A serialized, Protocol-compliant success payload. */
+/**
+ * A serialized, Protocol-compliant success payload.
+ *
+ * The command route's success body is the protocol `CommandResponse`: either an
+ * authoritative `GameEventBatch` or a `ValidatePlacementResponse`. The Router
+ * never inspects which member it is; it relays whatever the Manager returned.
+ */
 export interface RouteResponse {
   readonly status: number;
-  readonly body: GameEventBatch | GetWorldResponse | GetGameInfoResponse | HealthStatus;
+  readonly body: CommandResponse | GetWorldResponse | GetGameInfoResponse | HealthStatus;
 }
 
 /** A declarative route entry: method + path + thin handler. */
@@ -52,7 +58,14 @@ export const ROUTES: readonly RouteDefinition[] = [
     method: 'GET',
     path: GAME_INFO_PATH,
     handle: ({ gameInfo }) => {
-      const body: GetGameInfoResponse = { gameInfo: gameInfo.getGameInfo() };
+      // All three parts are authoritative Manager results relayed verbatim: the
+      // Router composes the response shell from typed Manager calls and never
+      // derives, defaults, or filters a block/entity kind itself.
+      const body: GetGameInfoResponse = {
+        gameInfo: gameInfo.getGameInfo(),
+        blockKinds: gameInfo.getBlockKinds(),
+        entityKinds: gameInfo.getEntityKinds(),
+      };
       return { status: 200, body };
     },
   },
@@ -79,12 +92,14 @@ export const ROUTES: readonly RouteDefinition[] = [
       // Router validates the command envelope (including the `type`
       // discriminant) and forwards it verbatim. It never switches on
       // `command.type` and never applies movement/world rules: the returned
-      // batch is the Manager's authoritative delta. For a MOVEMENT command an
-      // empty `events` array signals a refusal (e.g. collision/bounds); a
+      // value is the Manager's authoritative result, serialized exactly as
+      // received. Mutating commands yield a `GameEventBatch`; the pure
+      // `entity.validatePlacement` query yields a `ValidatePlacementResponse`.
+      // An empty `events` array signals a refusal (e.g. collision/bounds); a
       // refused INTERACTION instead throws and is surfaced as a 409.
       const command = parseGameCommand(body);
-      const batch: GameEventBatch = world.submitIntent({ actorId, command });
-      return { status: 200, body: batch };
+      const result: CommandResponse = world.submitIntent({ actorId, command });
+      return { status: 200, body: result };
     },
   },
 ];

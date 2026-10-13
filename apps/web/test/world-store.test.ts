@@ -1,16 +1,17 @@
 /**
- * Organizer unit tests for the Phase-7 continuous-3D world feature.
+ * Organizer unit tests for the phase-15 block-spatial world feature.
  *
  * Focuses on the client-application contract: the snapshot request lifecycle,
- * canonical Protocol validation, derivation of tile world positions from the
- * grid, realtime stream adoption/retry, authoritative-event reconciliation,
- * derived (never predicted) movement, and deterministic intent serialization.
- * Both transports are injected: `setWorldFetch` for HTTP and
+ * canonical Protocol v9 validation, derivation of block world positions from the
+ * `blockGrid`, realtime stream adoption/retry, authoritative block/entity event
+ * reconciliation (including incremental `block.changed`), derived (never
+ * predicted) movement, the thin command actions, and the non-authoritative
+ * placement preview. Both transports are injected: `setWorldFetch` for HTTP and
  * `setWorldEventSource` for the SSE stream. Nothing here touches a real network.
  *
- * The client is authoritative-only: a snapshot and a stream `events` frame are the
- * only things that move an entity; `setMovementIntent` sends a direction and
- * changes no client position. There is no prediction and no interpolation.
+ * The client is authoritative-only: a snapshot, a stream `events` frame, or a
+ * command ack are the only things that change state. There is no prediction and
+ * no interpolation, and `validatePlacement` caches nothing.
  */
 
 import { createElement } from 'react';
@@ -23,17 +24,24 @@ import type { GameEvent } from '@starvalley/protocol';
 import {
   getWorldState,
   interact,
+  jump,
   loadWorld,
   moveTo,
+  placeEntity,
+  removeBlock,
+  removeEntity,
   resetWorldEventSource,
   resetWorldFetch,
   resetWorldState,
+  rotateEntity,
+  setBlock,
   setGameInfoFetch,
   setMovementIntent,
   setWorldEventSource,
   setWorldFetch,
   subscribeWorld,
   useWorld,
+  validatePlacement,
 } from '../src/organizer/index.ts';
 import type { WorldState } from '../src/organizer/index.ts';
 // Internal seam (not re-exported by the public organizer index); see the test
@@ -45,10 +53,8 @@ const WORLD_ID = 'world-main';
 
 // A non-trivial grid origin/cellSize proves the frozen derivation is used and
 // that nothing hardcodes 1-unit cells or a world-origin-bound grid.
-const GRID = {
+const BLOCK_GRID = {
   origin: { x: 10, y: 0.5, z: -4 },
-  width: 3,
-  depth: 2,
   cellSize: 2,
 };
 
@@ -82,7 +88,7 @@ const ENTITY_B = {
 const ENTITY_C = {
   entityId: 'entity-c',
   actorId: null,
-  kind: 'tree',
+  kind: 'rock',
   transform: {
     position: { x: 7, y: 0, z: 7 },
     rotation: { x: 0, y: 0, z: 0, w: 1 },
@@ -90,93 +96,32 @@ const ENTITY_C = {
   visible: false,
 };
 
-// Deliberately scrambled wire order: the deterministic mapper must re-sort by
-// `cellZ` then `cellX` so the snapshot's tile array does not depend on iteration
-// order. The derived positions use `origin + (cell + 0.5) * cellSize`.
-const TILE_PATH = { cell: { x: 1, z: 0 }, terrain: 'path' };
-const TILE_BLOCKED = { cell: { x: 0, z: 1 }, terrain: 'blocked' };
-const TILE_GRASS = { cell: { x: 0, z: 0 }, terrain: 'grass' };
+// Sparse, non-air blocks with absolute integer cells. Wire order is deliberately
+// scrambled so the deterministic mapper must re-sort by layer (`y`), then row
+// (`z`), then column (`x`). Derived centres use `origin + (cell + 0.5) * cellSize`.
+const BLOCK_GRASS = { coord: { x: 0, y: 0, z: 0 }, kind: 'grass', orientation: 0 };
+const BLOCK_STONE = { coord: { x: 1, y: 0, z: 0 }, kind: 'stone', orientation: 90 };
+const BLOCK_RAMP = { coord: { x: 0, y: 1, z: 1 }, kind: 'ramp', orientation: 180 };
 
-const TILE_GRASS_VM = {
-  cellX: 0,
-  cellZ: 0,
-  position: { x: 11, y: 0.5, z: -3 },
-  terrain: 'grass',
+const BLOCK_GRASS_VM = {
+  coord: { x: 0, y: 0, z: 0 },
+  position: { x: 11, y: 1.5, z: -3 },
+  kind: 'grass',
+  orientation: 0,
 };
-const TILE_PATH_VM = {
-  cellX: 1,
-  cellZ: 0,
-  position: { x: 13, y: 0.5, z: -3 },
-  terrain: 'path',
+const BLOCK_STONE_VM = {
+  coord: { x: 1, y: 0, z: 0 },
+  position: { x: 13, y: 1.5, z: -3 },
+  kind: 'stone',
+  orientation: 90,
 };
-const TILE_BLOCKED_VM = {
-  cellX: 0,
-  cellZ: 1,
-  position: { x: 11, y: 0.5, z: -1 },
-  terrain: 'blocked',
+const BLOCK_RAMP_VM = {
+  coord: { x: 0, y: 1, z: 1 },
+  position: { x: 11, y: 3.5, z: -1 },
+  kind: 'ramp',
+  orientation: 180,
 };
-const ORDERED_TILES = [TILE_GRASS_VM, TILE_PATH_VM, TILE_BLOCKED_VM];
-
-// World-geometry fixtures (Protocol v8). Wire order is deliberately scrambled so
-// the deterministic mapper must re-sort by `surfaceId` / `colliderId`. `axisU`
-// x `axisV` points up (`crossY = 1`), satisfying the Protocol geometric guard.
-const SURFACE_PLATFORM = {
-  surfaceId: 'surface-platform',
-  kind: 'platform',
-  center: { x: 13, y: 2, z: -3 },
-  axisU: { x: 1, y: 0, z: 0 },
-  axisV: { x: 0, y: 0, z: -1 },
-  walkable: false,
-};
-const SURFACE_GROUND = {
-  surfaceId: 'surface-ground',
-  kind: 'ground',
-  center: { x: 11, y: 0.5, z: -3 },
-  axisU: { x: 1, y: 0, z: 0 },
-  axisV: { x: 0, y: 0, z: -1 },
-  walkable: true,
-};
-
-const COLLIDER_ROCK = {
-  colliderId: 'collider-rock',
-  kind: 'rock',
-  shape: { kind: 'aabb', min: { x: 12, y: 0, z: -4 }, max: { x: 13, y: 2, z: -3 } },
-};
-const COLLIDER_WALL = {
-  colliderId: 'collider-wall',
-  kind: 'wall',
-  shape: { kind: 'aabb', min: { x: 10, y: 0, z: -4 }, max: { x: 10.5, y: 3, z: -3 } },
-};
-
-const SURFACE_GROUND_VM = {
-  surfaceId: 'surface-ground',
-  kind: 'ground',
-  center: { x: 11, y: 0.5, z: -3 },
-  axisU: { x: 1, y: 0, z: 0 },
-  axisV: { x: 0, y: 0, z: -1 },
-  walkable: true,
-};
-const SURFACE_PLATFORM_VM = {
-  surfaceId: 'surface-platform',
-  kind: 'platform',
-  center: { x: 13, y: 2, z: -3 },
-  axisU: { x: 1, y: 0, z: 0 },
-  axisV: { x: 0, y: 0, z: -1 },
-  walkable: false,
-};
-const ORDERED_SURFACES = [SURFACE_GROUND_VM, SURFACE_PLATFORM_VM];
-
-const COLLIDER_ROCK_VM = {
-  colliderId: 'collider-rock',
-  kind: 'rock',
-  shape: { kind: 'aabb', min: { x: 12, y: 0, z: -4 }, max: { x: 13, y: 2, z: -3 } },
-};
-const COLLIDER_WALL_VM = {
-  colliderId: 'collider-wall',
-  kind: 'wall',
-  shape: { kind: 'aabb', min: { x: 10, y: 0, z: -4 }, max: { x: 10.5, y: 3, z: -3 } },
-};
-const ORDERED_COLLIDERS = [COLLIDER_ROCK_VM, COLLIDER_WALL_VM];
+const ORDERED_BLOCKS = [BLOCK_GRASS_VM, BLOCK_STONE_VM, BLOCK_RAMP_VM];
 
 const ENTITY_A_VM = {
   entityId: 'entity-a',
@@ -199,10 +144,8 @@ const ENTITY_B_VM = {
 const SNAPSHOT = {
   worldId: WORLD_ID,
   bounds: BOUNDS,
-  grid: GRID,
-  tiles: [TILE_PATH, TILE_BLOCKED, TILE_GRASS],
-  surfaces: [SURFACE_PLATFORM, SURFACE_GROUND],
-  colliders: [COLLIDER_ROCK, COLLIDER_WALL],
+  blockGrid: BLOCK_GRID,
+  blocks: [BLOCK_STONE, BLOCK_RAMP, BLOCK_GRASS],
   entities: [ENTITY_A, ENTITY_B],
   controlledActorId: 'actor-1',
   serverTime: SERVER_TIME,
@@ -245,6 +188,20 @@ function commandResponse(events: unknown[]): unknown {
   return { events, serverTime: SERVER_TIME };
 }
 
+/** Build a valid `ValidatePlacementResponse` body with field overrides. */
+function placementResponse(overrides: Record<string, unknown> = {}): unknown {
+  return {
+    valid: true,
+    reason: null,
+    occupiedCells: [{ x: 1, y: 0, z: 2 }],
+    resolvedTransform: {
+      position: { x: 3, y: 0.5, z: 4 },
+      rotation: { x: 0, y: 0, z: 0, w: 1 },
+    },
+    ...overrides,
+  };
+}
+
 /** Build a valid `WorldSnapshot` envelope with field overrides. */
 function snapshotWith(overrides: Record<string, unknown>): unknown {
   return { world: { ...SNAPSHOT, ...overrides } };
@@ -264,6 +221,14 @@ function entitySpawned(entity: unknown): unknown {
 
 function entityRemoved(entityId: string): unknown {
   return { type: 'entity.removed', entityId };
+}
+
+function blockChanged(
+  coord: { x: number; y: number; z: number },
+  kind: string,
+  orientation = 0,
+): unknown {
+  return { type: 'block.changed', coord, kind, orientation };
 }
 
 /** A `WorldStreamMessage` carrying an `events` batch. */
@@ -323,6 +288,17 @@ function entity(state: WorldState, entityId: string) {
   return found;
 }
 
+/** Find a block view model by coord key (throws if absent). */
+function blockAt(state: WorldState, x: number, y: number, z: number) {
+  const found = state.blocks.find(
+    (candidate) => candidate.coord.x === x && candidate.coord.y === y && candidate.coord.z === z,
+  );
+  if (found === undefined) {
+    throw new Error(`block ${x},${y},${z} not present`);
+  }
+  return found;
+}
+
 /** Load a valid world (with an injected stream) so feature tests start `ready`. */
 async function loadValidWorld(): Promise<void> {
   setWorldFetch(async () => fakeResponse(WORLD_RESPONSE));
@@ -350,7 +326,7 @@ afterEach(() => {
 });
 
 describe('loadWorld snapshot mapping', () => {
-  it('maps worldId/bounds/grid/tiles/entities/controlledActorId into ready state', async () => {
+  it('maps worldId/bounds/blockGrid/blocks/entities/controlledActorId into ready state', async () => {
     let calls = 0;
     setWorldFetch(async () => {
       calls += 1;
@@ -365,93 +341,37 @@ describe('loadWorld snapshot mapping', () => {
     expect(state.error).toBeNull();
     expect(state.worldId).toBe(WORLD_ID);
     expect(state.bounds).toEqual(BOUNDS);
-    expect(state.grid).toEqual(GRID);
-    expect(state.tiles).toEqual(ORDERED_TILES);
-    expect(state.surfaces).toEqual(ORDERED_SURFACES);
-    expect(state.colliders).toEqual(ORDERED_COLLIDERS);
+    expect(state.blockGrid).toEqual(BLOCK_GRID);
+    expect(state.blocks).toEqual(ORDERED_BLOCKS);
     expect(state.entities).toEqual([ENTITY_A_VM, ENTITY_B_VM]);
     expect(state.controlledActorId).toBe('actor-1');
   });
 
-  it('derives each tile world position with origin + (cell + 0.5) * cellSize', async () => {
+  it('derives each block world position with origin + (cell + 0.5) * cellSize', async () => {
     await loadValidWorld();
 
-    const tiles = getWorldState().tiles;
-    const at = (cellX: number, cellZ: number) =>
-      tiles.find((tile) => tile.cellX === cellX && tile.cellZ === cellZ);
+    const blocks = getWorldState().blocks;
+    const at = (x: number, y: number, z: number) =>
+      blocks.find(
+        (block) =>
+          block.coord.x === x && block.coord.y === y && block.coord.z === z,
+      );
 
-    expect(at(0, 0)?.position).toEqual({ x: 11, y: 0.5, z: -3 });
-    expect(at(1, 0)?.position).toEqual({ x: 13, y: 0.5, z: -3 });
-    expect(at(0, 1)?.position).toEqual({ x: 11, y: 0.5, z: -1 });
+    expect(at(0, 0, 0)?.position).toEqual({ x: 11, y: 1.5, z: -3 });
+    expect(at(1, 0, 0)?.position).toEqual({ x: 13, y: 1.5, z: -3 });
+    expect(at(0, 1, 1)?.position).toEqual({ x: 11, y: 3.5, z: -1 });
   });
 
-  it('orders tiles deterministically by cellZ then cellX regardless of wire order', async () => {
+  it('orders blocks deterministically by layer, row, column regardless of wire order', async () => {
     await loadValidWorld();
 
-    expect(getWorldState().tiles.map((tile) => [tile.cellX, tile.cellZ])).toEqual([
-      [0, 0],
-      [1, 0],
-      [0, 1],
+    expect(
+      getWorldState().blocks.map((block) => [block.coord.y, block.coord.z, block.coord.x]),
+    ).toEqual([
+      [0, 0, 0],
+      [0, 0, 1],
+      [1, 1, 0],
     ]);
-  });
-
-  it('maps and orders surfaces by surfaceId and colliders by colliderId regardless of wire order', async () => {
-    // The wire order is [platform, ground] / [rock, wall]; the mapped arrays
-    // must be a stable function of the snapshot, not of iteration order.
-    await loadValidWorld();
-
-    const state = getWorldState();
-    expect(state.surfaces.map((surface) => surface.surfaceId)).toEqual([
-      'surface-ground',
-      'surface-platform',
-    ]);
-    expect(state.colliders.map((collider) => collider.colliderId)).toEqual([
-      'collider-rock',
-      'collider-wall',
-    ]);
-  });
-
-  it('passes walkable through as data without deriving any traversal rule', async () => {
-    await loadValidWorld();
-
-    const state = getWorldState();
-    // The explicitly non-walkable patch is present (a real surface) and its flag
-    // is surfaced verbatim: the Organizer neither drops it nor reinterprets it.
-    const platform = state.surfaces.find((surface) => surface.surfaceId === 'surface-platform');
-    expect(platform).toBeDefined();
-    expect(platform?.walkable).toBe(false);
-    expect(platform?.kind).toBe('platform');
-  });
-
-  it('rejects a snapshot whose surface geometry fails the protocol guard (no partial data)', async () => {
-    // A missing `walkable` is a contract violation: traversal metadata is
-    // explicit and must be present on every surface. The protocol guard is
-    // reused, so this is rejected exactly like a malformed tile.
-    const malformedSurface = { ...SURFACE_GROUND, walkable: undefined };
-    setWorldFetch(async () => fakeResponse(snapshotWith({ surfaces: [malformedSurface] })));
-
-    await loadWorld();
-
-    const state = getWorldState();
-    expect(state.status).toBe('error');
-    expect(state.surfaces).toEqual([]);
-    expect(state.colliders).toEqual([]);
-    expect(state.error).toBeTruthy();
-  });
-
-  it('rejects a snapshot whose collider shape has a non-positive extent (no partial data)', async () => {
-    const malformedCollider = {
-      ...COLLIDER_WALL,
-      shape: { kind: 'aabb', min: { x: 10, y: 0, z: -4 }, max: { x: 10.5, y: 0, z: -3 } },
-    };
-    setWorldFetch(async () => fakeResponse(snapshotWith({ colliders: [malformedCollider] })));
-
-    await loadWorld();
-
-    const state = getWorldState();
-    expect(state.status).toBe('error');
-    expect(state.colliders).toEqual([]);
-    expect(state.error).toBeTruthy();
   });
 
   it('maps full 3D entity position and rotation and orders by entityId', async () => {
@@ -484,10 +404,8 @@ describe('loadWorld snapshot mapping', () => {
     expect(state.status).toBe('error');
     expect(state.worldId).toBeNull();
     expect(state.bounds).toBeNull();
-    expect(state.grid).toBeNull();
-    expect(state.tiles).toEqual([]);
-    expect(state.surfaces).toEqual([]);
-    expect(state.colliders).toEqual([]);
+    expect(state.blockGrid).toBeNull();
+    expect(state.blocks).toEqual([]);
     expect(state.entities).toEqual([]);
     expect(state.controlledActorId).toBeNull();
     expect(state.error).toBeTruthy();
@@ -507,33 +425,79 @@ describe('loadWorld snapshot mapping', () => {
 
     const state = getWorldState();
     expect(state.status).toBe('error');
-    expect(state.tiles).toEqual([]);
+    expect(state.blocks).toEqual([]);
     expect(state.entities).toEqual([]);
     expect(state.error).toContain('503');
   });
 
-  it('rejects a snapshot whose tile carries a transform (grid holds no position)', async () => {
-    // The phase-7 regression guard: a `transform` on a tile must fail validation
-    // rather than be silently ignored.
+  it('rejects a snapshot whose sparse blocks carry an explicit air entry', async () => {
+    // `air` is absence: a snapshot that names it is malformed and must be
+    // rejected wholesale, not silently treated as a removal.
     setWorldFetch(async () =>
-      fakeResponse(snapshotWith({ tiles: [{ cell: { x: 0, z: 0 }, terrain: 'grass', transform: { x: 0, y: 0 } }] })),
+      fakeResponse(snapshotWith({ blocks: [{ ...BLOCK_GRASS, kind: 'air' }] })),
     );
 
     await loadWorld();
 
     const state = getWorldState();
     expect(state.status).toBe('error');
-    expect(state.tiles).toEqual([]);
+    expect(state.blocks).toEqual([]);
     expect(state.error).toBeTruthy();
   });
 
-  it('rejects a phase-6-shaped snapshot (size + tiles with transform) with no partial data', async () => {
+  it('rejects a snapshot whose sparse blocks repeat an absolute coord', async () => {
+    setWorldFetch(async () =>
+      fakeResponse(
+        snapshotWith({
+          blocks: [BLOCK_GRASS, { ...BLOCK_STONE, coord: { ...BLOCK_GRASS.coord } }],
+        }),
+      ),
+    );
+
+    await loadWorld();
+
+    const state = getWorldState();
+    expect(state.status).toBe('error');
+    expect(state.blocks).toEqual([]);
+    expect(state.error).toBeTruthy();
+  });
+
+  it('rejects a block carrying an unknown extra key (no partial data)', async () => {
+    setWorldFetch(async () =>
+      fakeResponse(snapshotWith({ blocks: [{ ...BLOCK_GRASS, walkable: true }] })),
+    );
+
+    await loadWorld();
+
+    const state = getWorldState();
+    expect(state.status).toBe('error');
+    expect(state.blocks).toEqual([]);
+    expect(state.error).toBeTruthy();
+  });
+
+  it('rejects a blockGrid with a non-positive cellSize', async () => {
+    setWorldFetch(async () =>
+      fakeResponse(snapshotWith({ blockGrid: { origin: { x: 0, y: 0, z: 0 }, cellSize: 0 } })),
+    );
+
+    await loadWorld();
+
+    const state = getWorldState();
+    expect(state.status).toBe('error');
+    expect(state.blockGrid).toBeNull();
+    expect(state.error).toBeTruthy();
+  });
+
+  it('rejects a phase-14-shaped snapshot (grid + tiles + surfaces) with no partial data', async () => {
     setWorldFetch(async () =>
       fakeResponse({
         world: {
           worldId: WORLD_ID,
-          size: { width: 10, height: 8 },
-          tiles: [{ transform: { x: 0, y: 0 }, terrain: 'grass' }],
+          bounds: BOUNDS,
+          grid: { origin: { x: 0, y: 0, z: 0 }, width: 3, depth: 2, cellSize: 1 },
+          tiles: [{ cell: { x: 0, z: 0 }, terrain: 'grass' }],
+          surfaces: [],
+          colliders: [],
           entities: [ENTITY_A],
           controlledActorId: 'actor-1',
           serverTime: SERVER_TIME,
@@ -545,23 +509,9 @@ describe('loadWorld snapshot mapping', () => {
 
     const state = getWorldState();
     expect(state.status).toBe('error');
-    expect(state.tiles).toEqual([]);
+    expect(state.blocks).toEqual([]);
+    expect(state.blockGrid).toBeNull();
     expect(state.entities).toEqual([]);
-    expect(state.error).toBeTruthy();
-  });
-
-  it('rejects a snapshot carrying an unknown extra tile key (no partial data)', async () => {
-    setWorldFetch(async () =>
-      fakeResponse(
-        snapshotWith({ tiles: [{ cell: { x: 0, z: 0 }, terrain: 'grass', walkable: true }] }),
-      ),
-    );
-
-    await loadWorld();
-
-    const state = getWorldState();
-    expect(state.status).toBe('error');
-    expect(state.tiles).toEqual([]);
     expect(state.error).toBeTruthy();
   });
 
@@ -678,29 +628,8 @@ describe('realtime stream lifecycle', () => {
     const nextSnapshot = {
       worldId: 'world-next',
       bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 1, y: 1, z: 1 } },
-      grid: { origin: { x: 0, y: 0, z: 0 }, width: 1, depth: 1, cellSize: 1 },
-      tiles: [{ cell: { x: 0, z: 0 }, terrain: 'water' }],
-      surfaces: [
-        {
-          surfaceId: 'surface-next',
-          kind: 'bridge',
-          center: { x: 0.5, y: 1, z: 0.5 },
-          axisU: { x: 0.5, y: 0, z: 0 },
-          axisV: { x: 0, y: 0, z: -0.5 },
-          walkable: true,
-        },
-      ],
-      colliders: [
-        {
-          colliderId: 'collider-next',
-          kind: 'structure',
-          shape: {
-            kind: 'aabb',
-            min: { x: 0, y: 0, z: 0 },
-            max: { x: 0.5, y: 1, z: 0.5 },
-          },
-        },
-      ],
+      blockGrid: { origin: { x: 0, y: 0, z: 0 }, cellSize: 1 },
+      blocks: [{ coord: { x: 0, y: 0, z: 0 }, kind: 'water', orientation: 0 }],
       entities: [ENTITY_C],
       controlledActorId: null,
       serverTime: SERVER_TIME,
@@ -711,17 +640,20 @@ describe('realtime stream lifecycle', () => {
     const state = getWorldState();
     expect(state.worldId).toBe('world-next');
     expect(state.controlledActorId).toBeNull();
-    expect(state.tiles).toEqual([
-      { cellX: 0, cellZ: 0, position: { x: 0.5, y: 0, z: 0.5 }, terrain: 'water' },
+    expect(state.blockGrid).toEqual({ origin: { x: 0, y: 0, z: 0 }, cellSize: 1 });
+    expect(state.blocks).toEqual([
+      {
+        coord: { x: 0, y: 0, z: 0 },
+        position: { x: 0.5, y: 0.5, z: 0.5 },
+        kind: 'water',
+        orientation: 0,
+      },
     ]);
-    expect(state.surfaces.map((surface) => surface.surfaceId)).toEqual(['surface-next']);
-    expect(state.surfaces[0].walkable).toBe(true);
-    expect(state.colliders.map((collider) => collider.colliderId)).toEqual(['collider-next']);
     expect(state.entities.map((candidate) => candidate.entityId)).toEqual(['entity-c']);
     expect(state.streamStatus).toBe('live');
   });
 
-  it('an events frame updates only entities and keeps tiles/grid/bounds reference-identical', async () => {
+  it('an events frame updates only entities and keeps blocks/blockGrid/bounds reference-identical', async () => {
     await loadValidWorld();
     const before = getWorldState();
 
@@ -730,10 +662,8 @@ describe('realtime stream lifecycle', () => {
     const after = getWorldState();
     expect(after).not.toBe(before);
     expect(after.entities).not.toBe(before.entities);
-    expect(after.tiles).toBe(before.tiles);
-    expect(after.surfaces).toBe(before.surfaces);
-    expect(after.colliders).toBe(before.colliders);
-    expect(after.grid).toBe(before.grid);
+    expect(after.blocks).toBe(before.blocks);
+    expect(after.blockGrid).toBe(before.blockGrid);
     expect(after.bounds).toBe(before.bounds);
     expect(entity(after, 'entity-a').position).toEqual({ x: 5, y: 0, z: 6 });
     expect(entity(after, 'entity-b').position).toEqual({ x: 1, y: 0, z: 2 });
@@ -749,6 +679,66 @@ describe('realtime stream lifecycle', () => {
       'entity-a',
       'entity-c',
     ]);
+  });
+
+  it('adds a new block incrementally from a block.changed frame without refetching', async () => {
+    let calls = 0;
+    setWorldFetch(async () => {
+      calls += 1;
+      return fakeResponse(WORLD_RESPONSE);
+    });
+    await loadWorld();
+    expect(calls).toBe(1);
+    const before = getWorldState();
+
+    streamSources[0].message(
+      eventsFrame([blockChanged({ x: 2, y: 0, z: 0 }, 'water', 0)]),
+    );
+
+    const after = getWorldState();
+    expect(calls).toBe(1);
+    expect(after.blocks).toHaveLength(4);
+    expect(blockAt(after, 2, 0, 0).kind).toBe('water');
+    expect(blockAt(after, 2, 0, 0).position).toEqual({ x: 15, y: 1.5, z: -3 });
+    // Static grid/bounds survive reference-identically.
+    expect(after.blockGrid).toBe(before.blockGrid);
+    expect(after.bounds).toBe(before.bounds);
+  });
+
+  it('replaces an existing block in place when a block.changed frame carries a new kind', async () => {
+    await loadValidWorld();
+
+    streamSources[0].message(eventsFrame([blockChanged({ x: 0, y: 0, z: 0 }, 'soil', 90)]));
+
+    const after = getWorldState();
+    expect(after.blocks).toHaveLength(ORDERED_BLOCKS.length);
+    const replaced = blockAt(after, 0, 0, 0);
+    expect(replaced.kind).toBe('soil');
+    expect(replaced.orientation).toBe(90);
+    expect(replaced.position).toEqual(BLOCK_GRASS_VM.position);
+  });
+
+  it('removes a block when a block.changed frame carries kind air', async () => {
+    await loadValidWorld();
+
+    streamSources[0].message(eventsFrame([blockChanged({ x: 1, y: 0, z: 0 }, 'air')]));
+
+    const after = getWorldState();
+    expect(after.blocks).toHaveLength(ORDERED_BLOCKS.length - 1);
+    expect(
+      after.blocks.some(
+        (block) => block.coord.x === 1 && block.coord.y === 0 && block.coord.z === 0,
+      ),
+    ).toBe(false);
+  });
+
+  it('a no-op block.changed frame keeps the state reference stable', async () => {
+    await loadValidWorld();
+    const before = getWorldState();
+
+    streamSources[0].message(eventsFrame([blockChanged({ x: 0, y: 0, z: 0 }, 'grass', 0)]));
+
+    expect(getWorldState()).toBe(before);
   });
 
   it('ignores a transform.changed frame for an unknown entity (creates nothing)', async () => {
@@ -770,6 +760,9 @@ describe('realtime stream lifecycle', () => {
     streamSources[0].message({ type: 'snapshot', snapshot: { worldId: 'x' } });
     streamSources[0].message({ type: 'events', batch: { events: 'nope', serverTime: SERVER_TIME } });
     streamSources[0].message({ type: 'events', batch: { events: [], serverTime: 'not-a-date' } });
+    streamSources[0].message(
+      eventsFrame([{ type: 'block.changed', coord: { x: 0, y: 0 }, kind: 'grass', orientation: 0 }]),
+    );
 
     expect(getWorldState()).toBe(before);
     expect(getWorldState().streamStatus).toBe('live');
@@ -827,10 +820,8 @@ describe('realtime stream lifecycle', () => {
     expect(state.streamStatus).toBe('idle');
     expect(state.worldId).toBeNull();
     expect(state.bounds).toBeNull();
-    expect(state.grid).toBeNull();
-    expect(state.tiles).toEqual([]);
-    expect(state.surfaces).toEqual([]);
-    expect(state.colliders).toEqual([]);
+    expect(state.blockGrid).toBeNull();
+    expect(state.blocks).toEqual([]);
     expect(state.entities).toEqual([]);
     expect(state.controlledActorId).toBeNull();
     expect(state.error).toBeNull();
@@ -1034,7 +1025,7 @@ describe('setMovementIntent', () => {
   });
 });
 
-describe('moveTo / interact intents', () => {
+describe('moveTo / interact / jump intents', () => {
   const rejected = (status: number, code: string, message = 'refused'): Response =>
     fakeResponse({ error: { code, message } }, { ok: false, status });
 
@@ -1113,6 +1104,35 @@ describe('moveTo / interact intents', () => {
     expect(entity(getWorldState(), 'entity-b').position).toEqual({ x: 1, y: 0, z: 2 });
   });
 
+  it('jump posts exactly { type: actor.jump } with no payload', async () => {
+    await loadValidWorld();
+
+    const requests: Array<Record<string, unknown>> = [];
+    setWorldFetch(async (_url, init) => {
+      requests.push(JSON.parse(init?.body as string) as Record<string, unknown>);
+      return fakeResponse(commandResponse([]));
+    });
+
+    await expect(jump()).resolves.toBeUndefined();
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toEqual({ type: 'actor.jump' });
+    expect(Object.keys(requests[0])).toEqual(['type']);
+    expect('actorId' in requests[0]).toBe(false);
+  });
+
+  it('jump is a safe no-op before a controlled actor exists', async () => {
+    let calls = 0;
+    setWorldFetch(async () => {
+      calls += 1;
+      return fakeResponse(commandResponse([]));
+    });
+
+    await expect(jump()).resolves.toBeUndefined();
+    expect(calls).toBe(0);
+    expect(getWorldState().status).toBe('idle');
+  });
+
   it('a 409 CONFLICT rejection sets a short notice and does NOT flip status to error', async () => {
     await loadValidWorld();
     expect(getWorldState().status).toBe('ready');
@@ -1131,34 +1151,14 @@ describe('moveTo / interact intents', () => {
     expect(entity(state, 'entity-a').position).toEqual({ x: 3, y: 0, z: 4 });
   });
 
-  it('a 409 whose body carries a non-interactable reason surfaces THAT message, not a blanket conflict', async () => {
+  it('a 409 whose body carries a non-interactable reason surfaces THAT message', async () => {
     await loadValidWorld();
-    // Clicking the controlled actor's own node is a `not-interactable`
-    // rejection: a 409 CONFLICT, but a target zero units away. The server
-    // authors a short reason; the client must surface it instead of flattening
-    // every 409 to "Too far away.". This is the regression the status-only
-    // mapping missed.
-    setWorldFetch(async () =>
-      rejected(409, 'CONFLICT', 'That cannot be interacted with.'),
-    );
+    setWorldFetch(async () => rejected(409, 'CONFLICT', 'That cannot be interacted with.'));
 
     await interact('entity-a');
 
     const state = getWorldState();
     expect(state.notice).toBe('That cannot be interacted with.');
-    expect(state.notice).not.toBe('Too far away.');
-    expect(state.status).toBe('ready');
-    expect(state.error).toBeNull();
-  });
-
-  it('a 409 whose body carries the out-of-range reason surfaces "Too far away."', async () => {
-    await loadValidWorld();
-    setWorldFetch(async () => rejected(409, 'CONFLICT', 'Too far away.'));
-
-    await moveTo({ x: 100, y: 0, z: 100 });
-
-    const state = getWorldState();
-    expect(state.notice).toBe('Too far away.');
     expect(state.status).toBe('ready');
     expect(state.error).toBeNull();
   });
@@ -1179,7 +1179,6 @@ describe('moveTo / interact intents', () => {
     const state = getWorldState();
     expect(state.notice).toBe('Could not do that.');
     expect(state.status).toBe('ready');
-    expect(state.status).not.toBe('error');
     expect(state.error).toBeNull();
   });
 
@@ -1192,7 +1191,6 @@ describe('moveTo / interact intents', () => {
     const state = getWorldState();
     expect(state.notice).toBe('That is gone.');
     expect(state.status).toBe('ready');
-    expect(state.status).not.toBe('error');
     expect(state.error).toBeNull();
     expect(entity(state, 'entity-b').position).toEqual({ x: 1, y: 0, z: 2 });
   });
@@ -1281,6 +1279,291 @@ describe('moveTo / interact intents', () => {
   });
 });
 
+describe('block / entity edit intents', () => {
+  /** Record the POST bodies an edit action sends. */
+  function captureCommands(bodies: Array<Record<string, unknown>>, response: unknown): void {
+    setWorldFetch(async (_url, init) => {
+      bodies.push(JSON.parse(init?.body as string) as Record<string, unknown>);
+      return fakeResponse(response);
+    });
+  }
+
+  it('setBlock posts exactly { type, coord, kind, orientation } with no actor', async () => {
+    await loadValidWorld();
+    const bodies: Array<Record<string, unknown>> = [];
+    captureCommands(bodies, commandResponse([]));
+
+    await setBlock({ x: 2, y: 0, z: 3 }, 'stone', 90);
+
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]).toEqual({
+      type: 'block.set',
+      coord: { x: 2, y: 0, z: 3 },
+      kind: 'stone',
+      orientation: 90,
+    });
+    expect(Object.keys(bodies[0])).toEqual(['type', 'coord', 'kind', 'orientation']);
+    expect('actorId' in bodies[0]).toBe(false);
+    expect('playerId' in bodies[0]).toBe(false);
+  });
+
+  it('setBlock adopts the block.changed event from the ack', async () => {
+    await loadValidWorld();
+    captureCommands(
+      [],
+      commandResponse([blockChanged({ x: 2, y: 0, z: 3 }, 'stone', 90)]),
+    );
+
+    await setBlock({ x: 2, y: 0, z: 3 }, 'stone', 90);
+
+    const placed = blockAt(getWorldState(), 2, 0, 3);
+    expect(placed.kind).toBe('stone');
+    expect(placed.orientation).toBe(90);
+  });
+
+  it('removeBlock posts exactly { type, coord } and adopts the air event', async () => {
+    await loadValidWorld();
+    const bodies: Array<Record<string, unknown>> = [];
+    captureCommands(bodies, commandResponse([blockChanged({ x: 0, y: 0, z: 0 }, 'air')]));
+
+    await removeBlock({ x: 0, y: 0, z: 0 });
+
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]).toEqual({ type: 'block.remove', coord: { x: 0, y: 0, z: 0 } });
+    expect(
+      getWorldState().blocks.some(
+        (block) => block.coord.x === 0 && block.coord.y === 0 && block.coord.z === 0,
+      ),
+    ).toBe(false);
+  });
+
+  it('placeEntity posts exactly { type, kind, position, yawDegrees } and adopts the spawn', async () => {
+    await loadValidWorld();
+    const bodies: Array<Record<string, unknown>> = [];
+    captureCommands(bodies, commandResponse([entitySpawned(ENTITY_C)]));
+
+    await placeEntity('rock', { x: 7.5, y: 0, z: 7.5 }, 0);
+
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]).toEqual({
+      type: 'entity.place',
+      kind: 'rock',
+      position: { x: 7.5, y: 0, z: 7.5 },
+      yawDegrees: 0,
+    });
+    expect(Object.keys(bodies[0])).toEqual(['type', 'kind', 'position', 'yawDegrees']);
+    expect('actorId' in bodies[0]).toBe(false);
+    expect(getWorldState().entities.map((candidate) => candidate.entityId)).toEqual([
+      'entity-a',
+      'entity-b',
+      'entity-c',
+    ]);
+  });
+
+  it('rotateEntity posts exactly { type, entityId, yawDegrees } and adopts the transform', async () => {
+    await loadValidWorld();
+    const bodies: Array<Record<string, unknown>> = [];
+    captureCommands(
+      bodies,
+      commandResponse([
+        transformChanged('entity-a', { x: 3, y: 0, z: 4 }, { x: 0, y: 1, z: 0, w: 0 }),
+      ]),
+    );
+
+    await rotateEntity('entity-a', 180);
+
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]).toEqual({ type: 'entity.rotate', entityId: 'entity-a', yawDegrees: 180 });
+    expect(entity(getWorldState(), 'entity-a').rotation).toEqual({ x: 0, y: 1, z: 0, w: 0 });
+  });
+
+  it('removeEntity posts exactly { type, entityId } and adopts the removal', async () => {
+    await loadValidWorld();
+    const bodies: Array<Record<string, unknown>> = [];
+    captureCommands(bodies, commandResponse([entityRemoved('entity-b')]));
+
+    await removeEntity('entity-b');
+
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]).toEqual({ type: 'entity.remove', entityId: 'entity-b' });
+    expect(getWorldState().entities.map((candidate) => candidate.entityId)).toEqual(['entity-a']);
+  });
+
+  it('every edit is a safe no-op before any world is loaded', async () => {
+    let calls = 0;
+    setWorldFetch(async () => {
+      calls += 1;
+      return fakeResponse(commandResponse([]));
+    });
+
+    await setBlock({ x: 0, y: 0, z: 0 }, 'grass', 0);
+    await removeBlock({ x: 0, y: 0, z: 0 });
+    await placeEntity('tree', { x: 0, y: 0, z: 0 }, 0);
+    await rotateEntity('entity-a', 90);
+    await removeEntity('entity-a');
+
+    expect(calls).toBe(0);
+    expect(getWorldState().status).toBe('idle');
+  });
+
+  it('a rejected edit sets a short notice without flipping status to error', async () => {
+    await loadValidWorld();
+    setWorldFetch(async () =>
+      fakeResponse({ error: { code: 'CONFLICT', message: 'You cannot build there.' } }, {
+        ok: false,
+        status: 409,
+      }),
+    );
+
+    await setBlock({ x: 2, y: 0, z: 3 }, 'stone', 0);
+
+    const state = getWorldState();
+    expect(state.notice).toBe('You cannot build there.');
+    expect(state.status).toBe('ready');
+    expect(state.error).toBeNull();
+  });
+
+  it('a malformed local block kind is rejected without a request', async () => {
+    await loadValidWorld();
+    let calls = 0;
+    setWorldFetch(async () => {
+      calls += 1;
+      return fakeResponse(commandResponse([]));
+    });
+
+    await setBlock({ x: 0, y: 0, z: 0 }, 'lava', 0);
+
+    expect(calls).toBe(0);
+    expect(getWorldState().notice).toBe('Could not do that.');
+  });
+});
+
+describe('validatePlacement preview', () => {
+  it('posts exactly { type, kind, position, yawDegrees } to COMMAND_PATH', async () => {
+    await loadValidWorld();
+    const bodies: Array<Record<string, unknown>> = [];
+    setWorldFetch(async (_url, init) => {
+      bodies.push(JSON.parse(init?.body as string) as Record<string, unknown>);
+      return fakeResponse(placementResponse());
+    });
+
+    await validatePlacement('tree', { x: 1.5, y: 0, z: 2.5 }, 90);
+
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]).toEqual({
+      type: 'entity.validatePlacement',
+      kind: 'tree',
+      position: { x: 1.5, y: 0, z: 2.5 },
+      yawDegrees: 90,
+    });
+    expect(Object.keys(bodies[0])).toEqual(['type', 'kind', 'position', 'yawDegrees']);
+    expect('actorId' in bodies[0]).toBe(false);
+  });
+
+  it('returns the server verdict mapped to plain view-model data (valid)', async () => {
+    await loadValidWorld();
+    setWorldFetch(async () => fakeResponse(placementResponse()));
+
+    const verdict = await validatePlacement('tree', { x: 1.5, y: 0, z: 2.5 }, 0);
+
+    expect(verdict).toEqual({
+      valid: true,
+      reason: null,
+      occupiedCells: [{ x: 1, y: 0, z: 2 }],
+      resolvedTransform: {
+        position: { x: 3, y: 0.5, z: 4 },
+        rotation: { x: 0, y: 0, z: 0, w: 1 },
+      },
+    });
+  });
+
+  it('returns an invalid verdict with its reason and a null resolved transform', async () => {
+    await loadValidWorld();
+    setWorldFetch(async () =>
+      fakeResponse(
+        placementResponse({
+          valid: false,
+          reason: 'occupied',
+          occupiedCells: [{ x: 4, y: 0, z: 5 }],
+          resolvedTransform: null,
+        }),
+      ),
+    );
+
+    const verdict = await validatePlacement('tree', { x: 1.5, y: 0, z: 2.5 }, 0);
+
+    expect(verdict).toEqual({
+      valid: false,
+      reason: 'occupied',
+      occupiedCells: [{ x: 4, y: 0, z: 5 }],
+      resolvedTransform: null,
+    });
+  });
+
+  it('caches nothing and leaves the world state reference-identical', async () => {
+    await loadValidWorld();
+    const before = getWorldState();
+    setWorldFetch(async () => fakeResponse(placementResponse()));
+
+    await validatePlacement('tree', { x: 1.5, y: 0, z: 2.5 }, 0);
+
+    expect(getWorldState()).toBe(before);
+  });
+
+  it('returns null before any world is loaded and sends nothing', async () => {
+    let calls = 0;
+    setWorldFetch(async () => {
+      calls += 1;
+      return fakeResponse(placementResponse());
+    });
+
+    await expect(validatePlacement('tree', { x: 0, y: 0, z: 0 }, 0)).resolves.toBeNull();
+
+    expect(calls).toBe(0);
+    expect(getWorldState().status).toBe('idle');
+  });
+
+  it('returns null on a transport failure without touching status/error/notice', async () => {
+    await loadValidWorld();
+    const before = getWorldState();
+    setWorldFetch(async () => {
+      throw new TypeError('Failed to fetch');
+    });
+
+    await expect(validatePlacement('tree', { x: 1, y: 0, z: 1 }, 0)).resolves.toBeNull();
+
+    const after = getWorldState();
+    expect(after.status).toBe('ready');
+    expect(after.error).toBeNull();
+    expect(after.notice).toBeNull();
+    expect(after).toBe(before);
+  });
+
+  it('returns null when the server answers a validate query with an event batch', async () => {
+    await loadValidWorld();
+    setWorldFetch(async () => fakeResponse(commandResponse([entitySpawned(ENTITY_C)])));
+
+    await expect(validatePlacement('tree', { x: 1, y: 0, z: 1 }, 0)).resolves.toBeNull();
+    expect(getWorldState().entities.map((candidate) => candidate.entityId)).toEqual([
+      'entity-a',
+      'entity-b',
+    ]);
+  });
+
+  it('returns null for a malformed local entity kind without a request', async () => {
+    await loadValidWorld();
+    let calls = 0;
+    setWorldFetch(async () => {
+      calls += 1;
+      return fakeResponse(placementResponse());
+    });
+
+    await expect(validatePlacement('dragon', { x: 0, y: 0, z: 0 }, 0)).resolves.toBeNull();
+
+    expect(calls).toBe(0);
+  });
+});
+
 describe('event applier seam', () => {
   it('ignores an unknown event type at runtime without throwing or changing state', async () => {
     // The transport's Protocol guard rejects an unknown event `type` before it
@@ -1300,9 +1583,6 @@ describe('event applier seam', () => {
 
     const before = getWorldState();
 
-    // The `never` assignment in the applier's `default` branch is a COMPILE
-    // error when a fourth `GameEvent` member is added until it is handled. At
-    // runtime an unknown event is tolerated: no throw, no observable change.
     expect(() => {
       applyEvents([unknownEvent]);
     }).not.toThrow();
@@ -1326,16 +1606,20 @@ describe('world store identity and subscription', () => {
 
     // @ts-expect-error WorldState has no `world` field after the 3D migration.
     expect(state.world).toBeUndefined();
-    // @ts-expect-error WorldState has no `controlledActor` field.
-    expect(state.controlledActor).toBeUndefined();
-    expect(Object.prototype.hasOwnProperty.call(state, 'world')).toBe(false);
+    // @ts-expect-error WorldState has no `grid` field after the block kernel.
+    expect(state.grid).toBeUndefined();
+    // @ts-expect-error WorldState has no `tiles` field after the block kernel.
+    expect(state.tiles).toBeUndefined();
+    // @ts-expect-error WorldState has no `surfaces` field after the block kernel.
+    expect(state.surfaces).toBeUndefined();
+    // @ts-expect-error WorldState has no `colliders` field after the block kernel.
+    expect(state.colliders).toBeUndefined();
+    expect(Object.prototype.hasOwnProperty.call(state, 'grid')).toBe(false);
     expect(state.streamStatus).toBe('idle');
     expect(state.worldId).toBeNull();
     expect(state.bounds).toBeNull();
-    expect(state.grid).toBeNull();
-    expect(state.tiles).toEqual([]);
-    expect(state.surfaces).toEqual([]);
-    expect(state.colliders).toEqual([]);
+    expect(state.blockGrid).toBeNull();
+    expect(state.blocks).toEqual([]);
     expect(state.entities).toEqual([]);
     expect(state.controlledActorId).toBeNull();
     expect(state.notice).toBeNull();

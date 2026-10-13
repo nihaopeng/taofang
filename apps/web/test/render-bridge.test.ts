@@ -2,10 +2,10 @@
  * Unit tests for the Render Bridge (node environment: no DOM, no Three.js).
  *
  * The bridge is a pure stateful mapper from Organizer `WorldState` to Render ISA
- * frames. These tests pin the tile/entity diff rules, the namespaced node ids,
- * the terrain/kind appearance catalogues with their fallbacks, the determinism of
- * command order, and — phase 7 — that real 3D world transforms (position +
- * rotation) are mapped through **unchanged**.
+ * frames. These tests pin the block/entity diff rules, the namespaced node ids,
+ * the block/entity appearance catalogues with their fallbacks, the determinism of
+ * command order, the chunk grouping of blocks, and — phase 7 — that real 3D world
+ * transforms (position + rotation) are mapped through **unchanged**.
  *
  * They import the bridge directly and the ISA only for its types, so no runtime
  * dependency on the Organizer or Three.js is loaded.
@@ -13,21 +13,27 @@
 
 import { describe, expect, it } from 'vitest';
 
+import { CHUNK_SIZE, cellToChunk } from '@starvalley/protocol';
 import type { NodeId, RenderCommand, RenderFrame } from '@starvalley/render-protocol';
 
-import type { WorldState } from '../src/organizer/index.ts';
+import type { BlockViewModel, WorldState } from '../src/organizer/index.ts';
 import {
-  BRIDGE_SURFACES,
-  BRIDGE_TERRAINS,
+  BRIDGE_APPEARANCES,
+  BRIDGE_BLOCK_KINDS,
+  BRIDGE_CHUNK_SIZE,
+  BRIDGE_ENTITY_KINDS,
   FALLBACK_APPEARANCE,
+  blockCellOfNodeId,
+  blockChunkOf,
   createRenderBridge,
   entityIdOfNodeId,
 } from '../src/render/bridge.ts';
 
 type Entity = WorldState['entities'][number];
-type Tile = WorldState['tiles'][number];
 
 const IDENTITY_ROTATION = { x: 0, y: 0, z: 0, w: 1 };
+
+const BLOCK_GRID = { origin: { x: 0, y: 0, z: 0 }, cellSize: 1 };
 
 function makeEntity(overrides: Partial<Entity> & { entityId: string }): Entity {
   return {
@@ -40,13 +46,20 @@ function makeEntity(overrides: Partial<Entity> & { entityId: string }): Entity {
   };
 }
 
-function makeTile(
-  cellX: number,
-  cellZ: number,
-  terrain = 'grass',
-  position: { x: number; y: number; z: number } = { x: cellX, y: 0, z: cellZ },
-): Tile {
-  return { cellX, cellZ, terrain, position };
+/** A block whose world `position` is the cell centre for the unit grid (origin 0). */
+function makeBlock(
+  x: number,
+  y: number,
+  z: number,
+  kind = 'grass',
+  orientation = 0,
+): BlockViewModel {
+  return {
+    coord: { x, y, z },
+    position: { x: x + 0.5, y: y + 0.5, z: z + 0.5 },
+    kind,
+    orientation,
+  };
 }
 
 function makeState(
@@ -58,10 +71,8 @@ function makeState(
     streamStatus: 'live',
     worldId: 'world-1',
     bounds: null,
-    grid: null,
-    tiles: [],
-    surfaces: [],
-    colliders: [],
+    blockGrid: BLOCK_GRID,
+    blocks: [],
     entities,
     controlledActorId: null,
     error: null,
@@ -100,44 +111,47 @@ function animations(frame: RenderFrame): string[] {
     .map((command) => command.animation);
 }
 
-describe('render bridge tiles', () => {
-  it('emits one base-layer node.create per tile at its world position plus object-layer nodes', () => {
+describe('render bridge blocks', () => {
+  it('emits one object-layer node.create per block at its world position with a block appearance', () => {
     const bridge = createRenderBridge();
 
     const frame = bridge.frameFor(
       makeState([makeEntity({ entityId: 'entity-a', position: { x: 5, y: 0, z: 5 } })], {
-        tiles: [
-          makeTile(0, 0),
-          makeTile(1, 0),
+        blocks: [
+          makeBlock(0, 0, 0, 'grass'),
+          makeBlock(1, 0, 0, 'path'),
           // A deliberately non-trivial world position: the bridge must pass it
           // through unchanged, never derive it from the cell.
-          makeTile(0, 1, 'path', { x: 12.5, y: 0.5, z: -3.25 }),
+          {
+            coord: { x: 2, y: 1, z: 3 },
+            position: { x: 12.5, y: 1.5, z: 3.25 },
+            kind: 'stone',
+            orientation: 0,
+          },
         ],
       }),
     );
 
     const created = creates(frame);
     expect(created).toHaveLength(4);
-    // Base layer first, in row-major order, with terrain-derived appearances.
     expect(created[0]).toMatchObject({
-      nodeId: 'tile:0,0',
-      layer: 'base',
-      appearance: 'appearance.terrain.grass',
+      nodeId: 'block:0,0,0',
+      layer: 'object',
+      appearance: 'appearance.block.grass',
       transform: {
-        position: { x: 0, y: 0, z: 0 },
+        position: { x: 0.5, y: 0.5, z: 0.5 },
         rotation: { x: 0, y: 0, z: 0, w: 1 },
         scale: { x: 1, y: 1, z: 1 },
       },
       visible: true,
     });
-    expect(created[1]).toMatchObject({ nodeId: 'tile:1,0', layer: 'base' });
+    expect(created[1]).toMatchObject({ nodeId: 'block:1,0,0', appearance: 'appearance.block.path' });
     expect(created[2]).toMatchObject({
-      nodeId: 'tile:0,1',
-      layer: 'base',
-      appearance: 'appearance.terrain.path',
-      transform: expect.objectContaining({ position: { x: 12.5, y: 0.5, z: -3.25 } }),
+      nodeId: 'block:2,1,3',
+      appearance: 'appearance.block.stone',
+      transform: expect.objectContaining({ position: { x: 12.5, y: 1.5, z: 3.25 } }),
     });
-    // Then the object layer, with its existing kind appearance.
+    // Then the entity node, with its existing kind appearance.
     expect(created[3]).toMatchObject({
       nodeId: 'entity:entity-a',
       layer: 'object',
@@ -146,46 +160,128 @@ describe('render bridge tiles', () => {
     });
   });
 
-  it('emits nothing when the tiles are unchanged', () => {
+  it('maps a block yaw-step orientation to a real rotation about +Y', () => {
     const bridge = createRenderBridge();
-    const tiles = [makeTile(0, 0), makeTile(1, 0, 'blocked')];
-    bridge.frameFor(makeState([], { tiles }));
+    const frame = bridge.frameFor(makeState([], { blocks: [makeBlock(0, 0, 0, 'stairs', 90)] }));
+    const create = commandOfType(frame, 'node.create');
+    // 90 degrees about +Y is (0, sin45, 0, cos45).
+    expect(create.transform.rotation.x).toBeCloseTo(0, 9);
+    expect(create.transform.rotation.y).toBeCloseTo(Math.SQRT1_2, 9);
+    expect(create.transform.rotation.z).toBeCloseTo(0, 9);
+    expect(create.transform.rotation.w).toBeCloseTo(Math.SQRT1_2, 9);
+  });
 
-    const frame = bridge.frameFor(makeState([], { tiles }));
+  it('emits nothing when the blocks are unchanged', () => {
+    const bridge = createRenderBridge();
+    const blocks = [makeBlock(0, 0, 0), makeBlock(1, 0, 0, 'stone')];
+    bridge.frameFor(makeState([], { blocks }));
+
+    const frame = bridge.frameFor(makeState([], { blocks }));
 
     expect(frame).toEqual([]);
   });
 
-  it('emits appearance.set (not a recreate) when a terrain changes', () => {
+  it('emits appearance.set (not a recreate) when a block kind changes', () => {
     const bridge = createRenderBridge();
-    bridge.frameFor(makeState([], { tiles: [makeTile(2, 3)] }));
+    bridge.frameFor(makeState([], { blocks: [makeBlock(2, 0, 3)] }));
 
-    const frame = bridge.frameFor(makeState([], { tiles: [makeTile(2, 3, 'blocked')] }));
+    const frame = bridge.frameFor(makeState([], { blocks: [makeBlock(2, 0, 3, 'stone')] }));
 
     expect(frame).toEqual([
-      { type: 'appearance.set', nodeId: 'tile:2,3', appearance: 'appearance.terrain.blocked' },
+      { type: 'appearance.set', nodeId: 'block:2,0,3', appearance: 'appearance.block.stone' },
     ]);
   });
 
-  it('emits node.destroy when a tile disappears', () => {
+  it('emits transform.set (not a recreate) when a block orientation changes', () => {
     const bridge = createRenderBridge();
-    bridge.frameFor(makeState([], { tiles: [makeTile(0, 0), makeTile(1, 0)] }));
+    bridge.frameFor(makeState([], { blocks: [makeBlock(2, 0, 3, 'stairs', 0)] }));
 
-    const frame = bridge.frameFor(makeState([], { tiles: [makeTile(0, 0)] }));
+    const frame = bridge.frameFor(makeState([], { blocks: [makeBlock(2, 0, 3, 'stairs', 180)] }));
 
-    expect(frame).toEqual([{ type: 'node.destroy', nodeId: 'tile:1,0' }]);
+    const transform = commandOfType(frame, 'transform.set');
+    expect(transform.nodeId).toBe('block:2,0,3');
+    // 180 degrees about +Y is (0, 1, 0, 0).
+    expect(transform.transform.rotation.y).toBeCloseTo(1, 9);
+    expect(transform.transform.rotation.w).toBeCloseTo(0, 9);
   });
 
-  it('does not throw for an unknown terrain and uses the documented fallback', () => {
+  it('emits node.destroy when a block disappears', () => {
+    const bridge = createRenderBridge();
+    bridge.frameFor(makeState([], { blocks: [makeBlock(0, 0, 0), makeBlock(1, 0, 0)] }));
+
+    const frame = bridge.frameFor(makeState([], { blocks: [makeBlock(0, 0, 0)] }));
+
+    expect(frame).toEqual([{ type: 'node.destroy', nodeId: 'block:1,0,0' }]);
+  });
+
+  it('never renders an air block', () => {
+    const bridge = createRenderBridge();
+    const frame = bridge.frameFor(
+      makeState([], { blocks: [makeBlock(0, 0, 0, 'air'), makeBlock(1, 0, 0, 'grass')] }),
+    );
+    // `air` is the absence of a block and must not produce a node; the real
+    // block still does.
+    expect(creates(frame).map((command) => command.nodeId)).toEqual(['block:1,0,0']);
+  });
+
+  it('does not throw for an unknown block kind and uses the documented fallback', () => {
     const bridge = createRenderBridge();
 
     let frame: RenderFrame = [];
     expect(() => {
-      frame = bridge.frameFor(makeState([], { tiles: [makeTile(4, 4, 'sand')] }));
+      frame = bridge.frameFor(makeState([], { blocks: [makeBlock(4, 0, 4, 'lava')] }));
     }).not.toThrow();
 
     const create = commandOfType(frame, 'node.create');
     expect(create.appearance).toBe(FALLBACK_APPEARANCE);
+  });
+
+  it('groups block commands by chunk, with each chunk contiguous in the frame', () => {
+    const bridge = createRenderBridge();
+    // Cells chosen so their chunks are (0,0,0), (1,0,0) and (0,1,0) with
+    // CHUNK_SIZE 16. Chunk-major order is chunk.y, chunk.z, chunk.x.
+    const frame = bridge.frameFor(
+      makeState([], {
+        blocks: [
+          makeBlock(17, 0, 0), // chunk (1,0,0)
+          makeBlock(0, 0, 17), // chunk (0,1,0)
+          makeBlock(5, 0, 0), // chunk (0,0,0)
+          makeBlock(0, 0, 0), // chunk (0,0,0)
+        ],
+      }),
+    );
+
+    const ids = creates(frame).map((command) => String(command.nodeId));
+    expect(ids).toEqual(['block:0,0,0', 'block:5,0,0', 'block:17,0,0', 'block:0,0,17']);
+
+    // Every chunk's blocks occupy one contiguous run of indices: the property a
+    // future chunk-atomic (instanced / greedy-meshed) rebuild needs.
+    const chunkIndex = new Map<string, number[]>();
+    ids.forEach((id, index) => {
+      const cell = blockCellOfNodeId(id as NodeId);
+      if (cell === null) {
+        throw new Error('expected a block node id');
+      }
+      const key = `${blockChunkOf(cell).x},${blockChunkOf(cell).y},${blockChunkOf(cell).z}`;
+      const list = chunkIndex.get(key) ?? [];
+      list.push(index);
+      chunkIndex.set(key, list);
+    });
+    for (const indices of chunkIndex.values()) {
+      for (let i = 1; i < indices.length; i += 1) {
+        expect(indices[i]).toBe(indices[i - 1] + 1);
+      }
+    }
+  });
+
+  it('pins the bridge chunk size to the frozen protocol constant', () => {
+    // The bridge may not import the game protocol, so it mirrors `CHUNK_SIZE`.
+    // This assertion is what makes that mirror safe: drift becomes a failure.
+    expect(BRIDGE_CHUNK_SIZE).toBe(CHUNK_SIZE);
+    expect(blockChunkOf({ x: 17, y: 0, z: 0 })).toEqual(cellToChunk({ x: 17, y: 0, z: 0 }));
+    expect(blockChunkOf({ x: -1, y: -17, z: 31 })).toEqual(
+      cellToChunk({ x: -1, y: -17, z: 31 }),
+    );
   });
 });
 
@@ -308,342 +404,66 @@ describe('render bridge entity diff rules', () => {
   });
 });
 
-describe('render bridge terrain catalogue', () => {
-  it('maps all four terrains to distinct non-fallback appearances', () => {
+describe('render bridge appearance catalogue', () => {
+  it('maps every block kind to a distinct non-fallback appearance', () => {
     const bridge = createRenderBridge();
-    const terrains = ['grass', 'path', 'blocked', 'water'];
-
     const frame = bridge.frameFor(
-      makeState([], {
-        tiles: terrains.map((terrain, x) => makeTile(x, 0, terrain)),
-      }),
+      makeState([], { blocks: BRIDGE_BLOCK_KINDS.map((kind, x) => makeBlock(x, 0, 0, kind)) }),
     );
 
     const appearances = creates(frame).map((command) => command.appearance);
-    expect(appearances).toHaveLength(4);
-    expect(new Set(appearances).size).toBe(4);
+    expect(appearances).toHaveLength(BRIDGE_BLOCK_KINDS.length);
+    expect(new Set(appearances).size).toBe(BRIDGE_BLOCK_KINDS.length);
     for (const appearance of appearances) {
       expect(appearance).not.toBe(FALLBACK_APPEARANCE);
     }
   });
 
-  it('exposes BRIDGE_TERRAINS as every terrain key it renders non-fallback', () => {
-    // A terrain the real server can send that is missing here would silently
-    // fall through to the fallback look. This is the client-side half of the
-    // cross-module coverage assertion Main owns.
-    expect([...BRIDGE_TERRAINS].sort()).toEqual(['blocked', 'grass', 'path', 'water']);
-
-    for (const terrain of BRIDGE_TERRAINS) {
-      // A fresh bridge sees each terrain for the first time, so it emits
-      // node.create rather than an appearance.set.
-      const bridge = createRenderBridge();
-      const frame = bridge.frameFor(makeState([], { tiles: [makeTile(0, 0, terrain)] }));
-      expect(commandOfType(frame, 'node.create').appearance).not.toBe(FALLBACK_APPEARANCE);
-    }
-  });
-});
-
-describe('render bridge world geometry (phase 14)', () => {
-  type Surface = WorldState['surfaces'][number];
-  type Collider = WorldState['colliders'][number];
-  type PlainVec3 = { x: number; y: number; z: number };
-
-  function makeSurface(overrides: Partial<Surface> & { surfaceId: string }): Surface {
-    return {
-      kind: 'platform',
-      center: { x: 0, y: 0, z: 0 },
-      axisU: { x: 1, y: 0, z: 0 },
-      axisV: { x: 0, y: 0, z: -1 },
-      walkable: true,
-      ...overrides,
-    };
-  }
-
-  /** The real demo platform geometry the Manager authors (default 10x10 map). */
-  const PLATFORM = makeSurface({
-    surfaceId: 'surface-platform',
-    kind: 'platform',
-    center: { x: 3.5, y: 2, z: -4.5 },
-    axisU: { x: 1.5, y: 0, z: 0 },
-    axisV: { x: 0, y: 0, z: -0.5 },
-  });
-
-  /** The real demo ramp geometry: `axisV` gains a real `y` component (tilted). */
-  const RAMP = makeSurface({
-    surfaceId: 'surface-ramp',
-    kind: 'ramp',
-    center: { x: 3.5, y: 1, z: -2.267949192431123 },
-    axisU: { x: 1.5, y: 0, z: 0 },
-    axisV: { x: 0, y: 1, z: -1.7320508075688772 },
-  });
-
-  const COLLIDER: Collider = {
-    colliderId: 'collider-1',
-    kind: 'wall',
-    shape: { kind: 'aabb', min: { x: 0, y: 0, z: 0 }, max: { x: 1, y: 2, z: 1 } },
-  };
-
-  function surfaceCreates(frame: RenderFrame): Extract<RenderCommand, { type: 'node.create' }>[] {
-    return creates(frame).filter((command) => String(command.nodeId).startsWith('surface:'));
-  }
-
-  function cross(a: PlainVec3, b: PlainVec3): PlainVec3 {
-    return {
-      x: a.y * b.z - a.z * b.y,
-      y: a.z * b.x - a.x * b.z,
-      z: a.x * b.y - a.y * b.x,
-    };
-  }
-
-  /** Apply a quaternion to a vector (the standard `v + 2w(q x v) + 2q x (q x v)`). */
-  function applyQuat(q: { x: number; y: number; z: number; w: number }, v: PlainVec3): PlainVec3 {
-    const qv = { x: q.x, y: q.y, z: q.z };
-    const t = cross(qv, v);
-    const t2 = { x: t.x * 2, y: t.y * 2, z: t.z * 2 };
-    const t3 = cross(qv, t2);
-    return { x: v.x + q.w * t2.x + t3.x, y: v.y + q.w * t2.y + t3.y, z: v.z + q.w * t2.z + t3.z };
-  }
-
-  /**
-   * Map the local top-face corners `(±0.5, 0, ±0.5)` through the emitted
-   * transform. This is exactly what the runtime slab does: scale, rotate,
-   * translate. It is the ground truth for "the top face IS the surface plane".
-   */
-  function topFaceCorners(transform: {
-    position: PlainVec3;
-    rotation: { x: number; y: number; z: number; w: number };
-    scale: PlainVec3;
-  }): PlainVec3[] {
-    const locals: PlainVec3[] = [
-      { x: -0.5, y: 0, z: -0.5 },
-      { x: 0.5, y: 0, z: -0.5 },
-      { x: -0.5, y: 0, z: 0.5 },
-      { x: 0.5, y: 0, z: 0.5 },
-    ];
-    return locals.map((local) => {
-      const scaled = {
-        x: local.x * transform.scale.x,
-        y: local.y * transform.scale.y,
-        z: local.z * transform.scale.z,
-      };
-      const rotated = applyQuat(transform.rotation, scaled);
-      return {
-        x: transform.position.x + rotated.x,
-        y: transform.position.y + rotated.y,
-        z: transform.position.z + rotated.z,
-      };
-    });
-  }
-
-  /** The patch's real four corners: `center ± axisU ± axisV`. */
-  function patchCorners(surface: Surface): PlainVec3[] {
-    const corners: PlainVec3[] = [];
-    for (const su of [-1, 1]) {
-      for (const sv of [-1, 1]) {
-        corners.push({
-          x: surface.center.x + su * surface.axisU.x + sv * surface.axisV.x,
-          y: surface.center.y + su * surface.axisU.y + sv * surface.axisV.y,
-          z: surface.center.z + su * surface.axisU.z + sv * surface.axisV.z,
-        });
-      }
-    }
-    return corners;
-  }
-
-  it('renders NO node for a ground surface, so tiles and ground surfaces never double-draw', () => {
-    const bridge = createRenderBridge();
-    const tiles = [makeTile(0, 0), makeTile(1, 0)];
-    // Ground surfaces cover exactly the same cells as the tiles.
-    const groundSurfaces = [
-      makeSurface({
-        surfaceId: 'surface-ground-0-0',
-        kind: 'ground',
-        center: { x: 0, y: 0, z: 0 },
-      }),
-      makeSurface({
-        surfaceId: 'surface-ground-1-0',
-        kind: 'ground',
-        center: { x: 1, y: 0, z: 0 },
-      }),
-    ];
-
-    const frame = bridge.frameFor(makeState([], { tiles, surfaces: groundSurfaces }));
-    const created = creates(frame);
-
-    // Exactly one visual per cell, and it is the tile (base layer). No ground
-    // surface produced a node, so the same ground cannot be drawn twice.
-    expect(created).toHaveLength(2);
-    expect(created.every((command) => command.layer === 'base')).toBe(true);
-    expect(created.every((command) => String(command.nodeId).startsWith('tile:'))).toBe(true);
-    expect(created.some((command) => String(command.nodeId).startsWith('surface:'))).toBe(false);
-    expect(frame.some((command) => command.type === 'node.destroy')).toBe(false);
-  });
-
-  it('emits nothing at all for ground surfaces alone (no tiles, no geometry)', () => {
+  it('maps every entity kind to a distinct non-fallback appearance', () => {
     const bridge = createRenderBridge();
     const frame = bridge.frameFor(
-      makeState([], { surfaces: [makeSurface({ surfaceId: 'surface-ground-0-0', kind: 'ground' })] }),
+      makeState(BRIDGE_ENTITY_KINDS.map((kind, index) => makeEntity({ entityId: `entity-${index}`, kind }))),
     );
-    expect(frame).toEqual([]);
-  });
 
-  it('renders a flat platform as an object node whose top face is the surface plane', () => {
-    const bridge = createRenderBridge();
-    const frame = bridge.frameFor(makeState([], { surfaces: [PLATFORM] }));
-
-    const [create] = surfaceCreates(frame);
-    expect(create).toBeDefined();
-    expect(create.nodeId).toBe('surface:surface-platform');
-    expect(create.layer).toBe('object');
-    expect(create.appearance).toBe('appearance.surface.platform');
-    expect(create.visible).toBe(true);
-    expect(create.transform.position).toEqual({ x: 3.5, y: 2, z: -4.5 });
-    // Full edges are 2*|axisU| x 2*|axisV|; local Y (thickness) is unscaled.
-    expect(create.transform.scale).toEqual({ x: 3, y: 1, z: 1 });
-    // A flat patch's normal is +Y and its in-plane axes are X/Z, so the emitted
-    // rotation is the identity quaternion.
-    expect(create.transform.rotation).toEqual({ x: 0, y: 0, z: 0, w: 1 });
-
-    const actual = topFaceCorners(create.transform).map((corner) => ({
-      ...corner,
-      x: Number(corner.x.toFixed(9)),
-      y: Number(corner.y.toFixed(9)),
-      z: Number(corner.z.toFixed(9)),
-    }));
-    for (const expected of patchCorners(PLATFORM)) {
-      const match = actual.find(
-        (corner) =>
-          Math.abs(corner.x - expected.x) < 1e-9 &&
-          Math.abs(corner.y - expected.y) < 1e-9 &&
-          Math.abs(corner.z - expected.z) < 1e-9,
-      );
-      expect(match).toBeDefined();
+    const appearances = creates(frame).map((command) => command.appearance);
+    expect(appearances).toHaveLength(BRIDGE_ENTITY_KINDS.length);
+    expect(new Set(appearances).size).toBe(BRIDGE_ENTITY_KINDS.length);
+    for (const appearance of appearances) {
+      expect(appearance).not.toBe(FALLBACK_APPEARANCE);
     }
   });
 
-  it('renders a tilted ramp with a non-identity rotation whose top face is still the surface plane', () => {
-    const bridge = createRenderBridge();
-    const frame = bridge.frameFor(makeState([], { surfaces: [RAMP] }));
-
-    const [create] = surfaceCreates(frame);
-    expect(create.appearance).toBe('appearance.surface.ramp');
-    // |axisU| = 1.5, |axisV| = hypot(1, 1.732...) = 2, so full edges 3 x 4.
-    expect(create.transform.scale.x).toBeCloseTo(3, 9);
-    expect(create.transform.scale.y).toBe(1);
-    expect(create.transform.scale.z).toBeCloseTo(4, 9);
-    // A tilted patch must NOT be an identity rotation.
-    expect(create.transform.rotation).not.toEqual({ x: 0, y: 0, z: 0, w: 1 });
-
-    const actual = topFaceCorners(create.transform);
-    for (const expected of patchCorners(RAMP)) {
-      const match = actual.find(
-        (corner) =>
-          Math.abs(corner.x - expected.x) < 1e-9 &&
-          Math.abs(corner.y - expected.y) < 1e-9 &&
-          Math.abs(corner.z - expected.z) < 1e-9,
-      );
-      expect(match).toBeDefined();
-    }
-  });
-
-  it('maps every non-ground surface kind to a distinct non-fallback appearance', () => {
-    expect([...BRIDGE_SURFACES].sort()).toEqual(['bridge', 'platform', 'ramp']);
-    const bridge = createRenderBridge();
-    const surfaces = BRIDGE_SURFACES.map((kind, index) =>
-      makeSurface({ surfaceId: `surface-${index}`, kind }),
-    );
-
-    const frame = bridge.frameFor(makeState([], { surfaces }));
-    const appearances = surfaceCreates(frame).map((command) => command.appearance);
-    expect(appearances).toHaveLength(3);
-    expect(new Set(appearances).size).toBe(3);
-    expect(appearances).not.toContain(FALLBACK_APPEARANCE);
-  });
-
-  it('keeps colliders invisible: they emit nothing and changing one is a no-op', () => {
-    const bridge = createRenderBridge();
-
-    expect(bridge.frameFor(makeState([], { colliders: [COLLIDER] }))).toEqual([]);
-    expect(
-      bridge.frameFor(
-        makeState([], {
-          colliders: [{ ...COLLIDER, shape: { kind: 'aabb', min: { x: 0, y: 0, z: 0 }, max: { x: 2, y: 3, z: 2 } } }],
-        }),
-      ),
-    ).toEqual([]);
-  });
-
-  it('is a no-op for a ground surface metadata change but diffs real surface geometry', () => {
-    const bridge = createRenderBridge();
-    bridge.frameFor(makeState([], { surfaces: [PLATFORM] }));
-
-    // A changed platform kind swaps appearance in place (no recreate).
-    const kindFrame = bridge.frameFor(
-      makeState([], { surfaces: [{ ...PLATFORM, kind: 'bridge' }] }),
-    );
-    expect(kindFrame).toEqual([
-      {
-        type: 'appearance.set',
-        nodeId: 'surface:surface-platform',
-        appearance: 'appearance.surface.bridge',
-      },
+  it('exposes BRIDGE_BLOCK_KINDS as every renderable block kind', () => {
+    expect([...BRIDGE_BLOCK_KINDS].sort()).toEqual([
+      'grass',
+      'path',
+      'ramp',
+      'slab',
+      'soil',
+      'stairs',
+      'stone',
+      'water',
     ]);
-
-    // A moved/reshaped surface emits `transform.set` (geometry is static, so the
-    // bridge still diffs it rather than leaving a stale node).
-    const moved = makeSurface({
-      ...PLATFORM,
-      center: { x: 3.5, y: 2.5, z: -4.5 },
-    });
-    const geometryFrame = bridge.frameFor(makeState([], { surfaces: [moved] }));
-    const transform = commandOfType(geometryFrame, 'transform.set');
-    expect(transform.nodeId).toBe('surface:surface-platform');
-    expect(transform.transform.position).toEqual({ x: 3.5, y: 2.5, z: -4.5 });
+    // `air` is absence and is intentionally not renderable.
+    expect(BRIDGE_BLOCK_KINDS).not.toContain('air');
   });
 
-  it('destroys a surface node when the surface disappears', () => {
-    const bridge = createRenderBridge();
-    bridge.frameFor(makeState([], { surfaces: [PLATFORM, RAMP] }));
-
-    const frame = bridge.frameFor(makeState([], { surfaces: [PLATFORM] }));
-
-    expect(frame).toEqual([{ type: 'node.destroy', nodeId: 'surface:surface-ramp' }]);
-  });
-
-  it('is a no-op when a ground surface is removed (it never had a node)', () => {
-    const bridge = createRenderBridge();
-    bridge.frameFor(
-      makeState([], { surfaces: [makeSurface({ surfaceId: 'surface-ground-0-0', kind: 'ground' })] }),
-    );
-
-    const frame = bridge.frameFor(makeState([], { surfaces: [] }));
-    expect(frame).toEqual([]);
-  });
-
-  it('re-creates surfaces on a world switch and destroys the previous world leftovers', () => {
-    const bridge = createRenderBridge();
-    bridge.frameFor(makeState([], { worldId: 'world-1', surfaces: [PLATFORM, RAMP] }));
-
-    const frame = bridge.frameFor(
-      makeState([], { worldId: 'world-2', surfaces: [PLATFORM] }),
-    );
-
-    // The new world's platform is re-created (a snap), the old ramp destroyed.
-    expect(surfaceCreates(frame).map((command) => command.nodeId)).toEqual([
-      'surface:surface-platform',
+  it('exposes BRIDGE_ENTITY_KINDS as the closed entity union', () => {
+    expect([...BRIDGE_ENTITY_KINDS].sort()).toEqual([
+      'building',
+      'character',
+      'chest',
+      'rock',
+      'tree',
     ]);
-    expect(frame).toContainEqual({ type: 'node.destroy', nodeId: 'surface:surface-ramp' });
   });
 
-  it('namespaces surface node ids so a picked surface is never mistaken for an entity', () => {
-    const bridge = createRenderBridge();
-    const frame = bridge.frameFor(makeState([], { surfaces: [PLATFORM] }));
-    expect(surfaceCreates(frame)[0].nodeId).toBe('surface:surface-platform');
-
-    // `pick()` returns the opaque `NodeId`; the bridge's entity mapping must
-    // reject a surface node exactly like a tile node.
-    expect(entityIdOfNodeId('surface:surface-platform' as NodeId)).toBeNull();
-    expect(entityIdOfNodeId('tile:0,0' as NodeId)).toBeNull();
+  it('keeps BRIDGE_APPEARANCES a superset of every kind catalogue plus the fallback', () => {
+    // A rename on either side must show up here rather than as a silent fallback.
+    expect(new Set(BRIDGE_APPEARANCES).size).toBe(BRIDGE_APPEARANCES.length);
+    expect(BRIDGE_APPEARANCES).toContain(FALLBACK_APPEARANCE);
+    expect(BRIDGE_APPEARANCES).toContain('appearance.block.grass');
+    expect(BRIDGE_APPEARANCES).toContain('appearance.character');
   });
 });
 
@@ -692,8 +512,7 @@ describe('render bridge animation driving state', () => {
     bridge.frameFor(makeState([makeEntity({ entityId: 'entity-a', position: { x: 5, y: 0, z: 5 } })]));
 
     // Walking into a wall: the authoritative position is unchanged, so there is
-    // no move to start and no settle to emit. The actor cannot be left on a
-    // walk animation that nothing ever ends.
+    // no move to start and no settle to emit.
     const frame = bridge.frameFor(
       makeState([makeEntity({ entityId: 'entity-a', position: { x: 5, y: 0, z: 5 } })]),
     );
@@ -703,7 +522,7 @@ describe('render bridge animation driving state', () => {
 });
 
 describe('render bridge fallback appearance', () => {
-  it('does not throw for an unknown kind and uses the documented fallback', () => {
+  it('does not throw for an unknown entity kind and uses the documented fallback', () => {
     const bridge = createRenderBridge();
 
     let frame: RenderFrame = [];
@@ -728,14 +547,14 @@ describe('render bridge fallback appearance', () => {
 describe('render bridge reset and determinism', () => {
   it('re-emits node.create after reset', () => {
     const bridge = createRenderBridge();
-    const state = makeState([makeEntity({ entityId: 'entity-a' })], { tiles: [makeTile(0, 0)] });
+    const state = makeState([makeEntity({ entityId: 'entity-a' })], { blocks: [makeBlock(0, 0, 0)] });
     bridge.frameFor(state);
 
     bridge.reset();
     const frame = bridge.frameFor(state);
 
     const created = creates(frame);
-    expect(created.map((command) => command.nodeId)).toEqual(['tile:0,0', 'entity:entity-a']);
+    expect(created.map((command) => command.nodeId)).toEqual(['block:0,0,0', 'entity:entity-a']);
   });
 
   it('orders create commands deterministically regardless of input order', () => {
@@ -747,18 +566,18 @@ describe('render bridge reset and determinism', () => {
       makeEntity({ entityId: 'entity-b' }),
       makeEntity({ entityId: 'entity-c' }),
     ];
-    const tiles = [makeTile(1, 0), makeTile(0, 1), makeTile(0, 0)];
+    const blocks = [makeBlock(1, 0, 0), makeBlock(0, 0, 1), makeBlock(0, 0, 0)];
 
-    const forward = first.frameFor(makeState(entities, { tiles }));
+    const forward = first.frameFor(makeState(entities, { blocks }));
     const reversed = second.frameFor(
-      makeState([...entities].reverse(), { tiles: [...tiles].reverse() }),
+      makeState([...entities].reverse(), { blocks: [...blocks].reverse() }),
     );
 
     expect(forward).toEqual(reversed);
     expect(forward.map((command) => command.nodeId)).toEqual([
-      'tile:0,0',
-      'tile:1,0',
-      'tile:0,1',
+      'block:0,0,0',
+      'block:1,0,0',
+      'block:0,0,1',
       'entity:entity-a',
       'entity:entity-b',
       'entity:entity-c',
@@ -774,7 +593,7 @@ describe('render bridge reset and determinism', () => {
           makeEntity({ entityId: 'entity-b', position: { x: 0, y: 0, z: 0 } }),
           makeEntity({ entityId: 'entity-c', position: { x: 0, y: 0, z: 0 } }),
         ],
-        { tiles: [makeTile(0, 0), makeTile(1, 0)] },
+        { blocks: [makeBlock(0, 0, 0), makeBlock(1, 0, 0)] },
       ),
     );
 
@@ -784,8 +603,8 @@ describe('render bridge reset and determinism', () => {
           makeEntity({ entityId: 'entity-c', position: { x: 1, y: 0, z: 0 } }),
           makeEntity({ entityId: 'entity-a', position: { x: 1, y: 0, z: 0 } }),
         ],
-        // Tile (0,0) changes terrain; tile (1,0) disappears.
-        { tiles: [makeTile(0, 0, 'path')] },
+        // Cell (0,0,0) changes kind; cell (1,0,0) disappears.
+        { blocks: [makeBlock(0, 0, 0, 'path')] },
       ),
     );
 
@@ -794,32 +613,32 @@ describe('render bridge reset and determinism', () => {
       'animation.play:entity:entity-a',
       'transform.setTarget:entity:entity-c',
       'animation.play:entity:entity-c',
-      'appearance.set:tile:0,0',
-      'node.destroy:tile:1,0',
+      'appearance.set:block:0,0,0',
+      'node.destroy:block:1,0,0',
       'node.destroy:entity:entity-b',
     ]);
   });
 
-  it('is a pure function of world state at full-map scale, independent of tile order', () => {
+  it('is a pure function of world state at full-map scale, independent of block order', () => {
     const bridge = createRenderBridge();
 
-    // A complete 10x10 map, exercising the whole tile list rather than a token
-    // sample, plus one entity.
-    const tiles: Tile[] = [];
-    for (let cellZ = 0; cellZ < 10; cellZ += 1) {
-      for (let cellX = 0; cellX < 10; cellX += 1) {
-        tiles.push(makeTile(cellX, cellZ, (cellX + cellZ) % 2 === 0 ? 'grass' : 'path'));
+    // A complete 10x10 ground layer, exercising the whole block list rather than
+    // a token sample, plus one entity.
+    const blocks: BlockViewModel[] = [];
+    for (let z = 0; z < 10; z += 1) {
+      for (let x = 0; x < 10; x += 1) {
+        blocks.push(makeBlock(x, 0, z, (x + z) % 2 === 0 ? 'grass' : 'path'));
       }
     }
     const entities = [makeEntity({ entityId: 'entity-a', position: { x: 1, y: 0, z: 1 } })];
 
-    const initial = bridge.frameFor(makeState(entities, { tiles }));
+    const initial = bridge.frameFor(makeState(entities, { blocks }));
     expect(initial).toHaveLength(101);
 
-    // Re-diff the SAME world with the tile list reversed. `byCell` normalises the
-    // order, so the diff is empty: the bridge's output is a pure function of
-    // world state, not of the order the caller supplied it in.
-    const reordered = bridge.frameFor(makeState(entities, { tiles: [...tiles].reverse() }));
+    // Re-diff the SAME world with the block list reversed. `compareBlocksForRender`
+    // normalises the order, so the diff is empty: the bridge's output is a pure
+    // function of world state, not of the order the caller supplied it in.
+    const reordered = bridge.frameFor(makeState(entities, { blocks: [...blocks].reverse() }));
     expect(reordered).toEqual([]);
   });
 });
@@ -834,18 +653,18 @@ describe('render bridge world identity', () => {
           makeEntity({ entityId: 'entity-a', position: { x: 3, y: 0, z: 4 } }),
           makeEntity({ entityId: 'entity-b', position: { x: 7, y: 0, z: 7 } }),
         ],
-        { worldId: 'world-1', tiles: [makeTile(0, 0), makeTile(5, 5)] },
+        { worldId: 'world-1', blocks: [makeBlock(0, 0, 0), makeBlock(5, 0, 5)] },
       ),
     );
 
     // Same cell coordinates and same entity id, but a DIFFERENT world: entity-a
     // is at a new position and the old-only nodes are gone. Without the worldId
     // reset this would emit transform.setTarget for entity-a (interpolating out
-    // of the old world) and no base-layer create.
+    // of the old world) and no block create.
     const frame = bridge.frameFor(
       makeState([makeEntity({ entityId: 'entity-a', position: { x: 4, y: 0, z: 4 } })], {
         worldId: 'world-2',
-        tiles: [makeTile(0, 0)],
+        blocks: [makeBlock(0, 0, 0)],
       }),
     );
 
@@ -853,11 +672,11 @@ describe('render bridge world identity', () => {
     expect(frame).toEqual([
       {
         type: 'node.create',
-        layer: 'base',
-        nodeId: 'tile:0,0',
-        appearance: 'appearance.terrain.grass',
+        layer: 'object',
+        nodeId: 'block:0,0,0',
+        appearance: 'appearance.block.grass',
         transform: {
-          position: { x: 0, y: 0, z: 0 },
+          position: { x: 0.5, y: 0.5, z: 0.5 },
           rotation: { x: 0, y: 0, z: 0, w: 1 },
           scale: { x: 1, y: 1, z: 1 },
         },
@@ -875,7 +694,7 @@ describe('render bridge world identity', () => {
         },
         visible: true,
       },
-      { type: 'node.destroy', nodeId: 'tile:5,5' },
+      { type: 'node.destroy', nodeId: 'block:5,0,5' },
       { type: 'node.destroy', nodeId: 'entity:entity-b' },
     ]);
   });
@@ -899,54 +718,72 @@ describe('render bridge world identity', () => {
   });
 });
 
-describe('render bridge tile/entity id namespacing', () => {
-  it('cannot collide a tile with an entity whose id looks like a coordinate', () => {
+describe('render bridge block/entity id namespacing', () => {
+  it('cannot collide a block with an entity whose id looks like a coordinate', () => {
     const bridge = createRenderBridge();
 
     const frame = bridge.frameFor(
-      makeState([makeEntity({ entityId: '1,2', position: { x: 9, y: 0, z: 9 } })], {
-        tiles: [makeTile(1, 2)],
+      makeState([makeEntity({ entityId: '1,2,3', position: { x: 9, y: 0, z: 9 } })], {
+        blocks: [makeBlock(1, 2, 3)],
       }),
     );
 
     const ids = frame.map((command) => command.nodeId);
-    expect(ids).toContain('tile:1,2');
-    expect(ids).toContain('entity:1,2');
+    expect(ids).toContain('block:1,2,3');
+    expect(ids).toContain('entity:1,2,3');
     expect(new Set(ids).size).toBe(ids.length);
   });
 
-  it('cannot collide a tile with an entity literally named tile:<cellX>,<cellZ>', () => {
+  it('cannot collide a block with an entity literally named block:<cell>', () => {
     const bridge = createRenderBridge();
 
     const frame = bridge.frameFor(
-      makeState([makeEntity({ entityId: 'tile:3,4', position: { x: 9, y: 0, z: 9 } })], {
-        tiles: [makeTile(3, 4)],
+      makeState([makeEntity({ entityId: 'block:3,4,5', position: { x: 9, y: 0, z: 9 } })], {
+        blocks: [makeBlock(3, 4, 5)],
       }),
     );
 
     const ids = frame.map((command) => command.nodeId);
-    expect(ids).toContain('tile:3,4');
-    expect(ids).toContain('entity:tile:3,4');
+    expect(ids).toContain('block:3,4,5');
+    expect(ids).toContain('entity:block:3,4,5');
     expect(new Set(ids).size).toBe(ids.length);
   });
 });
 
-describe('bridge node id -> entityId mapping', () => {
+describe('bridge node id -> game identity mapping', () => {
   it('maps the namespaced node id of an entity back to its entity id', () => {
     // This is the direction the app actually uses: `runtime.pick()` hands back
     // an opaque `NodeId`, and the UI turns it into an entity intent through here.
     expect(entityIdOfNodeId('entity:entity-42' as NodeId)).toBe('entity-42');
   });
 
-  it('is lossless for an entity id that itself looks like a tile id', () => {
+  it('is lossless for an entity id that itself looks like a block id', () => {
     // The `entity:` prefix is what disambiguates, so the mapping is lossless
     // even when an entity id contains a colon.
-    expect(entityIdOfNodeId('entity:tile:3,4' as NodeId)).toBe('tile:3,4');
+    expect(entityIdOfNodeId('entity:block:3,4,5' as NodeId)).toBe('block:3,4,5');
   });
 
-  it('maps a non-entity node id to null', () => {
-    expect(entityIdOfNodeId('tile:0,0' as NodeId)).toBeNull();
+  it('maps the namespaced node id of a block back to its absolute integer cell', () => {
+    expect(blockCellOfNodeId('block:3,4,5' as NodeId)).toEqual({ x: 3, y: 4, z: 5 });
+    expect(blockCellOfNodeId('block:-1,-2,-3' as NodeId)).toEqual({ x: -1, y: -2, z: -3 });
+  });
+
+  it('keeps entity, block and ground distinguishable at the pick site', () => {
+    // An entity node -> an entity id and no cell; a block node -> a cell and no
+    // entity id; a non-node pick (ground) is neither.
+    expect(entityIdOfNodeId('entity:e1' as NodeId)).toBe('e1');
+    expect(blockCellOfNodeId('entity:e1' as NodeId)).toBeNull();
+    expect(blockCellOfNodeId('block:0,0,0' as NodeId)).toEqual({ x: 0, y: 0, z: 0 });
+    expect(entityIdOfNodeId('block:0,0,0' as NodeId)).toBeNull();
     expect(entityIdOfNodeId('ground' as NodeId)).toBeNull();
-    expect(entityIdOfNodeId('entity:' as NodeId)).toBeNull();
+    expect(blockCellOfNodeId('ground' as NodeId)).toBeNull();
+  });
+
+  it('rejects malformed block node ids', () => {
+    expect(blockCellOfNodeId('block:' as NodeId)).toBeNull();
+    expect(blockCellOfNodeId('block:1,2' as NodeId)).toBeNull();
+    expect(blockCellOfNodeId('block:1,2,x' as NodeId)).toBeNull();
+    expect(blockCellOfNodeId('block:1.5,2,3' as NodeId)).toBeNull();
+    expect(entityIdOfNodeId('block:' as NodeId)).toBeNull();
   });
 });

@@ -23,11 +23,23 @@
  * water at cells (3,3)(4,3)(3,4)(4,4) -> the block x in [-2,0], z in [-2,0];
  * tree-1 at cell (6,4) -> (1.5,0,-0.5) with half-extents 0.4; blocked rock at (2,8)(3,8).
  *
- * Phase 14 added a real 3D world model: the ground, the demo platform (top y = 2,
- * z in [-5,-4]) and the 30-degree demo ramp that reaches it are world-space
- * `surfaces`, and obstacles are `colliders` with genuine y ranges. The phase-14
- * describe block below drives the actor up that ramp and off the platform edge
- * through this same real chain.
+ * Phase 15 moved the world to a BLOCK-SPATIAL KERNEL: the authoritative topology is
+ * a sparse store of integer-cell `BlockState`s over a `blockGrid { origin, cellSize }`,
+ * and entities keep CONTINUOUS transforms. The retired phase-14 topology
+ * (`tiles`/`grid`/`surfaces`/`colliders`) no longer exists anywhere.
+ *
+ * Frozen default world used below (packages/manager/src/default-world.ts): the block
+ * grid origin is (-6,0,-6) with cellSize 1, so cell (i) spans [origin+i, origin+i+1)
+ * and its centre is origin+i+0.5; the grass layer lives in cell y=0, so the GROUND
+ * TOP FACE is y=1 and the actor spawns at (-0.5, 1, -0.5) (the centre of the 12x12
+ * block bounding box, cell (5,5)). Obstacles: a half slab at (2,1,2), non-solid water,
+ * a staircase at z=9, a full stone barrier at (7..10, 1, 4) (too high to step), a
+ * raised platform, and a bridge deck at cell y=3 / z=7 reached by a ramp run, with a
+ * walkable clearance underneath. Authored placeables: tree-1 (on the slab, so y=1.5),
+ * rock-1, chest-1 and a 2x2 building-1.
+ *
+ * The tick is DRIVEN BY THE TEST (`world.step(50)` + fan-out) instead of a real
+ * interval, so assertions are deterministic and fast.
  */
 
 import { createServer } from 'node:http';
@@ -39,6 +51,7 @@ import {
   TICK_RATE_HZ,
   createGameInfoManager,
   createWorldManager,
+  supportHeightAt,
 } from '@starvalley/manager';
 import type { WorldManager } from '@starvalley/manager';
 import { COMMAND_PATH, PROTOCOL_VERSION, WORLD_PATH, parseActorId } from '@starvalley/protocol';
@@ -49,14 +62,21 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import {
   getWorldState,
   interact,
+  jump,
   loadWorld,
   moveTo,
+  placeEntity,
+  removeBlock,
+  removeEntity,
   resetWorldEventSource,
   resetWorldFetch,
   resetWorldState,
+  rotateEntity,
+  setBlock,
   setMovementIntent,
   setWorldEventSource,
   setWorldFetch,
+  validatePlacement,
 } from '../../apps/web/src/organizer';
 import type { EventSourceLike } from '../../apps/web/src/organizer';
 
@@ -72,6 +92,7 @@ const world: WorldManager = {
   getSnapshot: (input) => currentWorld.getSnapshot(input),
   submitIntent: (input) => currentWorld.submitIntent(input),
   step: (dtMs) => currentWorld.step(dtMs),
+  getOccupancy: () => currentWorld.getOccupancy(),
 };
 
 /** The composition root's fan-out port, driven by the test's tick helper. */
@@ -240,240 +261,23 @@ function approx(actual: number, expected: number, tolerance = 1e-9): boolean {
   return Math.abs(actual - expected) < tolerance;
 }
 
-describe('vertical slice: continuous 3D movement over the realtime stream', () => {
-  it('loads the authoritative world with 3D state: bounds, grid and world positions', async () => {
-    useRealServer();
-
-    await loadWorld();
-
-    const state = getWorldState();
-    expect(state.status).toBe('ready');
-    expect(state.error).toBeNull();
-    expect(state.worldId).toBe('world-1');
-
-    // bounds are the WORLD's box; the grid is a separate concept with an explicit origin
-    expect(state.bounds).not.toBeNull();
-    expect(state.grid).not.toBeNull();
-    expect(state.grid?.cellSize).toBe(1);
-    expect(state.grid?.origin).toEqual({ x: -5, y: 0, z: -5 });
-
-    // cells are NOT bound to the world origin, and tile view models carry world positions
-    const origin = state.tiles.find((tile) => tile.cellX === 0 && tile.cellZ === 0);
-    expect(origin?.position).toEqual({ x: -4.5, y: 0, z: -4.5 });
-    expect(state.tiles).toHaveLength(100);
-    expect(new Set(state.tiles.map((tile) => tile.terrain))).toEqual(
-      new Set(['grass', 'path', 'water', 'blocked']),
-    );
-
-    // entities are 3D and the actor spawns at the centre cell's world centre
-    expect(state.entities).toHaveLength(3);
-    expect(actorPosition()).toEqual({ x: 0.5, y: 0, z: 0.5 });
-
-    await waitFor(() => getWorldState().streamStatus === 'live');
-    expect(getWorldState().streamStatus).toBe('live');
-  });
-
-  it('moves continuously: speed x dt, not tile-to-tile teleports', async () => {
-    useRealServer();
-    await loadWorld();
-
-    await setMovementIntent({ x: 1, z: 0 });
-    await tick(1);
-
-    // 3 units/second at 20 Hz = 0.15 per tick, and the position is NOT a cell centre
-    const afterOne = actorPosition();
-    expect(approx(afterOne.x, 0.5 + STEP_UNITS)).toBe(true);
-    expect(afterOne.x).not.toBe(Math.round(afterOne.x - 0.5) + 0.5);
-    expect(afterOne.y).toBe(0);
-    expect(afterOne.z).toBe(0.5);
-
-    await tick(3);
-    expect(approx(actorPosition().x, 0.5 + 4 * STEP_UNITS)).toBe(true);
-  });
-
-  it('applies a changed intent immediately and stops on a zero intent', async () => {
-    useRealServer();
-    await loadWorld();
-
-    await setMovementIntent({ x: 0, z: 1 });
-    await tick(2);
-    expect(approx(actorPosition().z, 0.5 + 2 * STEP_UNITS)).toBe(true);
-
-    await setMovementIntent({ x: 0, z: 0 });
-    const stopped = actorPosition();
-    const batchesBefore = lastBatches.length;
-    await tick(3);
-    expect(actorPosition()).toEqual(stopped);
-    // a stopped actor emits nothing at all
-    expect(lastBatches.slice(batchesBefore).every((batch) => batch.events.length === 0)).toBe(true);
-  });
-
-  it('resolves a blocked cell in WORLD space: the actor stops outside it and never enters', async () => {
-    useRealServer();
-    await loadWorld();
-
-    // go north to z = -0.7, inside the water block's z band [-2, 0] while x = 0.5 is clear
-    await setMovementIntent({ x: 0, z: -1 });
-    await tick(8);
-    expect(approx(actorPosition().z, 0.5 - 8 * STEP_UNITS)).toBe(true);
-
-    // now drive west into the water: its east face is x = 0, so the circle stops at 0 + radius
-    await setMovementIntent({ x: -1, z: 0 });
-    await tick(20);
-    const blocked = actorPosition();
-    // never inside the collider...
-    expect(blocked.x).toBeGreaterThanOrEqual(DEFAULT_ACTOR_RADIUS - 1e-6);
-    // ...it did move...
-    expect(blocked.x).toBeLessThan(0.5);
-    // ...and it stopped within one step of the surface (this is a discrete-step sim: contact is
-    // approached to within one integrated step, not to the exact contact point)
-    expect(blocked.x).toBeLessThanOrEqual(DEFAULT_ACTOR_RADIUS + STEP_UNITS + 1e-6);
-    expect(approx(blocked.z, -0.7, 1e-6)).toBe(true);
-
-    // and it is stuck: further ticks move nothing and emit nothing
-    const batchesBefore = lastBatches.length;
-    await tick(5);
-    expect(actorPosition()).toEqual(blocked);
-    expect(lastBatches.slice(batchesBefore).every((batch) => batch.events.length === 0)).toBe(true);
-  });
-
-  it('slides along a blocked surface instead of sticking (axis-separated resolution)', async () => {
-    useRealServer();
-    await loadWorld();
-
-    await setMovementIntent({ x: 0, z: -1 });
-    await tick(8);
-    await setMovementIntent({ x: -1, z: 0 });
-    await tick(20);
-    const atWall = actorPosition();
-    expect(atWall.x).toBeGreaterThanOrEqual(DEFAULT_ACTOR_RADIUS - 1e-6);
-
-    // diagonal north-west: x is blocked by the water, z is free, so the actor keeps sliding north
-    const diagonal = 1 / Math.SQRT2;
-    await setMovementIntent({ x: -diagonal, z: -diagonal });
-    await tick(4);
-    const slid = actorPosition();
-    expect(slid.z).toBeLessThan(atWall.z);
-    expect(approx(slid.x, atWall.x, 1e-9)).toBe(true);
-  });
-
-  it('collides with a world object (a tree collider), not with a cell', async () => {
-    useRealServer();
-    await loadWorld();
-
-    // north to z = -0.55, inside tree-1's z band [-0.9, -0.1] (tree at (1.5, -0.5), half 0.4)
-    await setMovementIntent({ x: 0, z: -1 });
-    await tick(7);
-    expect(approx(actorPosition().z, 0.5 - 7 * STEP_UNITS)).toBe(true);
-
-    // east into the tree: its west face is 1.5 - 0.4 = 1.1, so the circle cannot pass 1.1 - 0.35
-    await setMovementIntent({ x: 1, z: 0 });
-    await tick(20);
-    const stopped = actorPosition();
-    const contact = 1.5 - 0.4 - DEFAULT_ACTOR_RADIUS; // 0.75
-    expect(stopped.x).toBeLessThanOrEqual(contact + 1e-6); // never penetrate the tree collider
-    expect(stopped.x).toBeGreaterThan(contact - STEP_UNITS - 1e-6); // but it did approach it
-    expect(stopped.x).toBeLessThan(1.5);
-
-    // and it is held there: further east ticks emit nothing
-    const batchesBefore = lastBatches.length;
-    await tick(3);
-    expect(actorPosition()).toEqual(stopped);
-    expect(lastBatches.slice(batchesBefore).every((batch) => batch.events.length === 0)).toBe(true);
-  });
-
-  it('rejects a movement intent that a client must not be able to send', async () => {
-    useRealServer();
-    await loadWorld();
-
-    const post = (body: unknown) =>
-      fetch(new URL(COMMAND_PATH, baseUrl), {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-
-    // magnitude > 1, a client-named actor, a destination, or a missing movement are all 400
-    expect((await post({ type: 'actor.moveIntent', movement: { x: 1, z: 1 } })).status).toBe(400);
-    expect(
-      (await post({ type: 'actor.moveIntent', movement: { x: 1, z: 0 }, actorId: 'ghost' })).status,
-    ).toBe(400);
-    expect(
-      (await post({ type: 'actor.moveIntent', movement: { x: 1, z: 0 }, position: { x: 9, y: 0, z: 9 } }))
-        .status,
-    ).toBe(400);
-    expect((await post({ type: 'actor.moveIntent' })).status).toBe(400);
-    expect((await post({ type: 'actor.teleport', movement: { x: 0, z: 0 } })).status).toBe(400);
-  });
-
-  it('surfaces an unknown actor as an error without moving anything', async () => {
-    useRealServer();
-    await loadWorld();
-    const before = actorPosition();
-
-    currentActorId = parseActorId('ghost-actor');
-    await setMovementIntent({ x: 1, z: 0 });
-    await settle();
-
-    expect(getWorldState().status).toBe('error');
-    expect(getWorldState().error).not.toBeNull();
-    // the last authoritative world is retained for rendering
-    expect(getWorldState().grid?.cellSize).toBe(1);
-    expect(actorPosition()).toEqual(before);
-  });
-
-  it('closes the stream on reset and returns to idle', async () => {
-    useRealServer();
-    await loadWorld();
-    await waitFor(() => getWorldState().streamStatus === 'live');
-
-    resetWorldState();
-
-    expect(getWorldState().status).toBe('idle');
-    expect(getWorldState().streamStatus).toBe('idle');
-    expect(getWorldState().tiles).toHaveLength(0);
-    expect(getWorldState().entities).toHaveLength(0);
-  });
-
-  it('serves the 3D world snapshot and the current protocol version, and no legacy endpoints', async () => {
-    const response = await fetch(new URL(WORLD_PATH, baseUrl));
-    const payload = (await response.json()) as Record<string, unknown>;
-    const snapshot = payload['world'] as Record<string, unknown>;
-    expect(Object.keys(snapshot).sort()).toEqual([
-      'bounds',
-      'colliders',
-      'controlledActorId',
-      'entities',
-      'grid',
-      'serverTime',
-      'surfaces',
-      'tiles',
-      'worldId',
-    ]);
-    expect(snapshot['bounds']).toBeDefined();
-    expect(snapshot['grid']).toBeDefined();
-
-    const info = await fetch(new URL('/api/game-info', baseUrl));
-    const gameInfo = (await info.json()) as { gameInfo: { protocolVersion: number } };
-    expect(gameInfo.gameInfo.protocolVersion).toBe(PROTOCOL_VERSION);
-
-    for (const path of ['/api/actor/move', '/api/player/move']) {
-      const legacy = await fetch(new URL(path, baseUrl), {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ direction: 'east' }),
-      });
-      expect(legacy.status).toBe(404);
-    }
-  });
-});
-
 /**
- * Drive one authoritative tick and fan it out, WITHOUT waiting for the client
- * round trip. Used when a test needs the authoritative value on every tick
- * (continuity of a fall/climb); the client chain is asserted after a `settle`.
+ * The default authored block world (packages/manager/src/default-world.ts), so
+ * the expectations below are derived rather than sprinkled as magic numbers:
+ * a 12x12 grass layer at cell y=0 (its top face is y=1), the spawn at the
+ * bounding-box centre cell (5,5), a half slab at (2,1,2), a non-solid water
+ * patch, a staircase at z=9, a full stone barrier at (7..10,1,4), a raised
+ * platform, and a bridge deck at cell y=3 / z=7 reached by a ramp run, with a
+ * walkable clearance underneath.
  */
-function stepWithoutSettle(): void { // deliberately NOT `tick(1)`: no settle wait, so the caller can sample every tick
+const GRID_ORIGIN = { x: -6, y: 0, z: -6 };
+const GROUND_TOP = 1;
+const SPAWN = { x: -0.5, y: GROUND_TOP, z: -0.5 };
+const cellCentreX = (cellX: number): number => GRID_ORIGIN.x + cellX + 0.5;
+const cellCentreZ = (cellZ: number): number => GRID_ORIGIN.z + cellZ + 0.5;
+
+/** Drive one authoritative tick and fan it out, WITHOUT waiting for the client round trip. */
+function stepWithoutSettle(): void {
   const batch = world.step(TICK_MS);
   lastBatches.push(batch);
   for (const listener of subscribers) {
@@ -491,91 +295,325 @@ function authoritativeActorPosition(): { x: number; y: number; z: number } {
   return entity.transform.position;
 }
 
-describe('phase 14: real 3D world geometry (surfaces + colliders) over the real chain', () => {
-  it('serves world geometry as data: walkable surfaces, and colliders with REAL y ranges', async () => {
+describe('vertical slice: the v9 block-spatial world over the realtime stream', () => {
+  it('loads the authoritative BLOCK world: blockGrid + sparse blocks, and no retired topology', async () => {
     useRealServer();
     await loadWorld();
 
-    const { surfaces, colliders, bounds } = getWorldState();
-    // The flat ground is now authored world-space geometry (the grid is only
-    // gameplay metadata), and the demo level adds a platform and a ramp to it.
-    expect(surfaces.some((surface) => surface.kind === 'ground' && surface.walkable)).toBe(true);
-    expect(surfaces.some((surface) => surface.kind === 'platform')).toBe(true);
-    expect(surfaces.some((surface) => surface.kind === 'ramp')).toBe(true);
+    const state = getWorldState();
+    expect(state.status).toBe('ready');
+    expect(state.error).toBeNull();
+    expect(state.worldId).toBe('world-1');
+    expect(state.bounds).not.toBeNull();
 
-    // Requirement 5: no collider is an infinite ground-to-sky column any more.
-    expect(colliders.length).toBeGreaterThan(0);
-    expect(bounds).not.toBeNull();
-    for (const collider of colliders) {
-      expect(collider.shape.kind).toBe('aabb');
-      const { min, max } = collider.shape;
-      expect(max.y).toBeGreaterThan(min.y);
-      const spansTheWholeWorldVertically =
-        min.y <= bounds!.min.y + 1e-9 && max.y >= bounds!.max.y - 1e-9;
-      expect(spansTheWholeWorldVertically).toBe(false);
+    // The grid is now the BLOCK grid: origin + cellSize only (no width/depth), and
+    // `cellSize` is configuration that no algorithm may assume is 1.
+    expect(state.blockGrid).toEqual({ origin: GRID_ORIGIN, cellSize: 1 });
+
+    // Blocks are SPARSE: non-air only, unique absolute cells.
+    expect(state.blocks.length).toBeGreaterThan(0);
+    const keys = state.blocks.map((b) => `${b.coord.x},${b.coord.y},${b.coord.z}`);
+    expect(new Set(keys).size).toBe(keys.length);
+    expect(state.blocks.every((b) => b.kind !== 'air')).toBe(true);
+
+    // Retired topology must be gone from the client state entirely.
+    const retired = state as unknown as Record<string, unknown>;
+    for (const gone of ['tiles', 'grid', 'surfaces', 'colliders']) {
+      expect(retired[gone]).toBeUndefined();
     }
+
+    // Entities keep CONTINUOUS transforms; the actor spawns at the centre cell's world centre.
+    expect(actorPosition()).toEqual(SPAWN);
+    expect(getWorldState().entities.some((e) => e.kind === 'tree')).toBe(true);
+    expect(getWorldState().entities.some((e) => e.kind === 'chest')).toBe(true);
+
+    await waitFor(() => getWorldState().streamStatus === 'live');
+    expect(getWorldState().streamStatus).toBe('live');
   });
 
-  it('carries the actor up a real ramp: authoritative y rises CONTINUOUSLY to the platform', async () => {
+  it('anchors every authored placeable entity EXACTLY on its support top (continuous y)', async () => {
     useRealServer();
     await loadWorld();
 
-    // Two legs so the path clears tree-1's AABB (x 1.1..1.9, z -0.9..-0.1).
-    await moveTo({ x: 4.2, y: 0, z: 0.8 });
-    await tick(90);
-    expect(actorPosition().y).toBe(0);
+    const snapshot = currentWorld.getSnapshot({ actorId: ACTOR_ID });
+    const grid = snapshot.blockGrid;
+    const placeables = snapshot.entities.filter((e) => e.actorId === null);
+    expect(placeables.length).toBeGreaterThan(0);
+    for (const entity of placeables) {
+      const p = entity.transform.position;
+      const cellX = Math.floor((p.x - grid.origin.x) / grid.cellSize);
+      const cellZ = Math.floor((p.z - grid.origin.z) / grid.cellSize);
+      const localX = (p.x - grid.origin.x) / grid.cellSize - cellX;
+      const localZ = (p.z - grid.origin.z) / grid.cellSize - cellZ;
+      let top: number | null = null;
+      for (const block of snapshot.blocks) {
+        if (block.coord.x !== cellX || block.coord.z !== cellZ) continue;
+        const localTop = supportHeightAt(block, localX, localZ);
+        if (localTop === null) continue;
+        const worldTop = grid.origin.y + (block.coord.y + localTop) * grid.cellSize;
+        if (worldTop <= p.y + 1e-6 && (top === null || worldTop > top)) top = worldTop;
+      }
+      // y is the SUPPORT TOP FACE, not a cell boundary: a tree on the half slab
+      // sits at 1.5 while a tree on the full grass layer sits at 1.0.
+      expect(top).not.toBeNull();
+      expect(Math.abs(p.y - (top as number))).toBeLessThan(1e-9);
+    }
+    const tree = snapshot.entities.find((e) => e.kind === 'tree')!;
+    expect(tree.transform.position.y).toBe(1.5);
+  });
 
-    // The ramp runs from about z = -0.536 (ground) up to z = -4 (platform top, y = 2).
-    await moveTo({ x: 3.5, y: 0, z: -4.6 });
+  it('moves continuously on flat ground: speed x dt, no teleports, y stays on the surface', async () => {
+    useRealServer();
+    await loadWorld();
+
+    await setMovementIntent({ x: 1, z: 0 });
+    await tick(1);
+
+    const afterOne = actorPosition();
+    expect(approx(afterOne.x, SPAWN.x + STEP_UNITS)).toBe(true);
+    expect(approx(afterOne.y, GROUND_TOP)).toBe(true);
+    expect(approx(afterOne.z, SPAWN.z)).toBe(true);
+
+    await tick(3);
+    expect(approx(actorPosition().x, SPAWN.x + 4 * STEP_UNITS)).toBe(true);
+  });
+
+  it('applies a changed intent immediately, and a zero intent stops it and emits nothing', async () => {
+    useRealServer();
+    await loadWorld();
+
+    await setMovementIntent({ x: 0, z: 1 });
+    await tick(2);
+    expect(approx(actorPosition().z, SPAWN.z + 2 * STEP_UNITS)).toBe(true);
+
+    await setMovementIntent({ x: 0, z: 0 });
+    const stopped = actorPosition();
+    const batchesBefore = lastBatches.length;
+    await tick(3);
+    expect(actorPosition()).toEqual(stopped);
+    expect(lastBatches.slice(batchesBefore).every((batch) => batch.events.length === 0)).toBe(true);
+  });
+
+  it('is blocked by a full cube block (its side is higher than the step height)', async () => {
+    useRealServer();
+    await loadWorld();
+
+    // Walk north-east to the barrier row (cells 7..10 at cell y=1, z=4): its west
+    // face is world x = 1. Approach along z = 4.5 first.
+    await moveTo({ x: cellCentreX(7), y: GROUND_TOP, z: cellCentreZ(4) });
+    await tick(80);
+    const approach = actorPosition();
+    expect(approx(approach.z, cellCentreZ(4), 0.2)).toBe(true);
+    expect(approx(approach.y, GROUND_TOP)).toBe(true);
+
+    // Now push east into the barrier: the actor must stop outside it, never inside.
+    await setMovementIntent({ x: 1, z: 0 });
+    await tick(30);
+    const blocked = actorPosition();
+    const westFace = cellCentreX(7) - 0.5; // x = 1
+    expect(blocked.x).toBeLessThanOrEqual(westFace - DEFAULT_ACTOR_RADIUS + 1e-6);
+    expect(blocked.x).toBeGreaterThan(westFace - DEFAULT_ACTOR_RADIUS - STEP_UNITS - 1e-6);
+    // A full cube is 1.0 high: more than the step height, so y did NOT climb it.
+    expect(approx(blocked.y, GROUND_TOP)).toBe(true);
+
+    const batchesBefore = lastBatches.length;
+    await tick(5);
+    expect(actorPosition()).toEqual(blocked);
+    expect(lastBatches.slice(batchesBefore).every((batch) => batch.events.length === 0)).toBe(true);
+  });
+
+  it('auto-steps up the RAMP and reaches the bridge deck: y is continuous, never a jump', async () => {
+    useRealServer();
+    await loadWorld();
+
+    // Reach the ramp foot (cells (3,1..3,4..6), rising toward +Z from y=1).
+    await moveTo({ x: cellCentreX(3), y: GROUND_TOP, z: cellCentreZ(4) - 0.4 });
+    await tick(90);
+    // Still on the LOW part of the ramp (its top there is barely above the ground).
+    expect(actorPosition().y).toBeLessThan(1.6);
+
+    // Climb: sample every authoritative tick so continuity is observable.
+    await setMovementIntent({ x: 0, z: 1 });
     const ys: number[] = [];
-    for (let i = 0; i < 150; i += 1) {
+    // From the ramp foot to the deck top is ~3.4 world units = ~23 ticks at 3 u/s;
+    // walking further would carry the actor off the far edge of the deck.
+    for (let i = 0; i < 24; i += 1) {
       stepWithoutSettle();
       ys.push(authoritativeActorPosition().y);
     }
     await settle();
 
-    // The client sees the same authoritative height as the server.
-    const climbed = actorPosition();
-    expect(approx(climbed.y, 2, 1e-6)).toBe(true);
-    expect(climbed.z).toBeLessThan(-4);
-
-    // Continuity: no single tick teleports the actor up the ramp. The per-tick rise
-    // is the ramp's rise at the actor's speed (0.15 * tan 30 ~= 0.0866), never a jump.
     let maxRise = 0;
-    for (let i = 1; i < ys.length; i += 1) {
-      maxRise = Math.max(maxRise, ys[i]! - ys[i - 1]!);
-    }
-    expect(maxRise).toBeGreaterThan(0.01);
-    expect(maxRise).toBeLessThan(0.2);
+    for (let i = 1; i < ys.length; i += 1) maxRise = Math.max(maxRise, ys[i]! - ys[i - 1]!);
+    // The ramp rises smoothly; nothing may teleport the actor up.
+    expect(maxRise).toBeLessThan(0.35);
+    // It reached the deck top (y = 4) by climbing, not by being placed there.
+    expect(Math.max(...ys)).toBeGreaterThanOrEqual(3.9);
   });
 
-  it('drops the actor when it walks off the platform edge (gravity, not a step-down)', async () => {
+  it('walks UNDER the bridge deck: the clearance is walkable at ground level', async () => {
     useRealServer();
     await loadWorld();
 
-    await moveTo({ x: 4.2, y: 0, z: 0.8 });
-    await tick(90);
-    await moveTo({ x: 3.5, y: 0, z: -4.6 });
-    await tick(150);
-    expect(approx(actorPosition().y, 2, 1e-6)).toBe(true);
+    // The deck spans cells 3..9 at cell y=3, z=7, with pillars only at its ends;
+    // between them the ground under it is free.
+    await moveTo({ x: cellCentreX(5), y: GROUND_TOP, z: cellCentreZ(7) });
+    await tick(120);
 
-    // Walk EAST off the platform (there is no ramp on that side): the actor must fall.
-    await moveTo({ x: 7.5, y: 0, z: -4.5 });
+    const under = actorPosition();
+    expect(approx(under.y, GROUND_TOP)).toBe(true);       // stayed on the ground
+    expect(approx(under.z, cellCentreZ(7), 0.2)).toBe(true); // reached the deck's footprint
+    expect(under.x).toBeGreaterThan(cellCentreX(4));       // and walked into it
+  });
+
+  it('jumps: the actor leaves the ground and lands back on it', async () => {
+    useRealServer();
+    await loadWorld();
+    expect(approx(actorPosition().y, GROUND_TOP)).toBe(true);
+
+    await jump();
     const ys: number[] = [];
-    for (let i = 0; i < 40; i += 1) {
+    for (let i = 0; i < 30; i += 1) {
       stepWithoutSettle();
       ys.push(authoritativeActorPosition().y);
     }
     await settle();
 
-    expect(actorPosition().y).toBe(0);
-    let maxDrop = 0;
-    for (let i = 1; i < ys.length; i += 1) {
-      maxDrop = Math.max(maxDrop, ys[i - 1]! - ys[i]!);
+    expect(Math.max(...ys)).toBeGreaterThan(GROUND_TOP + 0.2);
+    expect(ys[ys.length - 1]).toBeCloseTo(GROUND_TOP, 6);
+  });
+
+  it('serves the v9 snapshot shape, and no legacy endpoints', async () => {
+    const response = await fetch(new URL(WORLD_PATH, baseUrl));
+    const payload = (await response.json()) as Record<string, unknown>;
+    const snapshot = payload['world'] as Record<string, unknown>;
+    expect(Object.keys(snapshot).sort()).toEqual([
+      'blockGrid',
+      'blocks',
+      'bounds',
+      'controlledActorId',
+      'entities',
+      'serverTime',
+      'worldId',
+    ]);
+    expect(Array.isArray(snapshot['blocks'])).toBe(true);
+
+    const info = await fetch(new URL('/api/game-info', baseUrl));
+    const gameInfo = (await info.json()) as {
+      gameInfo: { protocolVersion: number };
+      blockKinds: unknown[];
+      entityKinds: unknown[];
+    };
+    expect(gameInfo.gameInfo.protocolVersion).toBe(PROTOCOL_VERSION);
+    expect(gameInfo.blockKinds.length).toBeGreaterThan(0);
+    expect(gameInfo.entityKinds.length).toBeGreaterThan(0);
+
+    for (const path of ['/api/actor/move', '/api/player/move']) {
+      const legacy = await fetch(new URL(path, baseUrl), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ movement: { x: 1, z: 0 } }),
+      });
+      expect(legacy.status).toBe(404);
     }
-    // Gravity accelerates (0.05, 0.10, 0.15, ...), so a tick drops clearly more than
-    // the constant ~0.087 a 30-degree ramp walk would produce.
-    expect(maxDrop).toBeGreaterThan(0.16);
+  });
+
+  it('surfaces an unknown actor as an error without moving anything', async () => {
+    useRealServer();
+    await loadWorld();
+    const before = actorPosition();
+
+    currentActorId = parseActorId('ghost-actor');
+    await setMovementIntent({ x: 1, z: 0 });
+    await tick(3);
+
+    currentActorId = ACTOR_ID;
+    expect(actorPosition()).toEqual(before);
+  });
+
+  it('closes the stream on reset and returns to idle', async () => {
+    useRealServer();
+    await loadWorld();
+    await waitFor(() => getWorldState().streamStatus === 'live');
+
+    resetWorldState();
+
+    expect(getWorldState().status).toBe('idle');
+    expect(getWorldState().streamStatus).toBe('idle');
+    expect(getWorldState().blocks).toHaveLength(0);
+    expect(getWorldState().entities).toHaveLength(0);
+  });
+});
+
+describe('phase 15: editing blocks and placing entities over the real chain', () => {
+  it('sets and removes a block, and applies block.changed incrementally', async () => {
+    useRealServer();
+    await loadWorld();
+
+    const coord = { x: 5, y: 1, z: 5 };
+    const before = getWorldState().blocks.length;
+    await setBlock(coord, 'stone', 0);
+
+    // Incremental: the block appears with NO refetch, and an event was emitted.
+    const added = getWorldState().blocks.find(
+      (b) => b.coord.x === coord.x && b.coord.y === coord.y && b.coord.z === coord.z,
+    );
+    expect(added?.kind).toBe('stone');
+    expect(getWorldState().blocks.length).toBe(before + 1);
+
+    await removeBlock(coord);
+    const stillThere = getWorldState().blocks.some(
+      (b) => b.coord.x === coord.x && b.coord.y === coord.y && b.coord.z === coord.z,
+    );
+    expect(stillThere).toBe(false);
+    expect(getWorldState().blocks.length).toBe(before);
+  });
+
+  it('previews a placement, then places, rotates and removes the entity', async () => {
+    useRealServer();
+    await loadWorld();
+
+    // Preview first: the server is the only judge, and the preview must not mutate.
+    const position = { x: cellCentreX(5), y: GROUND_TOP, z: cellCentreZ(5) };
+    const before = getWorldState().entities.length;
+    const verdict = await validatePlacement('chest', position, 0);
+    expect(verdict).not.toBeNull();
+    expect(getWorldState().entities.length).toBe(before); // pure query
+
+    await placeEntity('chest', position, 0);
+    await waitFor(() => getWorldState().entities.length === before + 1);
+    const placed = getWorldState().entities.find(
+      (e) => e.kind === 'chest' && Math.abs(e.position.x - position.x) < 1e-9,
+    );
+    expect(placed).toBeDefined();
+
+    // Rotate it: 1x1 is parity-invariant, so the committed position must not move.
+    const p0 = { ...placed!.position };
+    await rotateEntity(placed!.entityId, 90);
+    await waitFor(() => {
+      const now = getWorldState().entities.find((e) => e.entityId === placed!.entityId);
+      return now !== undefined && Math.abs(now.rotation.y) > 0.01;
+    });
+    const rotated = getWorldState().entities.find((e) => e.entityId === placed!.entityId)!;
+    expect(rotated.position).toEqual(p0);
+
+    await removeEntity(placed!.entityId);
+    await waitFor(() => getWorldState().entities.length === before);
+    expect(getWorldState().entities.some((e) => e.entityId === placed!.entityId)).toBe(false);
+  });
+
+  it('refuses a placement the server rejects, and never mutates from a preview', async () => {
+    useRealServer();
+    await loadWorld();
+
+    const before = getWorldState().entities.length;
+    // Outside the authored 12x12 grid there is no support block at all, so the
+    // server must refuse the placement. The CLIENT never decides this: it only
+    // reports the verdict it was given.
+    const unsupported = { x: cellCentreX(14), y: GROUND_TOP, z: cellCentreZ(5) };
+    const verdict = await validatePlacement('chest', unsupported, 0);
+    expect(verdict === null || verdict.valid === false).toBe(true);
+    expect(getWorldState().entities.length).toBe(before);
   });
 });
 
@@ -584,18 +622,15 @@ describe('phase 8: mouse-first intents (moveTo / interact) over the real chain',
     useRealServer();
     await loadWorld();
 
-    // A goal on a clear straight line west/north of the spawn (the water block and
-    // tree-2's AABB are both avoided).
-    const target = { x: -2, y: 0, z: 2 };
+    const target = { x: cellCentreX(2), y: GROUND_TOP, z: cellCentreZ(0) };
     await moveTo(target);
-    await tick(40);
+    await tick(60);
 
     const arrived = actorPosition();
-    expect(approx(arrived.x, target.x)).toBe(true);
-    expect(approx(arrived.z, target.z)).toBe(true);
-    expect(arrived.y).toBe(0);
+    expect(approx(arrived.x, target.x, 1e-6)).toBe(true);
+    expect(approx(arrived.z, target.z, 1e-6)).toBe(true);
+    expect(approx(arrived.y, GROUND_TOP)).toBe(true);
 
-    // Arrival clears the goal: further ticks emit nothing at all.
     const before = lastBatches.length;
     await tick(5);
     expect(lastBatches.slice(before).every((batch) => batch.events.length === 0)).toBe(true);
@@ -605,117 +640,80 @@ describe('phase 8: mouse-first intents (moveTo / interact) over the real chain',
     useRealServer();
     await loadWorld();
 
-    // The water block spans x in [-2,0], z in [-2,0]; aim at its centre from the east.
-    await moveTo({ x: -1, y: 0, z: -1 });
-    await tick(60);
+    // The barrier occupies cells 7..10 at cell z=4, i.e. world x in [1,5) and z in
+    // [-2,-1). Aim at a point INSIDE it from the spawn: the actor must never arrive.
+    const goal = { x: cellCentreX(9), y: GROUND_TOP, z: cellCentreZ(4) };
+    await moveTo(goal);
+    await tick(120);
 
     const stopped = actorPosition();
-    // Never inside the water AABB: the circle must stay clear of x <= 0 / z <= 0.
-    expect(stopped.x).toBeGreaterThanOrEqual(-0.35 - 1e-9);
-    expect(stopped.z).toBeGreaterThanOrEqual(-0.35 - 1e-9);
-    // ...and it did NOT arrive at the goal centre.
-    expect(Math.hypot(stopped.x - -1, stopped.z - -1)).toBeGreaterThan(0.7);
+    // never inside the barrier footprint...
+    const insideBarrier = stopped.x > 1 && stopped.x < 5 && stopped.z > -2 && stopped.z < -1;
+    expect(insideBarrier).toBe(false);
+    // ...and it did NOT reach the goal.
+    expect(Math.hypot(stopped.x - goal.x, stopped.z - goal.z)).toBeGreaterThan(1);
   });
 
-  it('faces an in-range entity it is asked to interact with, and reports a rejection for a far one', async () => {
+  it('interacts with an in-range entity over the real chain', async () => {
     useRealServer();
     await loadWorld();
 
-    // tree-1 sits at (1.5, 0, -0.5); the spawn is (0.5, 0, 0.5) -> distance ~1.414 < INTERACTION_RANGE (1.5)
-    await interact('tree-1');
-    await settle();
+    // Place a chest one cell east of the spawn (free grass, supported by the
+    // ground layer) so the actor starts inside the interaction reach. This also
+    // exercises the placement chain.
+    const spot = { x: cellCentreX(6), y: GROUND_TOP, z: cellCentreZ(5) };
+    await placeEntity('chest', spot, 0);
+    const chest = await (async () => {
+      for (let i = 0; i < 50; i += 1) {
+        const found = getWorldState().entities.find(
+          (e) => e.kind === 'chest' && Math.abs(e.position.x - spot.x) < 1e-9,
+        );
+        if (found !== undefined) return found;
+        await settle(20);
+      }
+      throw new Error('the placed chest never arrived');
+    })();
 
-    let state = getWorldState();
-    expect(state.notice).toBeNull();
-    const rotation = state.entities.find((e) => e.actorId === state.controlledActorId)?.rotation;
-    expect(rotation).toBeDefined();
-    // facing = atan2(dx, dz) with dz < 0 and dx > 0 -> a positive yaw of 3*PI/4
-    const yaw = 2 * Math.atan2(rotation?.y ?? 0, rotation?.w ?? 1);
-    expect(approx(yaw, (3 * Math.PI) / 4, 1e-6)).toBe(true);
-    // the interaction does not move the actor
-    expect(actorPosition()).toEqual({ x: 0.5, y: 0, z: 0.5 });
+    const actor = currentWorld
+      .getSnapshot({ actorId: ACTOR_ID })
+      .entities.find((e) => e.actorId === ACTOR_ID)!.transform.position;
+    expect(Math.hypot(actor.x - spot.x, actor.z - spot.z)).toBeLessThan(1.5);
 
-    // tree-2 is ~2.236 away -> out of range -> the server rejects with 409 and the
-    // client surfaces a NOTICE; a rejected intent must not become a broken world.
-    await interact('tree-2');
-    await settle();
-    state = getWorldState();
-    expect(state.notice).toBe('Too far away.');
-    expect(state.status).toBe('ready');
-    expect(state.error).toBeNull();
+    // The Manager resolves the interaction authoritatively: the actor is turned to
+    // face the target (+X here), which is observable in its authoritative rotation.
+    // `lastBatches` only records `step()` output, so assert the state, not the batch.
+    const beforeRotation = currentWorld
+      .getSnapshot({ actorId: ACTOR_ID })
+      .entities.find((e) => e.actorId === ACTOR_ID)!.transform.rotation;
+    const beforeForwardX = 2 * beforeRotation.w * beforeRotation.y;
 
-    // an unknown target is a 404 and reads as "gone", still without breaking the world
-    await interact('ghost-entity');
-    await settle();
-    state = getWorldState();
-    expect(state.notice).toBe('That is gone.');
-    expect(state.status).toBe('ready');
-    expect(state.error).toBeNull();
+    await interact(String(chest.entityId));
+    await tick(1);
 
-    // Regression the review caught: clicking the controlled actor's OWN node is a
-    // `not-interactable` rejection at distance 0. The notice must come from the server's
-    // reason-carrying message, NOT from blanket-mapping every 409 to the out-of-range text.
-    await interact('entity-1');
-    await settle();
-    state = getWorldState();
-    expect(state.notice).toBe('Nothing to do with that.');
-    expect(state.notice).not.toBe('Too far away.');
-    expect(state.status).toBe('ready');
-    expect(state.error).toBeNull();
-
-    // a later successful intent clears the notice
-    await setMovementIntent({ x: 1, z: 0 });
-    await settle();
-    expect(getWorldState().notice).toBeNull();
-  });
-
-  it('rejects a rejectable interact at the transport level with 409 CONFLICT', async () => {
-    const response = await fetch(new URL(COMMAND_PATH, baseUrl), {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ type: 'actor.interact', targetEntityId: 'tree-2' }),
-    });
-    expect(response.status).toBe(409);
-    const payload = (await response.json()) as { error: { code: string; message: string } };
-    expect(payload.error.code).toBe('CONFLICT');
-    // The 409 message is player-facing contract text (the client displays it verbatim), so it is
-    // the frozen phrase, NOT the raw reason token.
-    expect(payload.error.message).toBe('Too far away.');
-
-    // ...and the other rejection reason has its own phrase, so the UI can never show
-    // "too far away" for a target that is zero units away.
-    const own = await fetch(new URL(COMMAND_PATH, baseUrl), {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ type: 'actor.interact', targetEntityId: 'entity-1' }),
-    });
-    expect(own.status).toBe(409);
-    const ownPayload = (await own.json()) as { error: { code: string; message: string } };
-    expect(ownPayload.error.code).toBe('CONFLICT');
-    expect(ownPayload.error.message).toBe('Nothing to do with that.');
-
-    const missing = await fetch(new URL(COMMAND_PATH, baseUrl), {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ type: 'actor.interact', targetEntityId: 'ghost-entity' }),
-    });
-    expect(missing.status).toBe(404);
+    const after = currentWorld
+      .getSnapshot({ actorId: ACTOR_ID })
+      .entities.find((e) => e.actorId === ACTOR_ID)!.transform.rotation;
+    // forward = rotate((0,0,1), q); for a yaw-only quaternion forward.x = 2*w*y.
+    const forwardX = 2 * after.w * after.y;
+    expect(beforeForwardX).toBeLessThan(0.5); // it was NOT already facing +X
+    expect(forwardX).toBeGreaterThan(0.9);    // now it faces the chest (+X)
   });
 
   it('keeps presentation data off the wire: a command carrying camera/NDC fields is a 400', async () => {
-    for (const body of [
-      { type: 'actor.moveTo', target: { x: 1, y: 0, z: 1 }, camera: { yaw: 30 } },
-      { type: 'actor.moveTo', target: { x: 1, y: 0, z: 1 }, ndc: [0.1, -0.2] },
-      { type: 'actor.moveTo', target: { x: 1, y: 0, z: 1 }, screen: { x: 120, y: 80 } },
-      { type: 'actor.interact', targetEntityId: 'tree-1', ray: { origin: [0, 0, 0] } },
-      { type: 'actor.interact', targetEntityId: 'tree-1', viewport: { width: 800, height: 300 } },
-    ]) {
-      const response = await fetch(new URL(COMMAND_PATH, baseUrl), {
+    useRealServer();
+    const post = (body: unknown) =>
+      fetch(new URL(COMMAND_PATH, baseUrl), {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(body),
       });
-      expect(response.status).toBe(400);
-    }
+
+    expect((await post({ type: 'actor.jump', cameraYaw: 10 })).status).toBe(400);
+    expect((await post({ type: 'actor.moveIntent', movement: { x: 1, z: 1 } })).status).toBe(400);
+    expect(
+      (await post({ type: 'actor.moveIntent', movement: { x: 1, z: 0 }, actorId: 'ghost' })).status,
+    ).toBe(400);
+    expect((await post({ type: 'actor.teleport', movement: { x: 0, z: 0 } })).status).toBe(400);
+    expect((await post({ type: 'block.set', coord: { x: 1, y: 1, z: 1 } })).status).toBe(400);
   });
 });

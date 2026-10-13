@@ -91,6 +91,7 @@
 
 import {
   AmbientLight,
+  AnimationMixer,
   Box3,
   BoxGeometry,
   BufferGeometry,
@@ -107,6 +108,7 @@ import {
   Mesh,
   MeshBasicMaterial,
   MeshStandardMaterial,
+  OctahedronGeometry,
   PCFSoftShadowMap,
   PerspectiveCamera,
   Plane,
@@ -121,7 +123,7 @@ import {
   Vector3,
   WebGLRenderer,
 } from 'three';
-import type { Light, Material, Object3D } from 'three';
+import type { AnimationAction, AnimationClip, Light, Material, Object3D } from 'three';
 // `three/examples/jsm/*` is importable here (and only here) under the lint
 // boundary. The default loader is the real GLTFLoader; tests inject a loader so
 // they never touch the network, and a checked-in fixture exercises this path.
@@ -137,7 +139,8 @@ import type {
 } from '@starvalley/render-protocol';
 
 import { MODEL_CATALOGUE } from './assets';
-import type { AppearanceModelCatalogue, ModelAsset } from './assets';
+import type { AppearanceModelCatalogue, AssetClips, AssetDescriptor } from './assets';
+import { BLOCK_RENDER_REGISTRY } from './blocks';
 
 /** Scene group a prefab's nodes are parented to. */
 export type PrefabGroup = 'Terrain' | 'WorldObjects' | 'Actors' | 'Effects';
@@ -152,13 +155,39 @@ export type PrefabGroup = 'Terrain' | 'WorldObjects' | 'Actors' | 'Effects';
 export type ModelState = 'placeholder' | 'loading' | 'loaded' | 'failed';
 
 /**
- * Resolves a GLB URL to a parsed template `Object3D`.
+ * A parsed GLB plus the animation clips it shipped, as returned by a model
+ * loader. The runtime only needs the scene graph and the clip list; clip
+ * *playback* is owned by the per-node `AnimationMixer`.
+ */
+export interface LoadedModel {
+  readonly scene: Object3D;
+  readonly animations?: readonly AnimationClip[];
+}
+
+/**
+ * Resolves a GLB URL to a parsed template `Object3D` (optionally with clips).
  *
  * Injected so tests never touch the network. The default is the real
  * `GLTFLoader` (see `loadGlbTemplate`); the runtime caches one parse per URL and
- * clones per node.
+ * clones per node. A bare `Object3D` is accepted for backward compatibility and
+ * treated as a clip-less template.
  */
-export type ModelLoader = (url: string) => Promise<Object3D>;
+export type ModelLoader = (url: string) => Promise<Object3D | LoadedModel>;
+
+/** Narrow a loader result to the clip-carrying shape. */
+function isLoadedModel(value: Object3D | LoadedModel): value is LoadedModel {
+  return typeof value === 'object' && value !== null && 'scene' in value;
+}
+
+/**
+ * A cached parse: the scene graph plus the clips the runtime may play. Normalised
+ * from the loader's `Object3D | LoadedModel` result so a bare-`Object3D` loader
+ * (an older test or caller) is treated as clip-less.
+ */
+interface ParsedTemplate {
+  scene: Object3D;
+  animations: readonly AnimationClip[];
+}
 
 /**
  * Plain-data result of `pick(ndcX, ndcY)`: a registered node visual, the
@@ -367,6 +396,18 @@ export interface RenderInspection {
     skeletonId: string | null;
     castsShadow: boolean;
     receivesShadow: boolean;
+    /**
+     * Whether a loaded GLB gave this node an `AnimationMixer`. Optional so a
+     * caller-authored inspection stub need not supply it; the real runtime
+     * always reports it.
+     */
+    hasMixer?: boolean;
+    /**
+     * Name of the clip the node's mixer is currently playing, or `null` when it
+     * has no mixer / no active action. Proves clip playback beyond the recorded
+     * `animation` id.
+     */
+    mixerClip?: string | null;
   }[];
   /**
    * Per-`(layer, appearance)` bucket sizes, keyed `"<layer>:<appearance>"` and
@@ -396,18 +437,18 @@ export interface RuntimeWorldBounds {
 }
 
 /**
- * Structural grid spec the runtime builds its terrain footprint and the
- * `GridOverlay` from; deliberately not the Organizer type, but structurally the
- * same shape so the UI can pass its view model through unchanged.
- *
- * `width`/`depth` are cell counts, not world units: the grid spans
- * `origin + width * cellSize` in x (and `depth` in z).
+ * Structural grid spec the runtime builds its `GridOverlay` from; deliberately
+ * not the Organizer type, but structurally compatible so the UI can pass its
+ * `blockGrid` view model through unchanged. It is the pure block-grid addressing
+ * configuration (`origin` + `cellSize`); `width`/`depth` are no longer part of
+ * the block world and are accepted only as an optional debug/legacy span hint.
  */
 export interface RuntimeGridSpec {
   origin: { x: number; y: number; z: number };
-  width: number;
-  depth: number;
   cellSize: number;
+  /** Optional overlay span in cells; when omitted the overlay spans the bounds. */
+  width?: number;
+  depth?: number;
 }
 
 /** Cell edge length used when a caller supplies no grid spec (the default grid). */
@@ -558,6 +599,18 @@ interface RuntimeNode {
   startMs: number | null;
   startWorld: Vector3;
   startRotation: Quaternion;
+  /**
+   * Per-node `AnimationMixer` for a loaded GLB, or `null` for the procedural
+   * placeholder. Built only when the parsed template actually shipped clips; the
+   * placeholder has no clips and keeps its `motion`.
+   */
+  mixer: AnimationMixer | null;
+  /** Named clip slots the catalogue declared for this appearance. */
+  clipNames: AssetClips;
+  /** Playable actions keyed by the named slot (`idle`/`walk`/`interact`). */
+  mixerActions: Partial<Record<'idle' | 'walk' | 'interact', AnimationAction>> | null;
+  /** The action currently fading in, or `null` at rest. */
+  activeAction: AnimationAction | null;
 }
 
 /** Camera stance. Exported so projection tests and the HUD share one source. */
@@ -803,12 +856,12 @@ function cloneTemplate(template: Object3D): Object3D {
 }
 
 /** Apply the catalogue's presentation fixes to a freshly cloned model visual. */
-function applyAssetFixes(visual: Group, asset: ModelAsset): void {
+function applyAssetFixes(visual: Group, asset: AssetDescriptor): void {
   if (asset.scale !== undefined) {
     visual.scale.set(asset.scale.x, asset.scale.y, asset.scale.z);
   }
-  if (asset.yawRadians !== undefined) {
-    visual.rotation.y = asset.yawRadians;
+  if (asset.yawOffsetRadians !== undefined) {
+    visual.rotation.y = asset.yawOffsetRadians;
   }
   if (asset.yOffset !== undefined) {
     visual.position.y = asset.yOffset;
@@ -823,10 +876,10 @@ function applyAssetFixes(visual: Group, asset: ModelAsset): void {
  * `loader.setKTX2Loader(...)`). A decoder also owns a worker pool that
  * `dispose()` cannot release, so adding one would need a runtime-level teardown.
  */
-export async function loadGlbTemplate(url: string): Promise<Object3D> {
+export async function loadGlbTemplate(url: string): Promise<LoadedModel> {
   const loader = new GLTFLoader();
   const gltf = await loader.loadAsync(url);
-  return gltf.scene;
+  return { scene: gltf.scene, animations: gltf.animations };
 }
 
 /** Bucket key for the per-`(layer, appearance)` index. */
@@ -1284,6 +1337,46 @@ function createTreeVisual(): Group {
   return group;
 }
 
+/** Rock placeholder: a low facetted boulder anchored at its base. */
+function createRockVisual(): Group {
+  const group = new Group();
+  const rock = new Mesh(new OctahedronGeometry(0.42, 0), material(0x8a8a8a, { roughness: 0.95 }));
+  rock.position.y = 0.32;
+  rock.castShadow = true;
+  rock.receiveShadow = true;
+  group.add(rock);
+  return group;
+}
+
+/** Chest placeholder: a small boxed container with a lid. */
+function createChestVisual(): Group {
+  const group = new Group();
+  const base = new Mesh(new BoxGeometry(0.5, 0.32, 0.36), material(0x8a5a2b));
+  base.position.y = 0.16;
+  base.castShadow = true;
+  base.receiveShadow = true;
+  const lid = new Mesh(new BoxGeometry(0.54, 0.12, 0.4), material(0xb07b3f));
+  lid.position.y = 0.38;
+  lid.castShadow = true;
+  group.add(base, lid);
+  return group;
+}
+
+/** Building placeholder: a tall roofed volume, readable from any yaw. */
+function createBuildingVisual(): Group {
+  const group = new Group();
+  const walls = new Mesh(new BoxGeometry(0.9, 1.2, 0.9), material(0xcaa06a));
+  walls.position.y = 0.6;
+  walls.castShadow = true;
+  walls.receiveShadow = true;
+  const roof = new Mesh(new ConeGeometry(0.72, 0.5, 4), material(0x9c4a3a));
+  roof.position.y = 1.45;
+  roof.rotation.y = Math.PI / 4;
+  roof.castShadow = true;
+  group.add(walls, roof);
+  return group;
+}
+
 /** Documented fallback: a neutral opaque block for an unknown appearance. */
 function createFallbackVisual(): Group {
   const group = new Group();
@@ -1308,7 +1401,10 @@ function createFallbackVisual(): Group {
  * The whole group is lifted by one layer-wide {@link GRID_OVERLAY_LIFT} in
  * {@link createThreeRuntime}; the geometry here is authored at local y = 0.
  */
-function buildGridOverlay(grid: RuntimeGridSpec): {
+function buildGridOverlay(
+  grid: RuntimeGridSpec,
+  bounds: RuntimeWorldBounds,
+): {
   group: Group;
   line: LineSegments;
   marker: Mesh;
@@ -1316,17 +1412,35 @@ function buildGridOverlay(grid: RuntimeGridSpec): {
   const group = new Group();
   group.name = 'GridOverlay';
 
-  const startX = grid.origin.x;
-  const endX = grid.origin.x + grid.width * grid.cellSize;
-  const startZ = grid.origin.z;
-  const endZ = grid.origin.z + grid.depth * grid.cellSize;
+  // The block grid has no fixed extent, so the overlay spans the world bounds
+  // snapped outward to whole cells. An explicit `width`/`depth` (legacy/debug)
+  // still wins when supplied.
+  const cellSize = grid.cellSize;
+  const startX =
+    grid.width !== undefined
+      ? grid.origin.x
+      : grid.origin.x + Math.floor((bounds.min.x - grid.origin.x) / cellSize) * cellSize;
+  const endX =
+    grid.width !== undefined
+      ? grid.origin.x + grid.width * cellSize
+      : grid.origin.x + Math.ceil((bounds.max.x - grid.origin.x) / cellSize) * cellSize;
+  const startZ =
+    grid.depth !== undefined
+      ? grid.origin.z
+      : grid.origin.z + Math.floor((bounds.min.z - grid.origin.z) / cellSize) * cellSize;
+  const endZ =
+    grid.depth !== undefined
+      ? grid.origin.z + grid.depth * cellSize
+      : grid.origin.z + Math.ceil((bounds.max.z - grid.origin.z) / cellSize) * cellSize;
+  const columns = Math.max(0, Math.round((endX - startX) / cellSize));
+  const rows = Math.max(0, Math.round((endZ - startZ) / cellSize));
   const positions: number[] = [];
-  for (let i = 0; i <= grid.width; i += 1) {
-    const x = startX + i * grid.cellSize;
+  for (let i = 0; i <= columns; i += 1) {
+    const x = startX + i * cellSize;
     positions.push(x, 0, startZ, x, 0, endZ);
   }
-  for (let i = 0; i <= grid.depth; i += 1) {
-    const z = startZ + i * grid.cellSize;
+  for (let i = 0; i <= rows; i += 1) {
+    const z = startZ + i * cellSize;
     positions.push(startX, 0, z, endX, 0, z);
   }
   const geometry = new BufferGeometry();
@@ -1335,7 +1449,7 @@ function buildGridOverlay(grid: RuntimeGridSpec): {
   group.add(line);
 
   const marker = new Mesh(
-    new BoxGeometry(grid.cellSize * 0.96, 0.04, grid.cellSize * 0.96),
+    new BoxGeometry(cellSize * 0.96, 0.04, cellSize * 0.96),
     new MeshBasicMaterial({ color: 0xffd23f }),
   );
   marker.visible = false;
@@ -1520,6 +1634,10 @@ function skeletonIdOf(visual: Object3D): string | null {
 }
 
 const PREFABS: Readonly<Record<string, Prefab>> = {
+  // Legacy terrain / surface visuals. The block-spatial bridge no longer emits
+  // these appearance ids (blocks are the world geometry now), but the runtime
+  // keeps the prefabs so an older/looser caller still renders something and the
+  // existing runtime coverage stays meaningful.
   'appearance.terrain.grass': {
     group: 'Terrain',
     defaultAnimation: IDLE_ANIMATION,
@@ -1566,11 +1684,51 @@ const PREFABS: Readonly<Record<string, Prefab>> = {
     defaultAnimation: IDLE_ANIMATION,
     createVisual: createTreeVisual,
   },
+  'appearance.rock': {
+    group: 'WorldObjects',
+    defaultAnimation: IDLE_ANIMATION,
+    createVisual: createRockVisual,
+  },
+  'appearance.chest': {
+    group: 'WorldObjects',
+    defaultAnimation: IDLE_ANIMATION,
+    createVisual: createChestVisual,
+  },
+  'appearance.building': {
+    group: 'WorldObjects',
+    defaultAnimation: IDLE_ANIMATION,
+    createVisual: createBuildingVisual,
+  },
   'appearance.fallback': {
     group: 'Effects',
     defaultAnimation: IDLE_ANIMATION,
     createVisual: createFallbackVisual,
   },
+};
+
+/**
+ * Block prefabs derived from the render-side {@link BLOCK_RENDER_REGISTRY}.
+ *
+ * The registry owns every block's geometry/material/colour (never the wire); the
+ * runtime only maps an appearance id to a group and a default animation. A block
+ * node's root is at the cell centre, so `createVisual(cellSize)` builds relative
+ * to that centre (see `blocks.ts` for the top-face / footprint contract).
+ */
+const BLOCK_PREFABS: Readonly<Record<string, Prefab>> = Object.fromEntries(
+  BLOCK_RENDER_REGISTRY.map((entry) => [
+    entry.appearance,
+    {
+      group: 'Terrain',
+      defaultAnimation: IDLE_ANIMATION,
+      createVisual: entry.createVisual,
+    } satisfies Prefab,
+  ]),
+);
+
+/** Every prefab the runtime can realise: hand-authored plus the block registry. */
+const ALL_PREFABS: Readonly<Record<string, Prefab>> = {
+  ...PREFABS,
+  ...BLOCK_PREFABS,
 };
 
 /** The prefab used for an appearance id the catalogue does not know. */
@@ -1581,12 +1739,12 @@ const FALLBACK_PREFAB: Prefab = PREFABS['appearance.fallback'];
  * bridge's emitted catalogue is fully covered; an unknown id still renders with
  * {@link FALLBACK_PREFAB} rather than crashing.
  */
-export const KNOWN_APPEARANCES: readonly AppearanceId[] = Object.keys(PREFABS).map(
+export const KNOWN_APPEARANCES: readonly AppearanceId[] = Object.keys(ALL_PREFABS).map(
   (id) => id as AppearanceId,
 );
 
 function prefabFor(appearance: AppearanceId): Prefab {
-  return PREFABS[appearance] ?? FALLBACK_PREFAB;
+  return ALL_PREFABS[appearance] ?? FALLBACK_PREFAB;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -1643,7 +1801,7 @@ export function createThreeRuntime(options: {
   const catalogue = options.catalogue ?? MODEL_CATALOGUE;
   // One parse per URL. A rejected load is dropped from the cache so a later node
   // can retry; concurrent callers share the same in-flight promise.
-  const templateCache = new Map<string, Promise<Object3D>>();
+  const templateCache = new Map<string, Promise<ParsedTemplate>>();
   // Templates whose geometry/material/texture this runtime owns and releases in
   // `dispose()`. A node's clone borrows from these.
   const ownedTemplates = new Set<Object3D>();
@@ -1684,7 +1842,7 @@ export function createThreeRuntime(options: {
 
   // Independent grid-layer state (hidden by default). The group itself is built
   // ONCE here from the grid spec and is never rebuilt per frame or per tile.
-  let gridOverlay: ReturnType<typeof buildGridOverlay> | null = buildGridOverlay(grid);
+  let gridOverlay: ReturnType<typeof buildGridOverlay> | null = buildGridOverlay(grid, bounds);
   gridOverlay.group.position.y = groundY + GRID_OVERLAY_LIFT;
   gridOverlay.group.visible = false;
   worldRoot.add(gridOverlay.group);
@@ -1836,6 +1994,9 @@ export function createThreeRuntime(options: {
   // Separate from the frame clock: follow smoothing re-baselines when the
   // target changes, without perturbing interpolation timing.
   let lastFollowMs: number | null = null;
+  // Wall-clock baseline for mixer deltas. Separate from follow smoothing so a
+  // clip is not affected by a follow-target change.
+  let lastUpdateMs: number | null = null;
 
   let mounted = false;
   let renderer: WebGLRenderer | null = null;
@@ -1908,26 +2069,28 @@ export function createThreeRuntime(options: {
   }
 
   /**
-   * Resolve `url` to a parsed template, caching **one parse per URL**. Concurrent
-   * callers share the in-flight promise; a rejected load is dropped so a later
-   * node can retry. A parse that lands after `dispose()` is released immediately
-   * and never enters the scene.
+   * Resolve `url` to a parsed template (scene graph + clips), caching **one
+   * parse per URL**. Concurrent callers share the in-flight promise; a rejected
+   * load is dropped so a later node can retry. A parse that lands after `dispose()`
+   * is released immediately and never enters the scene.
    */
-  function templateFor(url: string): Promise<Object3D> {
+  function templateFor(url: string): Promise<ParsedTemplate> {
     const cached = templateCache.get(url);
     if (cached !== undefined) {
       return cached;
     }
-    const promise = loadModel(url).then((template) => {
+    const promise = loadModel(url).then((loaded) => {
+      const scene = isLoadedModel(loaded) ? loaded.scene : loaded;
+      const animations = isLoadedModel(loaded) ? (loaded.animations ?? []) : [];
       if (disposed) {
-        accumulateRelease(releaseObject(template));
-        return template;
+        accumulateRelease(releaseObject(scene));
+        return { scene, animations };
       }
-      ownedTemplates.add(template);
+      ownedTemplates.add(scene);
       // Material policy once per template, so every clone shares the coerced
       // material (see `applyOpaqueMaterialPolicy`).
-      applyOpaqueMaterialPolicy(template, url);
-      return template;
+      applyOpaqueMaterialPolicy(scene, url);
+      return { scene, animations };
     });
     templateCache.set(url, promise);
     promise.catch(() => {
@@ -1944,7 +2107,7 @@ export function createThreeRuntime(options: {
    * (node destroyed, or appearance/visual replaced while in flight) is ignored via
    * node identity plus the node's `visualToken`.
    */
-  function resolveModel(node: RuntimeNode, nodeId: NodeId, asset: ModelAsset): void {
+  function resolveModel(node: RuntimeNode, nodeId: NodeId, asset: AssetDescriptor): void {
     const token = node.visualToken;
     templateFor(asset.url)
       .then((template) => {
@@ -1966,12 +2129,67 @@ export function createThreeRuntime(options: {
       });
   }
 
+  /**
+   * Build a BASIC `AnimationMixer` for a freshly swapped model visual, mapping
+   * the catalogue's named slots to the clips the template shipped. Absent names
+   * (or a template with no clips) leave the node mixer-less, so the procedural
+   * placeholder motion is the only fallback. Playback is deliberately simple:
+   * one active action at a time, cross-faded on a switch.
+   */
+  function buildMixer(node: RuntimeNode, wrapper: Group, clips: readonly AnimationClip[]): void {
+    node.mixer?.stopAllAction();
+    node.mixer = null;
+    node.mixerActions = null;
+    node.activeAction = null;
+    if (clips.length === 0) {
+      return;
+    }
+    const byName = new Map(clips.map((clip) => [clip.name, clip]));
+    const mixer = new AnimationMixer(wrapper);
+    const actions: Partial<Record<'idle' | 'walk' | 'interact', AnimationAction>> = {};
+    for (const slot of ['idle', 'walk', 'interact'] as const) {
+      const name = node.clipNames[slot];
+      const clip = name === undefined ? undefined : byName.get(name);
+      if (clip !== undefined) {
+        actions[slot] = mixer.clipAction(clip);
+      }
+    }
+    node.mixer = mixer;
+    node.mixerActions = actions;
+    // Rest at the idle clip when the asset provides one.
+    const idle = actions.idle;
+    if (idle !== undefined) {
+      idle.reset().play();
+      node.activeAction = idle;
+    }
+  }
+
+  /**
+   * Switch a loaded node to the action for an animation id, or back to its rest
+   * clip. A no-op for a placeholder node.
+   */
+  function playAnimation(node: RuntimeNode, animation: AnimationId): void {
+    const actions = node.mixerActions;
+    if (actions === null) {
+      return;
+    }
+    const slot: 'idle' | 'walk' | 'interact' =
+      animation === 'walk' ? 'walk' : animation === 'interact' ? 'interact' : 'idle';
+    const next = actions[slot] ?? actions.idle;
+    if (next === undefined || next === node.activeAction) {
+      return;
+    }
+    next.reset().fadeIn(0.2).play();
+    node.activeAction?.fadeOut(0.2);
+    node.activeAction = next;
+  }
+
   /** Replace a node's placeholder with a clone of the resolved template. */
-  function swapInModel(node: RuntimeNode, asset: ModelAsset, template: Object3D): void {
+  function swapInModel(node: RuntimeNode, asset: AssetDescriptor, template: ParsedTemplate): void {
     // Wrap the clone so the node's visual stays a `Group` and the catalogue's
     // scale/orientation/anchor fixes have a single object to write to.
     const wrapper = new Group();
-    wrapper.add(cloneTemplate(template));
+    wrapper.add(cloneTemplate(template.scene));
     applyAssetFixes(wrapper, asset);
     // The prefab's placeholder declared this node's shadow intent (captured at
     // create/appearance.set). `GLTFLoader` leaves `castShadow`/`receiveShadow`
@@ -1986,6 +2204,8 @@ export function createThreeRuntime(options: {
     node.root.add(wrapper);
     node.modelState = 'loaded';
     node.visualToken += 1;
+    node.clipNames = asset.clips ?? {};
+    buildMixer(node, wrapper, template.animations);
     // Re-measure the geometry-derived facts off the real model visual so height
     // and shadow accounting follow the swap instead of the retired placeholder.
     // The shadow measurement now reads back the intent applied just above.
@@ -2038,6 +2258,10 @@ export function createThreeRuntime(options: {
       startMs: null,
       startWorld: new Vector3(),
       startRotation: new Quaternion(),
+      mixer: null,
+      clipNames: {},
+      mixerActions: null,
+      activeAction: null,
     };
     root.visible = command.visible;
     applyTransform(node, command.transform);
@@ -2055,6 +2279,12 @@ export function createThreeRuntime(options: {
     if (node === undefined) {
       return;
     }
+    // Release the mixer before the root leaves the graph; the loaded clone's
+    // resources are shared with the cached template and are not disposed here.
+    node.mixer?.stopAllAction();
+    node.mixer = null;
+    node.mixerActions = null;
+    node.activeAction = null;
     node.root.parent?.remove(node.root);
     // Only a node-owned placeholder is released here. A loaded model clone
     // borrows the cached template's resources, which `dispose()` releases once.
@@ -2070,8 +2300,14 @@ export function createThreeRuntime(options: {
     const asset = catalogue[appearance];
     node.root.remove(node.visual);
     releaseOwnedVisual(node);
-    // Invalidate any in-flight load for the retired appearance.
+    // Invalidate any in-flight load for the retired appearance, and drop the
+    // previous model's mixer: the new visual has its own clips (or none).
     node.visualToken += 1;
+    node.mixer?.stopAllAction();
+    node.mixer = null;
+    node.mixerActions = null;
+    node.activeAction = null;
+    node.clipNames = {};
     node.visual = prefab.createVisual(cellSize);
     node.ownsVisual = true;
     node.root.add(node.visual);
@@ -2120,6 +2356,7 @@ export function createThreeRuntime(options: {
             node.startMs = null;
             // A snap ends any move just as completing the interpolation does.
             node.animation = node.defaultAnimation;
+            playAnimation(node, node.defaultAnimation);
           }
           break;
         }
@@ -2166,10 +2403,10 @@ export function createThreeRuntime(options: {
         case 'animation.play': {
           const node = nodes.get(command.nodeId);
           if (node !== undefined) {
-            // Recorded, and observable through `inspect()`. `loop` is accepted
-            // and deliberately unused: placeholder motion below has no clip to
-            // loop, so there is no looping behaviour to implement honestly yet.
+            // Recorded (observable through `inspect()`), and — when the node has
+            // a loaded GLB with a matching clip — actually played by its mixer.
             node.animation = command.animation;
+            playAnimation(node, command.animation);
           }
           break;
         }
@@ -2192,15 +2429,23 @@ export function createThreeRuntime(options: {
    */
   function updateVisualMotion(node: RuntimeNode, nowMs: number): void {
     if (node.modelState === 'loaded') {
-      // A loaded model carries its own clips (catalogue `idleClip`/`walkClip`) and
-      // its catalogue `yOffset` anchor; the procedural bob would fight both.
-      // Clip playback is the recorded extension point.
+      // A loaded model carries its own clips and its catalogue `yOffset` anchor;
+      // the procedural bob would fight both. Its `AnimationMixer` is advanced in
+      // `update` instead.
       return;
     }
     node.motion?.(node.animation, nowMs, node.visual);
   }
 
   function update(nowMs: number): void {
+    // One wall-clock delta for every mixer this frame, clamped so a long pause
+    // cannot jump a clip forward.
+    const mixerDeltaSeconds =
+      lastUpdateMs === null
+        ? 0
+        : Math.max(0, Math.min(nowMs - lastUpdateMs, MAX_FRAME_DELTA_MS)) / 1000;
+    lastUpdateMs = nowMs;
+
     for (const node of nodes.values()) {
       const target = node.target;
       if (target !== null) {
@@ -2224,9 +2469,11 @@ export function createThreeRuntime(options: {
           // The runtime owns WHEN a move is over: it interpolated to the target,
           // so it — not the bridge — returns the node to its rest animation.
           node.animation = node.defaultAnimation;
+          playAnimation(node, node.defaultAnimation);
         }
         positionNode(node);
       }
+      node.mixer?.update(mixerDeltaSeconds);
       updateVisualMotion(node, nowMs);
     }
 
@@ -2291,6 +2538,8 @@ export function createThreeRuntime(options: {
         skeletonId: skeletonIdOf(node.visual),
         castsShadow: node.castsShadow,
         receivesShadow: node.receivesShadow,
+        hasMixer: node.mixer !== null,
+        mixerClip: node.activeAction?.getClip().name ?? null,
       };
     });
     return {

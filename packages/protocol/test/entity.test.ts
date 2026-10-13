@@ -96,9 +96,10 @@ describe('parseTransform', () => {
 });
 
 describe('isEntityKind', () => {
-  it("accepts exactly the current kinds 'character' and 'tree'", () => {
-    expect(isEntityKind('character')).toBe(true);
-    expect(isEntityKind('tree')).toBe(true);
+  it('accepts exactly the acceptance-set kinds', () => {
+    for (const kind of ['character', 'tree', 'rock', 'chest', 'building']) {
+      expect(isEntityKind(kind)).toBe(true);
+    }
   });
 
   it('rejects an unknown value even though the union grew (exact-union regression guard)', () => {
@@ -119,6 +120,9 @@ describe('parseEntityKind', () => {
   it('returns the value unchanged when valid', () => {
     expect(parseEntityKind('character')).toBe('character');
     expect(parseEntityKind('tree')).toBe('tree');
+    expect(parseEntityKind('rock')).toBe('rock');
+    expect(parseEntityKind('chest')).toBe('chest');
+    expect(parseEntityKind('building')).toBe('building');
   });
 
   it('throws ProtocolParseError with a message when invalid', () => {
@@ -141,6 +145,12 @@ describe('isEntityState', () => {
     expect(
       isEntityState({ ...validEntityState, entityId: 'entity-tree', actorId: null, kind: 'tree' }),
     ).toBe(true);
+  });
+
+  it('accepts the new placeable kinds rock/chest/building', () => {
+    for (const kind of ['rock', 'chest', 'building']) {
+      expect(isEntityState({ ...validEntityState, kind })).toBe(true);
+    }
   });
 
   it('rejects a missing actorId (present-and-nullable, not optional)', () => {

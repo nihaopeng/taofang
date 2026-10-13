@@ -106,17 +106,28 @@ const VALID_GAME_INFO = {
   serverTime: '2025-01-02T03:04:05.000Z',
 };
 
-const VALID_RESPONSE = { gameInfo: VALID_GAME_INFO };
+const VALID_RESPONSE = {
+  gameInfo: VALID_GAME_INFO,
+  blockKinds: [{ kind: 'grass', orientable: false }],
+  entityKinds: [
+    {
+      kind: 'character',
+      footprintX: 1,
+      footprintZ: 1,
+      height: 1.7,
+      allowedYawSteps: [0, 90, 180, 270],
+      pivot: 'center',
+    },
+  ],
+};
 
 // A minimal valid world so `<App />`'s world load settles without network access.
 const VALID_WORLD_RESPONSE = {
   world: {
     worldId: 'world-1',
     bounds: { min: { x: -6, y: 0, z: -6 }, max: { x: 6, y: 8, z: 6 } },
-    grid: { origin: { x: -5, y: 0, z: -5 }, width: 10, depth: 10, cellSize: 1 },
-    tiles: [{ cell: { x: 0, z: 0 }, terrain: 'grass' }],
-    surfaces: [],
-    colliders: [],
+    blockGrid: { origin: { x: -5, y: 0, z: -5 }, cellSize: 1 },
+    blocks: [{ coord: { x: 0, y: 0, z: 0 }, kind: 'grass', orientation: 0 }],
     entities: [],
     controlledActorId: null,
     serverTime: VALID_GAME_INFO.serverTime,

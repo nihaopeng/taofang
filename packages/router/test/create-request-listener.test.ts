@@ -8,28 +8,30 @@ import {
   HEALTH_PATH,
   STREAM_PATH,
   WORLD_PATH,
+  isCommandResponse,
   isGetGameInfoResponse,
   isHealthStatus,
   parseActorId,
-  parseColliderId,
+  parseCommandResponse,
   parseEntityId,
   parseGameEventBatch,
   parseGetGameInfoResponse,
   parseGetWorldResponse,
-  parseSurfaceId,
+  parseValidatePlacementResponse,
   parseWorldId,
   parseWorldStreamMessage,
 } from '@starvalley/protocol';
 import type {
   ActorId,
-  ColliderState,
+  BlockKindInfo,
+  CommandResponse,
+  EntityKindInfo,
   GameEventBatch,
   GameInfo,
   HealthStatus,
   ProtocolError,
   ProtocolErrorCode,
-  SurfaceState,
-  TileState,
+  ValidatePlacementResponse,
   WorldSnapshot,
   WorldStreamMessage,
 } from '@starvalley/protocol';
@@ -58,9 +60,30 @@ function interactionRejection(reason: string): InteractionRejectedError {
 const GAME_INFO: GameInfo = {
   gameName: 'Test Valley',
   serverVersion: '1.2.3',
-  protocolVersion: 8,
+  protocolVersion: 9,
   serverTime: FIXED_TIME,
 };
+
+/**
+ * Static presentation catalogues supplied by the Manager's game-info surface
+ * and relayed verbatim by the game-info route. Declarative geometry only: the
+ * Router neither derives, defaults, nor filters a kind.
+ */
+const BLOCK_KINDS: BlockKindInfo[] = [
+  { kind: 'grass', orientable: false },
+  { kind: 'stairs', orientable: true },
+];
+
+const ENTITY_KINDS: EntityKindInfo[] = [
+  {
+    kind: 'tree',
+    footprintX: 1,
+    footprintZ: 1,
+    height: 2,
+    allowedYawSteps: [0, 90, 180, 270],
+    pivot: 'center',
+  },
+];
 
 const HEALTH: HealthStatus = {
   status: 'ok',
@@ -71,63 +94,32 @@ const HEALTH: HealthStatus = {
 function createFakeManager(overrides: Partial<GameInfoManager> = {}): GameInfoManager {
   const manager: GameInfoManager = {
     getGameInfo: () => GAME_INFO,
+    getBlockKinds: () => structuredClone(BLOCK_KINDS),
+    getEntityKinds: () => structuredClone(ENTITY_KINDS),
     getHealth: () => HEALTH,
   };
   return Object.assign(manager, overrides);
 }
 
-/** Nine all-grass cells for a 3x3 grid. */
-function grassTiles(width: number, depth: number): TileState[] {
-  const tiles: TileState[] = [];
-  for (let z = 0; z < depth; z += 1) {
-    for (let x = 0; x < width; x += 1) {
-      tiles.push({ cell: { x, z }, terrain: 'grass' });
-    }
-  }
-  return tiles;
-}
-
 /**
- * A valid phase-14 (protocol v8) WorldSnapshot: continuous world geometry
- * (`bounds`/`surfaces`/`colliders`), the separate gameplay grid
- * (`grid`/`tiles`), and dynamic `entities`. The Router relays this verbatim.
+ * A valid phase-15 (protocol v9) WorldSnapshot: the discrete Block World
+ * (`blockGrid` + a SPARSE non-air `blocks` list addressed by absolute integer
+ * cells) sharing one real 3D coordinate system with the continuous Entity
+ * World (`entities`). The Router relays this verbatim.
  */
-const SURFACES: SurfaceState[] = [
-  {
-    surfaceId: parseSurfaceId('surface-ground'),
-    kind: 'ground',
-    center: { x: 1.5, y: 0, z: 1.5 },
-    axisU: { x: 1.5, y: 0, z: 0 },
-    axisV: { x: 0, y: 0, z: -1.5 },
-    walkable: true,
-  },
-  {
-    // A real but non-walkable patch: proves the explicit `walkable: false`
-    // traversal metadata survives transport untouched.
-    surfaceId: parseSurfaceId('surface-roof'),
-    kind: 'ramp',
-    center: { x: 1.5, y: 0.5, z: 1.5 },
-    axisU: { x: 1.5, y: 0.75, z: 0 },
-    axisV: { x: 0, y: 0, z: -1.5 },
-    walkable: false,
-  },
-];
-
-const COLLIDERS: ColliderState[] = [
-  {
-    colliderId: parseColliderId('collider-wall'),
-    kind: 'wall',
-    shape: { kind: 'aabb', min: { x: 0, y: 0, z: 0 }, max: { x: 1, y: 1, z: 1 } },
-  },
+const BLOCKS: WorldSnapshot['blocks'] = [
+  { coord: { x: 0, y: 0, z: 0 }, kind: 'grass', orientation: 0 },
+  // A directional kind with a non-default orientation: proves the REQUIRED
+  // orientation survives transport untouched.
+  { coord: { x: 1, y: 0, z: 1 }, kind: 'stone', orientation: 90 },
+  { coord: { x: 2, y: 1, z: 0 }, kind: 'stairs', orientation: 180 },
 ];
 
 const SNAPSHOT: WorldSnapshot = {
   worldId: TEST_WORLD_ID,
-  bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 3, y: 1, z: 3 } },
-  grid: { origin: { x: 0, y: 0, z: 0 }, width: 3, depth: 3, cellSize: 1 },
-  tiles: grassTiles(3, 3),
-  surfaces: SURFACES,
-  colliders: COLLIDERS,
+  bounds: { min: { x: 0, y: 0, z: 0 }, max: { x: 3, y: 4, z: 3 } },
+  blockGrid: { origin: { x: 0, y: 0, z: 0 }, cellSize: 1 },
+  blocks: BLOCKS,
   entities: [
     {
       entityId: ENTITY_ID,
@@ -180,6 +172,9 @@ function createFakeWorld(overrides: Partial<WorldManager> = {}): WorldManager {
       return COMMAND_BATCH;
     },
     step: () => EMPTY_BATCH,
+    // Server-only derived index; the Router never calls it. Stubbed so the fake
+    // satisfies the Manager interface without embedding any placement rule.
+    getOccupancy: () => [],
   };
   return Object.assign(world, overrides);
 }
@@ -249,6 +244,50 @@ const MOVE_INTENT = { type: 'actor.moveIntent', movement: { x: 0, z: 1 } } as co
 const MOVE_TO = { type: 'actor.moveTo', target: { x: 2, y: 0, z: 3 } } as const;
 
 const INTERACT = { type: 'actor.interact', targetEntityId: parseEntityId('tree-1') } as const;
+
+const JUMP = { type: 'actor.jump' } as const;
+
+const BLOCK_SET = {
+  type: 'block.set',
+  coord: { x: 1, y: 2, z: 3 },
+  kind: 'stairs',
+  orientation: 90,
+} as const;
+
+const BLOCK_REMOVE = { type: 'block.remove', coord: { x: 1, y: 2, z: 3 } } as const;
+
+const ENTITY_PLACE = {
+  type: 'entity.place',
+  kind: 'tree',
+  position: { x: 2.5, y: 1, z: 2.5 },
+  yawDegrees: 90,
+} as const;
+
+const ENTITY_ROTATE = {
+  type: 'entity.rotate',
+  entityId: ENTITY_ID,
+  yawDegrees: 180,
+} as const;
+
+const ENTITY_REMOVE = { type: 'entity.remove', entityId: ENTITY_ID } as const;
+
+const VALIDATE_PLACEMENT = {
+  type: 'entity.validatePlacement',
+  kind: 'tree',
+  position: { x: 2.5, y: 1, z: 2.5 },
+  yawDegrees: 0,
+} as const;
+
+/** The pure query's Manager result; the command route must relay it unchanged. */
+const VALIDATE_RESPONSE: ValidatePlacementResponse = {
+  valid: true,
+  reason: null,
+  occupiedCells: [{ x: 2, y: 1, z: 2 }],
+  resolvedTransform: {
+    position: { x: 2.5, y: 1, z: 2.5 },
+    rotation: { x: 0, y: 0, z: 0, w: 1 },
+  },
+};
 
 /** GET `WORLD_PATH` and return the validated snapshot. */
 async function fetchWorld(baseUrl: string): Promise<WorldSnapshot> {
@@ -370,7 +409,11 @@ describe('createRequestListener', () => {
 
     const body: unknown = await response.json();
     expect(isGetGameInfoResponse(body)).toBe(true);
-    expect(parseGetGameInfoResponse(body)).toEqual({ gameInfo: GAME_INFO });
+    expect(parseGetGameInfoResponse(body)).toEqual({
+      gameInfo: GAME_INFO,
+      blockKinds: BLOCK_KINDS,
+      entityKinds: ENTITY_KINDS,
+    });
   });
 
   it('serves GET /api/health as a protocol HealthStatus', async () => {
@@ -487,23 +530,24 @@ describe('createRequestListener', () => {
     const world = await fetchWorld(baseUrl);
 
     expect(Object.keys(world).sort()).toEqual([
+      'blockGrid',
+      'blocks',
       'bounds',
-      'colliders',
       'controlledActorId',
       'entities',
-      'grid',
       'serverTime',
-      'surfaces',
-      'tiles',
       'worldId',
     ]);
     expect(world.worldId).toBe(TEST_WORLD_ID);
-    expect(world.grid).toEqual({ origin: { x: 0, y: 0, z: 0 }, width: 3, depth: 3, cellSize: 1 });
-    expect(world.tiles).toHaveLength(9);
-    // World geometry passes through verbatim: the Router neither adds, drops,
-    // nor reinterprets `surfaces`/`colliders` (including `walkable: false`).
-    expect(world.surfaces).toEqual(SURFACES);
-    expect(world.colliders).toEqual(COLLIDERS);
+    expect(world.blockGrid).toEqual({ origin: { x: 0, y: 0, z: 0 }, cellSize: 1 });
+    expect(world.bounds).toEqual({
+      min: { x: 0, y: 0, z: 0 },
+      max: { x: 3, y: 4, z: 3 },
+    });
+    // The sparse, non-air block list passes through verbatim: each block's
+    // kind and REQUIRED orientation survive untouched, and the Router neither
+    // derives occupancy nor invents an air entry.
+    expect(world.blocks).toEqual(BLOCKS);
     expect(world.serverTime).toBe(FIXED_TIME);
     expect(world.controlledActorId).toBe(ACTOR_ID);
 
@@ -551,6 +595,59 @@ describe('createRequestListener', () => {
     expect(parseGameEventBatch(await response.json())).toEqual(COMMAND_BATCH);
     expect(submitIntent).toHaveBeenCalledTimes(1);
     expect(submitIntent).toHaveBeenCalledWith({ actorId: ACTOR_ID, command: INTERACT });
+  });
+
+  const newCommands: ReadonlyArray<readonly [string, unknown]> = [
+    ['actor.jump', JUMP],
+    ['block.set', BLOCK_SET],
+    ['block.remove', BLOCK_REMOVE],
+    ['entity.place', ENTITY_PLACE],
+    ['entity.rotate', ENTITY_ROTATE],
+    ['entity.remove', ENTITY_REMOVE],
+  ];
+
+  it.each(newCommands)(
+    'forwards a %s command to the manager verbatim and relays its batch',
+    async (_type, command) => {
+      // No new route is needed for the v9 primitives: the primitive command
+      // route validates the union and forwards the exact typed command the
+      // Manager declared. The Router never switches on `command.type`.
+      const submitIntent = vi.fn(() => COMMAND_BATCH);
+      const baseUrl = await startServer(createFakeManager(), createFakeWorld({ submitIntent }));
+
+      const response = await postCommand(baseUrl, JSON.stringify(command));
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get('content-type')).toBe('application/json; charset=utf-8');
+      expect(parseGameEventBatch(await response.json())).toEqual(COMMAND_BATCH);
+      expect(submitIntent).toHaveBeenCalledTimes(1);
+      expect(submitIntent).toHaveBeenCalledWith({ actorId: ACTOR_ID, command });
+    },
+  );
+
+  it('relays an entity.validatePlacement response verbatim through the widened CommandResponse body', async () => {
+    // The pure query returns a `ValidatePlacementResponse`, NOT a
+    // `GameEventBatch`. The route body type is the protocol `CommandResponse`,
+    // so the Router must serialise whichever member the Manager returned
+    // without inspecting it — it never decides validity nor reads occupancy.
+    const submitIntent = vi.fn((): CommandResponse => VALIDATE_RESPONSE);
+    const baseUrl = await startServer(createFakeManager(), createFakeWorld({ submitIntent }));
+
+    const response = await postCommand(baseUrl, JSON.stringify(VALIDATE_PLACEMENT));
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toBe('application/json; charset=utf-8');
+
+    const body: unknown = await response.json();
+    expect(isCommandResponse(body)).toBe(true);
+    expect(parseCommandResponse(body)).toEqual(VALIDATE_RESPONSE);
+    expect(parseValidatePlacementResponse(body)).toEqual(VALIDATE_RESPONSE);
+    expect(body).not.toHaveProperty('events');
+    expect(submitIntent).toHaveBeenCalledTimes(1);
+    expect(submitIntent).toHaveBeenCalledWith({
+      actorId: ACTOR_ID,
+      command: VALIDATE_PLACEMENT,
+    });
   });
 
   it.each([
@@ -660,6 +757,48 @@ describe('createRequestListener', () => {
       baseUrl,
       JSON.stringify({ type: 'actor.dance', movement: { x: 0, z: 1 } }),
     );
+
+    await expectProtocolError(response, 'BAD_REQUEST', 400);
+  });
+
+  const malformedCommands: ReadonlyArray<readonly [string, unknown]> = [
+    [
+      'block.set missing orientation',
+      { type: 'block.set', coord: { x: 0, y: 0, z: 0 }, kind: 'stone' },
+    ],
+    ['block.set 2D coord', { type: 'block.set', coord: { x: 0, z: 0 }, kind: 'stone', orientation: 0 }],
+    [
+      'block.set fractional coord',
+      { type: 'block.set', coord: { x: 0.5, y: 0, z: 0 }, kind: 'stone', orientation: 0 },
+    ],
+    ['block.remove missing coord', { type: 'block.remove' }],
+    ['block.remove extra field', { type: 'block.remove', coord: { x: 0, y: 0, z: 0 }, extra: 1 }],
+    [
+      'entity.place missing yawDegrees',
+      { type: 'entity.place', kind: 'tree', position: { x: 0, y: 0, z: 0 } },
+    ],
+    [
+      'entity.place unknown kind',
+      { type: 'entity.place', kind: 'dragon', position: { x: 0, y: 0, z: 0 }, yawDegrees: 0 },
+    ],
+    ['entity.rotate missing entityId', { type: 'entity.rotate', yawDegrees: 90 }],
+    ['entity.remove extra field', { type: 'entity.remove', entityId: 'entity-1', extra: true }],
+    [
+      'entity.validatePlacement non-finite yawDegrees',
+      {
+        type: 'entity.validatePlacement',
+        kind: 'tree',
+        position: { x: 0, y: 0, z: 0 },
+        yawDegrees: Number.POSITIVE_INFINITY,
+      },
+    ],
+    ['actor.jump with payload', { type: 'actor.jump', height: 2 }],
+  ];
+
+  it.each(malformedCommands)('rejects a malformed %s body with 400 BAD_REQUEST', async (_label, body) => {
+    const baseUrl = await startServer();
+
+    const response = await postCommand(baseUrl, JSON.stringify(body));
 
     await expectProtocolError(response, 'BAD_REQUEST', 400);
   });
@@ -879,8 +1018,8 @@ describe('createRequestListener', () => {
     expect(first.snapshot.worldId).toBe(TEST_WORLD_ID);
     expect(first.snapshot.controlledActorId).toBe(ACTOR_ID);
     // The leading stream frame is the same verbatim snapshot as `GET /api/world`.
-    expect(first.snapshot.surfaces).toEqual(SURFACES);
-    expect(first.snapshot.colliders).toEqual(COLLIDERS);
+    expect(first.snapshot.blockGrid).toEqual({ origin: { x: 0, y: 0, z: 0 }, cellSize: 1 });
+    expect(first.snapshot.blocks).toEqual(BLOCKS);
 
     await sse.close();
   });

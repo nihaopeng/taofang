@@ -99,9 +99,13 @@ describe('vertical slice: organizer -> protocol -> router -> manager', () => {
     expect(data.serverVersion).toBe('0.1.0');
     expect(Number.isNaN(Date.parse(data.lastSyncedAt))).toBe(false);
 
-    // The Organizer's view model must not leak wire-only fields.
+    // The Organizer's view model must not leak wire-only fields. The declarative
+    // block/entity catalogues ARE intentionally carried for the UI (a placement
+    // ghost needs the footprint geometry), so they belong in the v9 key set.
     expect(Object.keys(data).sort()).toEqual([
+      'blockKinds',
       'connectionStatus',
+      'entityKinds',
       'gameName',
       'lastSyncedAt',
       'serverVersion',
@@ -142,6 +146,8 @@ describe('vertical slice: organizer -> protocol -> router -> manager', () => {
     expect(response.headers.get('content-type')).toBe('application/json; charset=utf-8');
 
     const payload: unknown = await response.json();
+    // v9: the static response also carries the declarative catalogues (pure geometry:
+    // footprint/height/allowedYawSteps/pivot, no collider and no placement rule).
     expect(payload).toEqual({
       gameInfo: {
         gameName: 'Starvalley',
@@ -149,6 +155,8 @@ describe('vertical slice: organizer -> protocol -> router -> manager', () => {
         protocolVersion: PROTOCOL_VERSION,
         serverTime: expect.any(String) as unknown as string,
       },
+      blockKinds: expect.any(Array) as unknown as unknown[],
+      entityKinds: expect.any(Array) as unknown as unknown[],
     });
   });
 });

@@ -75,6 +75,11 @@ export function isPositiveFiniteNumber(value: unknown): value is number {
   return isFiniteNumber(value) && value > 0;
 }
 
+/** Validate a finite integer greater than zero (used for cell extents/counts). */
+export function isPositiveFiniteInteger(value: unknown): value is number {
+  return isFiniteInteger(value) && value > 0;
+}
+
 /** Validate a finite, non-negative number. */
 export function isNonNegativeFiniteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0;

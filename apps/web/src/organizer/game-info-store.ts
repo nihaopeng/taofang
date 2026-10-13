@@ -87,13 +87,17 @@ async function runLoad(requestGeneration: number): Promise<void> {
   setState({ status: 'connecting', data: null, error: null });
 
   try {
-    const gameInfo = await fetchGameInfo();
+    const response = await fetchGameInfo();
     if (requestGeneration !== generation) {
       return;
     }
     setState({
       status: 'connected',
-      data: toGameInfoViewModel(gameInfo),
+      data: toGameInfoViewModel(
+        response.gameInfo,
+        response.blockKinds,
+        response.entityKinds,
+      ),
       error: null,
     });
   } catch (error) {
