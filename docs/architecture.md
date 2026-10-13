@@ -287,10 +287,13 @@ false world-space boundary that reads as a tapering trapezoid — 73% of the flo
 - `inspect().camera` must describe a perspective frustum honestly (e.g. fov/near/far) instead of ortho
   left/right/top/bottom, so tests assert what the renderer actually uses.
 
-### Final rig parameters (Wave D outcome, measured)
+### Final rig parameters (Wave D + phase-12 flattened pitch, measured)
 
-- **Camera**: `PerspectiveCamera`, pitch 58 (**fixed**, no adjustable path: `setCameraOrientation` accepts
+- **Camera**: `PerspectiveCamera`, pitch 45 (**fixed**, no adjustable path: `setCameraOrientation` accepts
   yaw only and the pitch is reported but never set), roll 0, yaw free, orthographic shadow camera unchanged.
+  Phase 12 lowered the locked pitch from 58 to 45 to lay the camera flatter (a larger pitch is a HIGHER,
+  more top-down view; 90 = straight down, 0 = level). It is still one named constant in `RENDER_CAMERA`,
+  not a range or an adjustable path.
 - **FOV is a FIXED constant**: 28 degrees at every yaw. Wave C derived the FOV per yaw (20.2854..28.0000)
   to keep the world's projected bounding box inside the frame; a per-yaw FOV is a per-yaw **zoom**, so a
   fixed-size object appeared ~38% larger at axis-aligned yaws than at the diagonals (the reported "map pulls
@@ -299,28 +302,64 @@ false world-space boundary that reads as a tapering trapezoid — 73% of the flo
   `worstCaseFit = max(extentUp + verticalHeadroom, extentRight / aspect) * framingMargin` taken as the exact
   maximum over yaw (closed form, not sampled). At aspect 1 / zoom 1 that is **40.839126**, constant across the
   whole yaw sweep to ~1e-14 (verified). FOV, near, far, distance and height are all yaw-invariant, i.e. a pure
-  orbit with a completely unchanging projection; no object changes apparent size while rotating.
+  orbit with a completely unchanging projection; no object changes apparent size while rotating. The phase-12
+  pitch change leaves the distance and height UNCHANGED at this aspect, because the fit-driving term at
+  aspect 1 is the horizontal `diagonal` (8.485), not the pitch-dependent vertical term
+  (`sin(45) * 8.485 + 1 = 7.0`, still below the horizontal).
 - **Honest consequence**: the world's projected *outline* still varies with yaw (a square world subtends a
   wider width corner-on than edge-on). That is geometric and is NOT zoom pumping — a fixed-size segment at the
-  focus plane projects to a constant NDC length at every yaw (`0.1964186`). Frame utilisation is **0.639005 at
-  axis-aligned yaws vs 0.833333 (= 1 / framingMargin) at the diagonals**, so the axis-aligned yaws simply carry
-  extra margin. The only levers that would flatten the outline are a wider FOV / farther camera or a
-  90-degree-stepped yaw; never a per-yaw FOV.
+  focus plane projects to a constant NDC length at every yaw (`0.1964186`). Frame utilisation (max `|ndc|`
+  over the world's ground corners) is **0.657568 at axis-aligned yaws vs 0.833333 (= 1 / framingMargin) at the
+  diagonals** at pitch 45 (was 0.639005 vs 0.833333 at pitch 58; the flatter camera pushes the axis-aligned
+  outline slightly larger), so the axis-aligned yaws simply carry extra margin. The worst frame utilisation
+  over the sweep is 0.836756 (at the ~30-degree yaws). The only levers that would flatten the outline are a
+  wider FOV / farther camera or a 90-degree-stepped yaw; never a per-yaw FOV.
 - **Zoom is a DOLLY** (`distance = base / zoom`) while the FOV is zoom-invariant; a dolly does change
   foreshortening, which is acceptable because it is an explicit user action and the orbit is exactly constant
   at any single zoom. Verified at zoom 0.25 / 1 / 8.
 - **`near` is derived from the geometry**, not a small constant: `max(0.5, distance - worldRadius - 1)`
   (18.762 = full bounds diagonal, so a follow focus anywhere in the world is covered), further clamped below
   the nearest visible ground-corner depth. At default that is **21.0775** (was 0.1, which wasted depth
-  precision); it is now constant across yaw as well. The tightest case is max zoom where `near = 0.5` with
-  ~4.18 clearance.
-- **Residual ratio variation is geometric, not a defect**: the selected near/far edge pair is 12*cos(pitch) =
-  6.36 apart in depth at axis-aligned yaws and 12*cos(pitch)*cos45 = 4.50 at the diagonals, and the ratio is
-  FOV-independent, so no FOV can flatten it (only a much larger distance would, and that abandons the
-  composition). The harness therefore asserts the STRUCTURAL properties exactly (FOV/near/far/distance/height
-  constant at 1e-9, a fixed-size focus-plane segment's NDC length constant at 1e-9, calibration against
-  `pick()`, near strictly > far, footprint/boundary/scale exactly 0) and treats the ratio band
-  (`|ratio - 1.133279| <= 0.04`, measured span 0.071) as a smoke check only.
+  precision); it is constant across yaw as well, and the phase-12 pitch change leaves it at 21.0775. The
+  tightest clearance is exactly `nearClearance` (1 world unit), at the most zoomed-out state where the
+  `minDepth` clamp binds (`near` = 137.6 there); at max zoom `near` stays above `minNear` with a larger gap.
+  The flatter camera makes every visible
+  ground ray meet the floor *farther* from the camera (the top of the frame now looks
+  `pitch - fov/2 = 31` degrees below horizontal instead of 44), so `minDepth` grows and the near clearance
+  cannot shrink; re-verified at every yaw and zoom in `apps/web/test/three-runtime.test.ts`.
+- **Backdrop still covers the visible floor**: the single backdrop mesh is sized from the projected view
+  footprint (per yaw/zoom) plus the world half-extents and a 2x overshoot; its silhouette stays off-screen at
+  every yaw/zoom, and the `far` plane is 1.2x the farthest visible ground depth + 1. The flatter pitch only
+  grows the visible ground footprint, which the same `backdropHalfExtents`/`perspectiveFrustum` pair handles;
+  re-verified (strictly inside, >= 20% gap) in the same test file.
+- **Residual ratio variation is geometric, not a defect**: the selected near/far edge pair is
+  `12*cos(pitch)` apart in depth at axis-aligned yaws and `12*cos(pitch)*cos45` at the diagonals — at pitch 45
+  that is **8.49** and **6.00** (was 6.36 and 4.50 at pitch 58) — and the ratio is FOV-independent, so no FOV
+  can flatten it (only a much larger distance would, and that abandons the composition). The harness therefore
+  asserts the STRUCTURAL properties exactly (FOV/near/far/distance/height constant at 1e-9, a fixed-size
+  focus-plane segment's NDC length constant at 1e-9, calibration against `pick()`, near strictly > far,
+  footprint/boundary/scale exactly 0) and treats the ratio band as a smoke check only: at pitch 45 it is
+  **1.1056..1.2319** (measured span **0.1262**, midpoint 1.168743), which the harness bands with a 0.07
+  tolerance.
+
+### Tuning the flattening further (owner note)
+
+The camera angle is still exactly ONE constant: `RENDER_CAMERA.pitchDegrees`. Lowering it further (e.g. 38-40
+is noticeably flatter still) has these unavoidable, measurable effects, all of which the harness already
+reports:
+
+- the world's depth spread `12*cos(pitch)` grows (e.g. 9.46 at 38 vs 8.49 at 45), widening the near/far
+  ratio band further — again a smoke-check band, not a defect;
+- the visible ground extends farther and the frame's top edge looks `pitch - fov/2` below horizontal (e.g. 24
+  at 38 vs 31 at 45), so the backdrop/far-plane coverage must keep up (it does, automatically, through
+  `backdropHalfExtents`);
+- the vertical fit term `sin(pitch)*diagonal + headroom` shrinks, but at aspect 1 the horizontal term still
+  dominates down to roughly 6.6 degrees, so the orbit distance/is unchanged until the pitch is very low;
+- below `fov/2 = 14` degrees some viewport ray would point at/above the horizon and the footprint becomes
+  unbounded; `perspectiveFrustum` guards that (`parallelToGround`) but the composition is no longer a framed
+  world, so do not go there. Below the fit crossover the vertical term takes over and the distance grows.
+
+Never flatten by scaling tiles, changing the FOV per yaw, or adding a per-tile offset.
 
 ## Phase 8 frozen design — GLB asset pipeline + mouse-first input
 

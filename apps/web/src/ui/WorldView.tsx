@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { loadWorld, setMovementIntent, useWorld } from '../organizer';
-import type { StreamStatus } from '../organizer';
+import { Hud } from './Hud';
 import { SceneView } from './SceneView';
+import type { SceneViewOptions } from './SceneView';
 import { createMovementController } from './movement-input';
 import type { MovementController, MovementKey } from './movement-input';
 import type { RenderRuntime } from '../render/three/runtime';
@@ -60,14 +61,6 @@ const KEY_TO_YAW_STEP: Readonly<Record<string, number | undefined>> = {
  */
 const GRID_TOGGLE_KEYS: ReadonlySet<string> = new Set(['g', 'G']);
 
-/** Short, user-presentable label for the realtime stream lifecycle. */
-const STREAM_LABEL: Readonly<Record<StreamStatus, string>> = {
-  idle: 'Stream idle',
-  connecting: 'Connecting…',
-  live: 'Live',
-  error: 'Connection lost',
-};
-
 /** Format a world coordinate for the HUD (continuous world units, 1 decimal). */
 function formatCoordinate(value: number): string {
   return value.toFixed(1);
@@ -77,13 +70,15 @@ function formatCoordinate(value: number): string {
  * Presentation of the Organizer's world/actor state.
  *
  * The world itself is rendered by `<SceneView />` (Three.js executing the Render
- * ISA). This component keeps only the HUD: camera-relative directional intent
- * (buttons + keyboard), the loading affordance, the error affordance with
- * `Retry`, a live/dropped stream indicator, and a short status line for the
- * controlled actor. It never calls the backend: every intent goes through
- * `setMovementIntent` / `loadWorld` from the Organizer. The UI deliberately does
- * not know (or send) which actor it controls — that identity is resolved by the
- * server from transport context.
+ * ISA), wrapped in a positioned viewport container. Over it sits `<Hud />`, a
+ * DOM/CSS layer (toolbar, bag panel, stream status, notice) whose overlay is
+ * input-transparent except for its own controls. This component keeps the rest
+ * of the presentation: camera-relative directional intent (buttons + keyboard),
+ * the loading affordance, the error affordance with `Retry`, and a short status
+ * line for the controlled actor. It never calls the backend: every intent goes
+ * through `setMovementIntent` / `loadWorld` from the Organizer. The UI
+ * deliberately does not know (or send) which actor it controls — that identity
+ * is resolved by the server from transport context.
  *
  * Input is **held**, not one-shot: pressing drives a continuous intent, releasing
  * stops it, and the controller posts only when the intent changes (never on a
@@ -91,7 +86,15 @@ function formatCoordinate(value: number): string {
  * mapping is camera-relative. Q/E rotate the rig, and a rotate re-posts a held
  * intent so WASD stays intuitive after the view turns.
  */
-export function WorldView() {
+export function WorldView(props: {
+  /**
+   * Optional runtime factory forwarded to `<SceneView />`, so tests can inject a
+   * recording runtime. The HUD never receives this: it cannot reach the render
+   * runtime at all.
+   */
+  createRuntime?: (options: SceneViewOptions) => RenderRuntime;
+}) {
+  const { createRuntime } = props;
   const state = useWorld();
   const { status, entities, controlledActorId, error, notice, streamStatus } = state;
   const runtimeRef = useRef<RenderRuntime | null>(null);
@@ -219,29 +222,18 @@ export function WorldView() {
     <section className="world" data-testid="world-panel" data-status={status}>
       <h2 className="world__heading">World</h2>
 
-      <SceneView runtimeRef={runtimeRef} />
-
-      <p
-        className="world__stream"
-        data-testid="world-stream-status"
-        data-stream-status={streamStatus}
-      >
-        {STREAM_LABEL[streamStatus]}
-      </p>
-
       {/*
-        A REJECTED intent (out of range / not interactable / target gone) is a
-        short, transient message, not a broken-world error: the Organizer keeps
-        `status`/`error` untouched, and clears `notice` on the next successful
-        intent. It is deliberately not rendered inside the `role="alert"` error
-        block, so a refusal never reads as a broken connection.
+        The world lives in the WebGL canvas; the HUD is a DOM/CSS layer painted
+        ABOVE it as a sibling inside this positioned container. The overlay is
+        `pointer-events: none` (see styles.css) so canvas drag/click/wheel pass
+        through everywhere except the HUD's own controls. The HUD receives
+        display values only and emits no world actions: any future real data or
+        action goes through the Organizer (state in, intents out).
       */}
-      {notice !== null ? (
-        <p className="world__notice" role="status" data-testid="world-notice">
-          {notice}
-        </p>
-      ) : null}
-
+      <div className="world__viewport" data-testid="world-viewport">
+        <SceneView runtimeRef={runtimeRef} createRuntime={createRuntime} />
+        <Hud streamStatus={streamStatus} notice={notice} />
+      </div>
       {controlledEntity !== null ? (
         <p className="world__actor-info" data-testid="controlled-actor-info">
           <span className="world__actor-coords">

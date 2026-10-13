@@ -53,7 +53,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { AppearanceId, NodeCreateCommand, NodeId, Vec3 } from '@starvalley/render-protocol';
 
-import { createThreeRuntime } from '../src/render/three/runtime.ts';
+import { createThreeRuntime, RENDER_CAMERA } from '../src/render/three/runtime.ts';
 import type { RenderInspection, RenderRuntime, RuntimeGridSpec } from '../src/render/three/runtime.ts';
 
 // ---------------------------------------------------------------------------
@@ -103,12 +103,16 @@ const PERSPECTIVE_MIN_NEAR_FAR_RATIO = 1.02;
  * footprint/boundary/scale errors are all exactly 0. Those pin a constant
  * projection independently of any ratio band.
  *
- * Why the ratio band can never be ~2% (do NOT "tighten" this by mistake):
+ * Why the ratio band is this wide (do NOT "tighten" this by mistake):
  * (a) The residual near/far variation is GEOMETRIC and yaw-dependent. With the
  *     camera distance fixed, the compared parallel world edges are
- *     `12 * cos(pitch) = 6.36` apart in depth at the axis-aligned yaws but
- *     `12 * cos(pitch) * cos(45 deg) = 4.50` at the diagonals, so the axis ratio
- *     (1.1689) is inherently larger than the diagonal ratio (1.0977).
+ *     `12 * cos(pitch) = 8.49` apart in depth at the axis-aligned yaws but
+ *     `12 * cos(pitch) * cos(45 deg) = 6.00` at the diagonals (pitch 45), so the
+ *     axis ratio (1.2319) is inherently larger than the diagonal ratio (1.1056).
+ *     Phase 12 flattened the pitch from 58 to 45, which widened the axis-aligned
+ *     depth spread from `12 * cos(58) = 6.36` to `8.49`; the measured band went
+ *     from 0.0712 (1.0977..1.1689 at pitch 58) to 0.1262 (1.1056..1.2319 at
+ *     pitch 45), and those two effects are one and the same geometry.
  * (b) The near/far ratio is FOV-INDEPENDENT (both edge lengths scale by the same
  *     `1 / tan(fov/2)` factor), so NO FOV choice could flatten it.
  * (c) The only way to flatten it is a much larger camera distance: ~145 world
@@ -118,9 +122,10 @@ const PERSPECTIVE_MIN_NEAR_FAR_RATIO = 1.02;
  *     0.146 (1.0977..1.2434) to 0.0712 (1.0977..1.1689): the diagonal ratio is
  *     unchanged because Wave B already sat at that distance there, while the
  *     axis ratio fell as the camera stopped dollying in to 29.3.
- * The tolerance below is half the measured span with margin. Approved by Main.
+ * The tolerance below is half the measured span (0.1262 / 2 = 0.0631) with
+ * margin.
  */
-const PERSPECTIVE_RATIO_REFERENCE_TOLERANCE = 0.04;
+const PERSPECTIVE_RATIO_REFERENCE_TOLERANCE = 0.07;
 /**
  * Wave D orbit/projection assertion: the camera FOV, near, far, distance and
  * height must be CONSTANT across the whole yaw sweep (a pure orbit with no dolly
@@ -684,6 +689,11 @@ function sweepScene(appearanceAt: AppearancePicker): BaselineRow[] {
       const camera = runtime.inspect().camera as CameraSnapshot;
       const view = cameraView(camera);
 
+      // The pitch is the single locked composition constant (phase 12: 45
+      // degrees). It is reported exactly and can never be set; a reintroduced
+      // adjustable path or a drifting rig changes this value.
+      expect(camera.pitchDegrees).toBe(RENDER_CAMERA.pitchDegrees);
+
       // Rule 1, precondition: the reconstructed projection must be the one the
       // runtime actually picks with.
       const calibration = calibrate(runtime, view, GRID.origin.y);
@@ -886,7 +896,7 @@ function assertSummary(label: string, summary: BaselineSummary): void {
   } else {
     // Rule 1 (perspective): stably longer at every yaw. The residual near/far
     // variation is GEOMETRIC and FOV-independent (the compared parallel world
-    // edges are 6.36 apart in depth at the axis yaws but 4.50 at the diagonals,
+    // edges are 8.49 apart in depth at the axis yaws but 6.00 at the diagonals,
     // so the axis ratio is inherently larger). It must therefore sit in a tight,
     // documented band around its own reference. Separately, the projection is
     // COMPLETELY constant: FOV, near, far, distance and height do not move while

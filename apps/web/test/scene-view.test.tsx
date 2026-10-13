@@ -118,7 +118,7 @@ interface RecordingRuntime {
 }
 
 const CAMERA_STATE: CameraState = {
-  pitchDegrees: 58,
+  pitchDegrees: 45,
   yawDegrees: 0,
   zoom: 1,
   focus: { x: 0, y: 0, z: 0 },
@@ -614,7 +614,7 @@ describe('SceneView mouse-first interaction', () => {
     const last = recorder.orientationCalls.at(-1);
     // Drag input policy (phase 11): a rightward drag makes the world rotate
     // counter-clockwise from above, which is a DECREASE of the rig yaw
-    // (yaw -= 60px * 0.3deg). Pitch is FIXED (58) and is not an input at all, so
+    // (yaw -= 60px * 0.3deg). Pitch is FIXED (45) and is not an input at all, so
     // a vertical drag component never tilts the view.
     expect(last?.yawDegrees).toBeCloseTo(-18, 6);
     expect(recorder.runtime.getCameraState().pitchDegrees).toBe(CAMERA_STATE.pitchDegrees);

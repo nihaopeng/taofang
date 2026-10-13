@@ -525,7 +525,7 @@ export const RENDER_CAMERA = {
    * field, so the view can never tilt. It is still reported in `inspect().camera`
    * for tests and debugging.
    */
-  pitchDegrees: 58,
+  pitchDegrees: 45,
   /**
    * The fixed vertical field of view, in degrees. Deliberately narrow (phase 11)
    * so the projected near/far size difference stays gentle.
@@ -926,7 +926,7 @@ export function perspectiveFrustum(options: {
   const camZ = distance * cosPitch * cosYaw;
 
   // Project the four viewport corners onto the ground plane. For the rig's
-  // fixed pitch and fixed FOV every ray points below the horizon (pitch 58 >
+  // fixed pitch and fixed FOV every ray points below the horizon (pitch 45 >
   // fov/2 = 14), so the footprint is a finite trapezoid; `footprintHalfX/Z` are
   // measured from the focus, `maxDepth` is the farthest camera-to-corner
   // distance used for `far`, and `minDepth` is the nearest VISIBLE ground
@@ -943,7 +943,7 @@ export function perspectiveFrustum(options: {
       const dirZ = forwardZ + rightZ * (u * tanHalfFov * aspect) + upZ * (v * tanHalfFov);
       if (dirY >= -1e-9) {
         // A ray at/above the horizon never meets the ground: the footprint is
-        // unbounded. Cannot happen for the fixed rig (pitch 58 > fov/2 = 14),
+        // unbounded. Cannot happen for the fixed rig (pitch 45 > fov/2 = 14),
         // but keep the guard so a future FOV/pitch change cannot produce NaN.
         parallelToGround = true;
         continue;

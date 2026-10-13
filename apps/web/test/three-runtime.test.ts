@@ -605,6 +605,10 @@ describe('three runtime camera rig', () => {
   it('locks the pitch as a fixed constant with no adjustable path', () => {
     const runtime = makeRuntime();
 
+    // Phase 12: the locked pitch is exactly 45 degrees. It is ONE named constant
+    // in RENDER_CAMERA; the flatter value is a deliberate composition decision.
+    expect(RENDER_CAMERA.pitchDegrees).toBe(45);
+
     // The default stance reports the fixed pitch through both accessors.
     expect(runtime.getCameraState().pitchDegrees).toBe(RENDER_CAMERA.pitchDegrees);
     expect(runtime.inspect().camera.pitchDegrees).toBe(RENDER_CAMERA.pitchDegrees);
@@ -634,7 +638,7 @@ describe('three runtime camera rig', () => {
     // The node did not move: yaw rotates the rig, not the world.
     expect(after.world).toEqual(before.world);
     expect(forwardAtNinety).not.toEqual(forwardAtZero);
-    expect(forwardAtNinety.x).toBeCloseTo(-Math.cos((58 * Math.PI) / 180), 6);
+    expect(forwardAtNinety.x).toBeCloseTo(-Math.cos((RENDER_CAMERA.pitchDegrees * Math.PI) / 180), 6);
     expect(forwardAtNinety.z).toBeCloseTo(0, 6);
 
     runtime.setCameraOrientation({ yawDegrees: -90 });
@@ -789,7 +793,8 @@ describe('three runtime lifecycle', () => {
     );
     const worstHalfHeight =
       Math.max(
-        diagonal * Math.sin((58 * Math.PI) / 180) + RENDER_CAMERA.verticalHeadroom,
+        diagonal * Math.sin((RENDER_CAMERA.pitchDegrees * Math.PI) / 180) +
+          RENDER_CAMERA.verticalHeadroom,
         diagonal,
       ) * RENDER_CAMERA.framingMargin;
     const expectedDistance =
@@ -806,10 +811,16 @@ describe('three runtime lifecycle', () => {
       6,
     );
 
-    // Frozen default stance: yaw 0, pitched down by exactly 58 degrees.
+    // Frozen default stance: yaw 0, pitched down by exactly the fixed pitch.
     expect(camera.forward.x).toBeCloseTo(0, 6);
-    expect(camera.forward.y).toBeCloseTo(-Math.sin((58 * Math.PI) / 180), 6);
-    expect(camera.forward.z).toBeCloseTo(-Math.cos((58 * Math.PI) / 180), 6);
+    expect(camera.forward.y).toBeCloseTo(
+      -Math.sin((RENDER_CAMERA.pitchDegrees * Math.PI) / 180),
+      6,
+    );
+    expect(camera.forward.z).toBeCloseTo(
+      -Math.cos((RENDER_CAMERA.pitchDegrees * Math.PI) / 180),
+      6,
+    );
     expect(camera.up.y).toBeGreaterThan(0);
 
     // Cross-check the projection helper for the same arguments: it is the single
@@ -817,7 +828,7 @@ describe('three runtime lifecycle', () => {
     const expected = perspectiveFrustum({
       bounds: BOUNDS,
       aspect: 1,
-      pitchDegrees: 58,
+      pitchDegrees: RENDER_CAMERA.pitchDegrees,
       yawDegrees: 0,
       zoom: 1,
     });
@@ -840,7 +851,7 @@ describe('three runtime lifecycle', () => {
     const frustum = perspectiveFrustum({
       bounds: BOUNDS,
       aspect: 0.5,
-      pitchDegrees: 58,
+      pitchDegrees: RENDER_CAMERA.pitchDegrees,
       yawDegrees: 0,
       zoom: 1,
     });
@@ -851,7 +862,8 @@ describe('three runtime lifecycle', () => {
     );
     const worstHalfHeight =
       Math.max(
-        diagonal * Math.sin((58 * Math.PI) / 180) + RENDER_CAMERA.verticalHeadroom,
+        diagonal * Math.sin((RENDER_CAMERA.pitchDegrees * Math.PI) / 180) +
+          RENDER_CAMERA.verticalHeadroom,
         diagonal / 0.5,
       ) * framing;
     // The focus-plane half-height is the WORST-CASE fit (not the axis-aligned
@@ -1154,10 +1166,13 @@ describe('three runtime rotation stability (phase 11: perspective)', () => {
 
       // Phase 11 deliberately gives up "the projection is affine". Across the
       // view (vertical NDC), equal NDC steps map to LARGER world steps farther
-      // from the camera — real foreshortening, not a restated identity.
+      // from the camera — real foreshortening, not a restated identity. The step
+      // is kept small (0.1) because at the flatter phase-12 pitch (45) the
+      // visible ground reaches much farther, so a larger NDC would project past
+      // the world bounds and `pick()` would (correctly) return `null`.
       const first = runtime.pick(0, 0);
-      const second = runtime.pick(0, 0.2);
-      const third = runtime.pick(0, 0.4);
+      const second = runtime.pick(0, 0.1);
+      const third = runtime.pick(0, 0.2);
       expect(first?.kind).toBe('ground');
       expect(second?.kind).toBe('ground');
       expect(third?.kind).toBe('ground');

@@ -252,3 +252,135 @@ body {
   background: var(--leaf);
   color: var(--soil);
 }
+
+/*
+ * The world viewport: a positioned container so the HTML HUD can be layered
+ * OVER the Three.js canvas. The canvas is the world; the HUD is DOM/CSS chrome
+ * above it.
+ */
+.world__viewport {
+  position: relative;
+}
+
+/*
+ * The HTML HUD over the world canvas. It is deliberately transparent to pointer
+ * events: the overlay itself never swallows a canvas drag/click, and it only
+ * captures the wheel inside its own scrollable panel. In paint order it sits
+ * after the canvas (higher `z-index`), so HUD chrome draws on top.
+ */
+.world__hud {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.5rem;
+  overflow: hidden;
+}
+
+/*
+ * Only the HUD's own controls re-enable pointer events. Everything else in the
+ * overlay stays transparent to input, so a click/drag outside a control reaches
+ * the world canvas underneath (drag rotates, click picks/moves, wheel zooms).
+ */
+.world__hud-control {
+  pointer-events: auto;
+}
+
+.world__hud-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.world__toolbar {
+  display: flex;
+  gap: 0.35rem;
+  padding: 0.25rem;
+  border: 1px solid #55432f;
+  border-radius: 0.5rem;
+  background: rgb(26 20 14 / 70%);
+}
+
+.world__tool,
+.world__bag-button {
+  height: 2.25rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--leaf);
+  border-radius: 0.4rem;
+  background: rgb(42 33 25 / 80%);
+  color: var(--wheat);
+  font: inherit;
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+  touch-action: none;
+  user-select: none;
+}
+
+.world__tool {
+  width: 2.25rem;
+}
+
+.world__tool[aria-pressed='true'] {
+  background: var(--leaf);
+  color: var(--soil);
+}
+
+.world__bag-button {
+  gap: 0.4rem;
+  padding: 0 0.75rem;
+}
+
+.world__bag-button[aria-expanded='true'] {
+  background: var(--leaf);
+  color: var(--soil);
+}
+
+.world__hud-status {
+  margin: 0;
+  align-self: flex-start;
+  padding: 0.2rem 0.5rem;
+  border-radius: 0.3rem;
+  background: rgb(26 20 14 / 70%);
+}
+
+/*
+ * The bag panel is the one scrollable HUD area: it re-enables pointer events
+ * (as a `world__hud-control`) and owns its overflow, so the wheel scrolls the
+ * panel instead of zooming the world.
+ */
+.world__bag-panel {
+  align-self: flex-start;
+  max-width: 18rem;
+  max-height: 10rem;
+  overflow: auto;
+  padding: 0.75rem 1rem;
+  border: 1px solid #55432f;
+  border-radius: 0.5rem;
+  background: var(--soil-raised);
+  box-shadow: 0 0.75rem 2rem rgb(0 0 0 / 30%);
+}
+
+.world__bag-heading {
+  margin: 0 0 0.5rem;
+  font-size: 0.9rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--leaf);
+}
+
+.world__bag-empty {
+  margin: 0 0 0.35rem;
+}
+
+.world__bag-note {
+  margin: 0;
+  color: #b9a583;
+  font-size: 0.8rem;
+}
