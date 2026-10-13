@@ -63,7 +63,7 @@ vi.mock('../src/render/three/runtime.ts', () => ({
     update: () => {},
     setFollowTarget: () => {},
     getCameraState: () => ({
-      pitchDegrees: 45,
+      pitchDegrees: 35,
       yawDegrees: mockRuntime.yawDegrees,
       zoom: 1,
       focus: { x: 0, y: 0, z: 0 },
@@ -94,7 +94,7 @@ vi.mock('../src/render/three/runtime.ts', () => ({
         near: 0.1,
         far: 100,
         aspect: 1,
-        pitchDegrees: 45,
+        pitchDegrees: 35,
         yawDegrees: mockRuntime.yawDegrees,
         zoom: 1,
         focus: { x: 0, y: 0, z: 0 },

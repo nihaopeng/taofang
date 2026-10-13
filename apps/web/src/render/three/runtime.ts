@@ -252,8 +252,24 @@ export interface RenderInspection {
   background: number | null;
   /** Number of prefab groups still parented under `WorldRoot` (0 after `dispose`). */
   groups: number;
-  /** Sun shadow configuration, or `null` once the light rig has been released. */
-  shadow: { sunCasts: boolean; mapWidth: number; mapHeight: number } | null;
+  /**
+   * Sun shadow configuration, or `null` once the light rig has been released.
+   *
+   * `extent` is the half-width of the orthographic shadow camera's frustum, in
+   * world units. It is derived from the WORLD bounds alone
+   * (`max(worldWidth, worldDepth) / 2 + 4`), never from the visible ground
+   * footprint: the oversized backdrop is far larger than the shadow frustum and
+   * deliberately neither casts nor receives shadows, so letting the shadow
+   * camera grow with the (zoom/pitch-dependent) visible floor would blow up the
+   * shadow frustum and collapse the 1024x1024 map's effective resolution. Pinned
+   * so a mutation cannot couple the two.
+   */
+  shadow: {
+    sunCasts: boolean;
+    mapWidth: number;
+    mapHeight: number;
+    extent: number;
+  } | null;
   /** Number of GLB templates currently parsed and cached (0 after `dispose`). */
   models: number;
   /**
@@ -525,7 +541,7 @@ export const RENDER_CAMERA = {
    * field, so the view can never tilt. It is still reported in `inspect().camera`
    * for tests and debugging.
    */
-  pitchDegrees: 45,
+  pitchDegrees: 35,
   /**
    * The fixed vertical field of view, in degrees. Deliberately narrow (phase 11)
    * so the projected near/far size difference stays gentle.
@@ -926,7 +942,7 @@ export function perspectiveFrustum(options: {
   const camZ = distance * cosPitch * cosYaw;
 
   // Project the four viewport corners onto the ground plane. For the rig's
-  // fixed pitch and fixed FOV every ray points below the horizon (pitch 45 >
+  // fixed pitch and fixed FOV every ray points below the horizon (pitch 35 >
   // fov/2 = 14), so the footprint is a finite trapezoid; `footprintHalfX/Z` are
   // measured from the focus, `maxDepth` is the farthest camera-to-corner
   // distance used for `far`, and `minDepth` is the nearest VISIBLE ground
@@ -943,7 +959,7 @@ export function perspectiveFrustum(options: {
       const dirZ = forwardZ + rightZ * (u * tanHalfFov * aspect) + upZ * (v * tanHalfFov);
       if (dirY >= -1e-9) {
         // A ray at/above the horizon never meets the ground: the footprint is
-        // unbounded. Cannot happen for the fixed rig (pitch 45 > fov/2 = 14),
+        // unbounded. Cannot happen for the fixed rig (pitch 35 > fov/2 = 14),
         // but keep the guard so a future FOV/pitch change cannot produce NaN.
         parallelToGround = true;
         continue;
@@ -2191,6 +2207,7 @@ export function createThreeRuntime(options: {
               sunCasts: sun.castShadow,
               mapWidth: sun.shadow.mapSize.width,
               mapHeight: sun.shadow.mapSize.height,
+              extent: sun.shadow.camera.right,
             },
       models: ownedTemplates.size,
       released: { ...released },

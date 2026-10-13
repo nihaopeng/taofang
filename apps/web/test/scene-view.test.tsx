@@ -118,7 +118,7 @@ interface RecordingRuntime {
 }
 
 const CAMERA_STATE: CameraState = {
-  pitchDegrees: 45,
+  pitchDegrees: 35,
   yawDegrees: 0,
   zoom: 1,
   focus: { x: 0, y: 0, z: 0 },

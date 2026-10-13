@@ -605,9 +605,9 @@ describe('three runtime camera rig', () => {
   it('locks the pitch as a fixed constant with no adjustable path', () => {
     const runtime = makeRuntime();
 
-    // Phase 12: the locked pitch is exactly 45 degrees. It is ONE named constant
+    // Phase 12: the locked pitch is exactly 35 degrees. It is ONE named constant
     // in RENDER_CAMERA; the flatter value is a deliberate composition decision.
-    expect(RENDER_CAMERA.pitchDegrees).toBe(45);
+    expect(RENDER_CAMERA.pitchDegrees).toBe(35);
 
     // The default stance reports the fixed pitch through both accessors.
     expect(runtime.getCameraState().pitchDegrees).toBe(RENDER_CAMERA.pitchDegrees);
@@ -726,6 +726,38 @@ describe('three runtime shadows', () => {
     // The terrain plates are inside the shadow frustum and remain the visible
     // lit ground, so they must KEEP receiving shadows.
     expect(findNode(runtime, 'tile:0,0' as NodeId).receivesShadow).toBe(true);
+
+    runtime.dispose();
+  });
+
+  it('sizes the shadow frustum from the WORLD bounds, never from the visible ground', () => {
+    const runtime = makeRuntime();
+
+    // The orthographic shadow camera covers the world plus a fixed margin. For
+    // the default 12x12 world that is max(12, 12) / 2 + 4 = 10 world units. It
+    // must NOT be derived from the visible ground footprint: that footprint
+    // depends on pitch and zoom, and coupling the two would grow the shadow
+    // frustum (and collapse the 1024x1024 shadow map's resolution) as the
+    // flatter camera or the zoomed-out view reveals more floor.
+    const expectedExtent =
+      Math.max(BOUNDS.max.x - BOUNDS.min.x, BOUNDS.max.z - BOUNDS.min.z) / 2 + 4;
+    const base = runtime.inspect();
+    expect(base.shadow?.extent).toBe(expectedExtent);
+    const baseBackdrop = base.backdrop;
+    expect(baseBackdrop).not.toBeNull();
+
+    // Zoom changes the visible ground (and therefore the backdrop) by a large
+    // factor while the shadow extent stays exactly the world-derived value.
+    runtime.setZoom(RENDER_CAMERA.minZoom);
+    const zoomedOut = runtime.inspect();
+    expect(zoomedOut.shadow?.extent).toBe(expectedExtent);
+    runtime.setZoom(RENDER_CAMERA.maxZoom);
+    const zoomedIn = runtime.inspect();
+    expect(zoomedIn.shadow?.extent).toBe(expectedExtent);
+
+    // Prove the backdrop really did change size, so the constancy above is not
+    // vacuous.
+    expect(zoomedOut.backdrop?.sizeX).toBeGreaterThan(zoomedIn.backdrop?.sizeX ?? 0);
 
     runtime.dispose();
   });
