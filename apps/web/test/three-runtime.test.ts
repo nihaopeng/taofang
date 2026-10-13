@@ -43,12 +43,14 @@ import {
   DEFAULT_CELL_SIZE,
   KNOWN_APPEARANCES,
   RENDER_CAMERA,
+  RENDER_GHOST_COLOURS,
   backdropHalfExtents,
   createThreeRuntime,
   perspectiveFrustum,
 } from '../src/render/three/runtime.ts';
 import type {
   ModelLoader,
+  PlacementGhost,
   RenderInspection,
   RenderRuntime,
 } from '../src/render/three/runtime.ts';
@@ -2321,5 +2323,53 @@ describe('three runtime GLB real-file path', () => {
     } finally {
       globalWithProgress.ProgressEvent = originalProgressEvent;
     }
+  });
+});
+
+describe('pending placement ghost', () => {
+  function ghost(overrides: Partial<PlacementGhost> = {}): PlacementGhost {
+    return {
+      position: { x: 1, y: 2, z: 3 },
+      rotation: IDENTITY,
+      footprintX: 1,
+      footprintZ: 2,
+      height: 3,
+      valid: null,
+      occupiedCells: [],
+      ...overrides,
+    };
+  }
+
+  it('maps the server verdict to a colour with no client rule involved', () => {
+    const runtime = makeRuntime();
+    const colourFor = (valid: boolean | null): number | undefined => {
+      runtime.setPlacementGhost(ghost({ valid, occupiedCells: [{ x: 1, y: 0, z: 0 }] }));
+      return runtime.inspect().placementGhost?.colour;
+    };
+
+    // The verdict alone drives the colour; every other field is identical.
+    expect(colourFor(true)).toBe(RENDER_GHOST_COLOURS.valid);
+    expect(colourFor(false)).toBe(RENDER_GHOST_COLOURS.invalid);
+    expect(colourFor(null)).toBe(RENDER_GHOST_COLOURS.neutral);
+    runtime.dispose();
+  });
+
+  it('positions/scales the ghost from catalogue geometry and clears on null', () => {
+    const runtime = makeRuntime();
+    runtime.setPlacementGhost(
+      ghost({ valid: true, occupiedCells: [{ x: 1, y: 0, z: 0 }, { x: 2, y: 0, z: 0 }] }),
+    );
+    const inspection = runtime.inspect().placementGhost;
+    expect(inspection).not.toBeNull();
+    expect(inspection?.present).toBe(true);
+    expect(inspection?.position).toEqual({ x: 1, y: 2, z: 3 });
+    expect(inspection?.footprintX).toBe(1);
+    expect(inspection?.footprintZ).toBe(2);
+    expect(inspection?.height).toBe(3);
+    expect(inspection?.occupiedCellCount).toBe(2);
+
+    runtime.setPlacementGhost(null);
+    expect(runtime.inspect().placementGhost).toBeNull();
+    runtime.dispose();
   });
 });

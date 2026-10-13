@@ -175,6 +175,7 @@ function createRecordingRuntime(): RecordingRuntime {
     },
     setGridOverlayVisible: () => {},
     setHighlightedCell: () => {},
+    setPlacementGhost: () => {},
     pick: (x, y) => {
       recorder.pickCalls.push({ x, y });
       return recorder.pickResult;
@@ -210,6 +211,7 @@ function createRecordingRuntime(): RecordingRuntime {
         lineObjectCount: 0,
         highlightMarkerCount: 0,
       },
+      placementGhost: null,
     }),
     dispose: () => {
       recorder.disposeCalls += 1;

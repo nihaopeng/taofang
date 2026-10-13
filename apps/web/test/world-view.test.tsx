@@ -100,6 +100,7 @@ vi.mock('../src/render/three/runtime.ts', () => ({
         mockRuntime.gridOverlayCalls.push(visible);
       },
       setHighlightedCell: () => {},
+      setPlacementGhost: () => {},
       pick: () => null,
       inspect: () => ({
         mounted: false,
@@ -131,6 +132,7 @@ vi.mock('../src/render/three/runtime.ts', () => ({
           lineObjectCount: 1,
           highlightMarkerCount: 1,
         },
+        placementGhost: null,
       }),
       dispose: () => {},
     }

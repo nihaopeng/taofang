@@ -57,7 +57,7 @@ import type { BlockGridViewModel, BoundsViewModel } from '../organizer';
 import { controlledActorNodeId, createRenderBridge, entityIdOfNodeId } from '../render/bridge';
 import type { RenderBridge } from '../render/bridge';
 import { createThreeRuntime } from '../render/three/runtime';
-import type { RenderRuntime } from '../render/three/runtime';
+import type { RenderPick, RenderRuntime } from '../render/three/runtime';
 
 /**
  * Authoritative world extent and block grid handed to the runtime factory.
@@ -94,6 +94,26 @@ interface PointerGesture {
   lastX: number;
   startTime: number;
   dragging: boolean;
+  /** The mouse button that started the gesture (`0` primary, `2` secondary). */
+  button: number;
+}
+
+/**
+ * Editor callbacks the HUD-owned editor arms on the canvas.
+ *
+ * While `active`, a canvas click is a placement/removal rather than the default
+ * interact/move. A drag still orbits the camera, and wheel still zooms, so the
+ * editor never makes the world un-navigable.
+ */
+export interface SceneEditorHandlers {
+  /** Whether a palette selection is armed. */
+  readonly active: boolean;
+  /** Canvas hover (no button down) produced this pick; `null` means nothing. */
+  readonly onHover: (hit: RenderPick) => void;
+  /** The pointer left the canvas (no gesture); drop the hover candidate. */
+  readonly onHoverEnd: () => void;
+  /** A click while armed; the editor owns the placement/removal. */
+  readonly onPlace: (hit: RenderPick, button: 'primary' | 'secondary') => void;
 }
 
 /**
@@ -122,32 +142,41 @@ export function SceneView(props: {
    * cleared on unmount.
    */
   runtimeRef?: MutableRefObject<RenderRuntime | null>;
+  /** Optional in-world editor handlers armed by the HUD palettes. */
+  editor?: SceneEditorHandlers;
 }) {
-  const { createRuntime, runtimeRef: externalRuntimeRef } = props;
+  const { createRuntime, runtimeRef: externalRuntimeRef, editor } = props;
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const internalRuntimeRef = useRef<RenderRuntime | null>(null);
   const runtimeRef = externalRuntimeRef ?? internalRuntimeRef;
   const bridgeRef = useRef<RenderBridge | null>(null);
   const pointerRef = useRef<PointerGesture | null>(null);
+  // Keep the latest handlers without re-binding the canvas event props; the
+  // editor object identity changes on every parent render.
+  const editorRef = useRef<SceneEditorHandlers | undefined>(editor);
+  editorRef.current = editor;
 
   /**
-   * Turn a completed click into a world-space gameplay intent. The pick is plain
-   * data; the bridge maps a node id to a game entity id, and the Organizer owns
-   * the command. No screen/NDC/camera value ever reaches a command.
-   *
-   * An entity node becomes an interact intent. Any other picked node (a raised
-   * surface) becomes a move intent toward the clicked world point, exactly like
-   * a flat-ground click: the UI applies no walkability rule, it only forwards
-   * the point and lets the Manager decide where the actor can actually go.
+   * Pick the world at this client coordinate. The pick is plain data; the bridge
+   * maps a node id to a game entity id, and the Organizer owns the command. No
+   * screen/NDC/camera value ever reaches a command.
    */
-  function handleClick(event: { clientX: number; clientY: number }): void {
+  function pickAt(event: { clientX: number; clientY: number }): RenderPick {
     const canvas = canvasRef.current;
     const runtime = runtimeRef.current;
     if (canvas === null || runtime === null) {
-      return;
+      return null;
     }
     const ndc = toNdc(canvas, event);
-    const hit = runtime.pick(ndc.x, ndc.y);
+    return runtime.pick(ndc.x, ndc.y);
+  }
+
+  /**
+   * The default (non-editor) click behaviour. An entity node becomes an interact
+   * intent; any other node (a raised surface) or the ground becomes a move intent
+   * toward the clicked world point. The UI applies no walkability rule.
+   */
+  function applyDefaultClick(hit: RenderPick): void {
     if (hit === null) {
       return;
     }
@@ -164,8 +193,12 @@ export function SceneView(props: {
   }
 
   function handlePointerDown(event: ReactPointerEvent<HTMLCanvasElement>): void {
-    // Only the primary button starts a camera/interaction gesture.
-    if (event.pointerType === 'mouse' && event.button !== 0) {
+    const editorActive = editorRef.current?.active ?? false;
+    const isPrimary = event.pointerType !== 'mouse' || event.button === 0;
+    const isSecondary = event.pointerType === 'mouse' && event.button === 2;
+    // Outside the editor only the primary button starts a gesture. In the editor
+    // the secondary button is also a placement/removal gesture.
+    if (!isPrimary && !(editorActive && isSecondary)) {
       return;
     }
     const canvas = canvasRef.current;
@@ -177,12 +210,25 @@ export function SceneView(props: {
       lastX: event.clientX,
       startTime: Date.now(),
       dragging: false,
+      button: event.button,
     };
   }
 
   function handlePointerMove(event: ReactPointerEvent<HTMLCanvasElement>): void {
     const pointer = pointerRef.current;
-    if (pointer === null || pointer.pointerId !== event.pointerId) {
+    if (pointer === null) {
+      // Hover (no button down): the editor may show a placement candidate.
+      const activeEditor = editorRef.current;
+      if (activeEditor !== undefined && activeEditor.active) {
+        activeEditor.onHover(pickAt(event));
+      }
+      return;
+    }
+    if (pointer.pointerId !== event.pointerId) {
+      return;
+    }
+    // A secondary-button gesture is a click only; it never orbits the camera.
+    if (pointer.button === 2) {
       return;
     }
     let dx = event.clientX - pointer.lastX;
@@ -244,7 +290,13 @@ export function SceneView(props: {
       // A drag (or a long press) never emits an intent.
       return;
     }
-    handleClick(event);
+    const hit = pickAt(event);
+    const activeEditor = editorRef.current;
+    if (activeEditor !== undefined && activeEditor.active) {
+      activeEditor.onPlace(hit, pointer.button === 2 ? 'secondary' : 'primary');
+      return;
+    }
+    applyDefaultClick(hit);
   }
 
   const state = useWorld();
@@ -335,6 +387,20 @@ export function SceneView(props: {
       onPointerUp={endPointer}
       onPointerCancel={() => {
         pointerRef.current = null;
+      }}
+      onPointerLeave={() => {
+        // Only a hover (no gesture) clears the candidate; a captured drag does
+        // not lose its candidate mid-gesture.
+        if (pointerRef.current === null) {
+          editorRef.current?.onHoverEnd();
+        }
+      }}
+      onContextMenu={(event) => {
+        // The secondary button is the editor's "remove" gesture; suppress the
+        // browser menu only while the editor is armed.
+        if (editorRef.current?.active) {
+          event.preventDefault();
+        }
       }}
       onWheel={(event) => {
         const runtime = runtimeRef.current;

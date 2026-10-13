@@ -32,6 +32,7 @@
  * things that go through the Organizer.
  */
 import { useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 
 import type { StreamStatus } from '../organizer';
 
@@ -73,6 +74,12 @@ export interface HudProps {
   defaultPitchDegrees: number;
   /** Drive the render rig's pitch directly. Never an Organizer intent. */
   onPitchChange: (degrees: number) => void;
+  /**
+   * The in-world editor affordances (block/entity palettes, Place, reason), or
+   * `null`. Rendered as an ordinary HUD control group so it cannot swallow canvas
+   * input outside its own buttons (the overlay is pointer-transparent).
+   */
+  editor?: ReactNode;
 }
 
 /**
@@ -129,6 +136,7 @@ export function Hud(props: HudProps) {
         </div>
 
         <div className="world__hud-actions">
+          {props.editor}
           {/*
             The settings panel holds ONLY camera-rig presentation controls (the
             pitch today). It is a real keyboard-reachable form control set: the

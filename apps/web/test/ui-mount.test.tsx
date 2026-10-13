@@ -60,6 +60,7 @@ vi.mock('../src/render/three/runtime.ts', () => ({
     setZoom: () => {},
     setGridOverlayVisible: () => {},
     setHighlightedCell: () => {},
+    setPlacementGhost: () => {},
     pick: () => null,
     inspect: () => ({
       mounted: false,
@@ -89,6 +90,7 @@ vi.mock('../src/render/three/runtime.ts', () => ({
         lineObjectCount: 1,
         highlightMarkerCount: 1,
       },
+      placementGhost: null,
     }),
     dispose: () => {},
   }),

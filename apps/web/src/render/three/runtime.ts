@@ -428,6 +428,22 @@ export interface RenderInspection {
     lineObjectCount: number;
     highlightMarkerCount: number;
   };
+  /**
+   * Plain-data view of the pending placement ghost, or `null` when none.
+   * `colour` is the hex colour the server's `valid` verdict mapped to; it exists
+   * so a test can prove the mapping is a pure function of that verdict.
+   */
+  placementGhost: {
+    present: boolean;
+    position: { x: number; y: number; z: number };
+    rotation: { x: number; y: number; z: number; w: number };
+    footprintX: number;
+    footprintZ: number;
+    height: number;
+    valid: boolean | null;
+    colour: number;
+    occupiedCellCount: number;
+  } | null;
 }
 
 /** Structural world AABB the runtime frames; deliberately not the Organizer type. */
@@ -463,6 +479,44 @@ export const DEFAULT_CELL_SIZE = 1;
  * geometry, which stays exactly cell-sized and continuous.
  */
 const GRID_OVERLAY_LIFT = 0.05;
+
+/**
+ * A pending placement preview, as plain data.
+ *
+ * PURE PRESENTATION. `valid` is the SERVER's verdict (`null` while pending): the
+ * runtime maps it to a colour and never re-decides it. `position`/`rotation` are
+ * the client's snapped candidate or the server's `resolvedTransform`, and
+ * `footprintX`/`footprintZ`/`height` are catalogue geometry. `occupiedCells` is
+ * the server's occupancy report and is used only for a highlight.
+ */
+export interface PlacementGhost {
+  position: { x: number; y: number; z: number };
+  rotation: { x: number; y: number; z: number; w: number };
+  footprintX: number;
+  footprintZ: number;
+  height: number;
+  /** The server's verdict, or `null` while neutral/pending. */
+  valid: boolean | null;
+  /** Cells the server reported as occupied; presentation-only highlight. */
+  occupiedCells?: readonly { x: number; y: number; z: number }[];
+}
+
+/**
+ * Colours the pending placement ghost's `valid` verdict maps to. Purely
+ * presentational: the server decides validity, the renderer only tints. Exported
+ * so a test can pin that the colour is a pure function of the server verdict and
+ * that no client rule participates.
+ */
+export const RENDER_GHOST_COLOURS = {
+  /** Server said valid. */
+  valid: 0x39d353,
+  /** Server said invalid. */
+  invalid: 0xe5484d,
+  /** No verdict yet (pending/neutral). */
+  neutral: 0x58a6ff,
+  /** Highlight for server-reported occupied cells. */
+  occupied: 0xf0a020,
+} as const;
 
 /** The executor surface the UI wires to the bridge. */
 export interface RenderRuntime {
@@ -517,6 +571,12 @@ export interface RenderRuntime {
    * no gameplay meaning is attached to a cell here.
    */
   setHighlightedCell(cell: { x: number; z: number } | null): void;
+  /**
+   * Show, update, or clear (`null`) the pending placement ghost: pure catalogue
+   * geometry at a candidate transform. `valid` is the server's verdict and is the
+   * ONLY input to the ghost's colour; the runtime makes no placement decision.
+   */
+  setPlacementGhost(ghost: PlacementGhost | null): void;
   /**
    * Resolve a normalized device coordinate (`[-1, 1]`, origin centre, `+y` up)
    * to plain pick data:
@@ -1458,6 +1518,52 @@ function buildGridOverlay(
   return { group, line, marker };
 }
 
+/**
+ * The pending placement preview: a single reusable translucent box plus a pool
+ * of occupied-cell highlight markers.
+ *
+ * Both are authored as ONE shared unit box geometry and scaled/positioned per
+ * call, so a pointer-move stream never allocates geometry. The box draws on top
+ * (`depthTest: false`) because it is UI, not world geometry, and must not be
+ * occluded by the terrain a placement would replace.
+ */
+function buildPlacementGhost(): {
+  group: Group;
+  box: Mesh;
+  boxMaterial: MeshBasicMaterial;
+  geometry: BufferGeometry;
+  occupiedGroup: Group;
+  occupiedMaterial: MeshBasicMaterial;
+  occupiedMarkers: Mesh[];
+} {
+  const group = new Group();
+  group.name = 'PlacementGhost';
+  const geometry = new BoxGeometry(1, 1, 1);
+  const boxMaterial = new MeshBasicMaterial({
+    color: RENDER_GHOST_COLOURS.neutral,
+    transparent: true,
+    opacity: 0.42,
+    depthTest: false,
+    depthWrite: false,
+  });
+  const box = new Mesh(geometry, boxMaterial);
+  box.renderOrder = 1000;
+  group.add(box);
+
+  const occupiedGroup = new Group();
+  occupiedGroup.name = 'PlacementGhostOccupied';
+  occupiedGroup.visible = false;
+  const occupiedMaterial = new MeshBasicMaterial({
+    color: RENDER_GHOST_COLOURS.occupied,
+    transparent: true,
+    opacity: 0.55,
+    depthTest: false,
+    depthWrite: false,
+  });
+
+  return { group, box, boxMaterial, geometry, occupiedGroup, occupiedMaterial, occupiedMarkers: [] };
+}
+
 /** Animation the placeholder prefabs rest at. Registry data, never read by runtime logic. */
 const IDLE_ANIMATION = 'idle' as AnimationId;
 
@@ -1848,6 +1954,14 @@ export function createThreeRuntime(options: {
   worldRoot.add(gridOverlay.group);
   let gridOverlayVisible = false;
   let highlightedCell: { x: number; z: number } | null = null;
+
+  // Pending placement ghost and its occupied-cell highlight pool. Both groups
+  // are built once and only made visible while a preview is active.
+  const ghost = buildPlacementGhost();
+  ghost.group.visible = false;
+  worldRoot.add(ghost.group);
+  worldRoot.add(ghost.occupiedGroup);
+  let placementGhostState: PlacementGhost | null = null;
 
   const cameraRig = new Group();
   cameraRig.name = 'CameraRig';
@@ -2612,6 +2726,20 @@ export function createThreeRuntime(options: {
                 (child) => child instanceof Mesh,
               ).length,
             },
+      placementGhost:
+        placementGhostState === null
+          ? null
+          : {
+              present: ghost.group.visible,
+              position: { ...placementGhostState.position },
+              rotation: { ...placementGhostState.rotation },
+              footprintX: placementGhostState.footprintX,
+              footprintZ: placementGhostState.footprintZ,
+              height: placementGhostState.height,
+              valid: placementGhostState.valid,
+              colour: ghostColourFor(placementGhostState.valid),
+              occupiedCellCount: placementGhostState.occupiedCells?.length ?? 0,
+            },
     };
   }
 
@@ -2746,6 +2874,86 @@ export function createThreeRuntime(options: {
     marker.visible = true;
   }
 
+  /** Pure mapping from the server's verdict to a ghost colour; no client rule. */
+  function ghostColourFor(valid: boolean | null): number {
+    if (valid === null) {
+      return RENDER_GHOST_COLOURS.neutral;
+    }
+    return valid ? RENDER_GHOST_COLOURS.valid : RENDER_GHOST_COLOURS.invalid;
+  }
+
+  /** Position the pooled occupied-cell markers for the server's occupied cells. */
+  function syncGhostOccupied(cells: readonly { x: number; y: number; z: number }[]): void {
+    while (ghost.occupiedMarkers.length < cells.length) {
+      const marker = new Mesh(ghost.geometry, ghost.occupiedMaterial);
+      marker.renderOrder = 1001;
+      ghost.occupiedGroup.add(marker);
+      ghost.occupiedMarkers.push(marker);
+    }
+    for (const [index, marker] of ghost.occupiedMarkers.entries()) {
+      const cell = cells[index];
+      if (cell === undefined) {
+        marker.visible = false;
+        continue;
+      }
+      marker.visible = true;
+      marker.scale.set(grid.cellSize * 0.9, 0.06, grid.cellSize * 0.9);
+      marker.position.set(
+        grid.origin.x + (cell.x + 0.5) * grid.cellSize,
+        grid.origin.y + (cell.y + 0.5) * grid.cellSize,
+        grid.origin.z + (cell.z + 0.5) * grid.cellSize,
+      );
+    }
+    ghost.occupiedGroup.visible = cells.length > 0;
+  }
+
+  /**
+   * Show/update/clear the pending placement ghost. `valid` is copied verbatim
+   * from the server verdict and is the ONLY input to the colour: the runtime
+   * applies no support/occupancy/permission rule of its own.
+   */
+  function setPlacementGhost(spec: PlacementGhost | null): void {
+    placementGhostState =
+      spec === null
+        ? null
+        : {
+            position: { ...spec.position },
+            rotation: { ...spec.rotation },
+            footprintX: spec.footprintX,
+            footprintZ: spec.footprintZ,
+            height: spec.height,
+            valid: spec.valid,
+            occupiedCells: (spec.occupiedCells ?? []).map((cell) => ({
+              x: cell.x,
+              y: cell.y,
+              z: cell.z,
+            })),
+          };
+
+    if (spec === null) {
+      ghost.group.visible = false;
+      ghost.occupiedGroup.visible = false;
+      return;
+    }
+
+    ghost.group.visible = true;
+    ghost.group.position.set(spec.position.x, spec.position.y, spec.position.z);
+    ghost.group.quaternion.set(
+      spec.rotation.x,
+      spec.rotation.y,
+      spec.rotation.z,
+      spec.rotation.w,
+    );
+    // Unit box scaled to the footprint/height and lifted so the transform is the
+    // footprint's geometric centre (pivot 'center') with the height rising from
+    // the transform's y (the placement base).
+    ghost.box.scale.set(spec.footprintX, spec.height, spec.footprintZ);
+    ghost.box.position.set(0, spec.height / 2, 0);
+    ghost.boxMaterial.color.setHex(ghostColourFor(spec.valid));
+
+    syncGhostOccupied(spec.occupiedCells ?? []);
+  }
+
   // Reused across picks so a drag/click loop does not allocate per query.
   const raycaster = new Raycaster();
   const pickNdc = new Vector2();
@@ -2850,6 +3058,16 @@ export function createThreeRuntime(options: {
     }
     gridOverlayVisible = false;
     highlightedCell = null;
+
+    // The ghost is presentation-only but owns a shared box geometry and two
+    // materials; release them rather than only detaching the groups.
+    worldRoot.remove(ghost.group);
+    worldRoot.remove(ghost.occupiedGroup);
+    placementGhostState = null;
+    ghost.geometry.dispose();
+    released.geometries += 1;
+    accumulateRelease(releaseMaterial(ghost.boxMaterial));
+    accumulateRelease(releaseMaterial(ghost.occupiedMaterial));
     scene.remove(worldRoot);
 
     if (ground !== null) {
@@ -2903,6 +3121,7 @@ export function createThreeRuntime(options: {
     setZoom,
     setGridOverlayVisible,
     setHighlightedCell,
+    setPlacementGhost,
     pick,
     inspect,
     dispose,

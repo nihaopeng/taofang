@@ -37,7 +37,7 @@
  * iteration order.
  */
 
-import { cellCentre } from '@starvalley/protocol';
+import { cellCentre, cellOf, snapFootprintCentre } from '@starvalley/protocol';
 import type { Vec3 } from '@starvalley/math';
 import type {
   BlockGrid,
@@ -46,6 +46,7 @@ import type {
   CellCoord,
   EntityKindInfo,
   EntityState,
+  FootprintExtents,
   ValidatePlacementResponse,
   WorldBounds,
 } from '@starvalley/protocol';
@@ -163,6 +164,11 @@ export function toVec3ViewModel(value: Vec3): Vec3ViewModel {
   return { x: value.x, y: value.y, z: value.z };
 }
 
+/** Copy an integer `CellCoord` into a plain view-model object. */
+export function toCellCoordViewModel(cell: CellCoord): CellCoordViewModel {
+  return { x: cell.x, y: cell.y, z: cell.z };
+}
+
 /** Map a validated Protocol `WorldBounds` into the view model. */
 export function toBoundsViewModel(bounds: WorldBounds): BoundsViewModel {
   return { min: toVec3ViewModel(bounds.min), max: toVec3ViewModel(bounds.max) };
@@ -183,6 +189,43 @@ export function toBlockGridViewModel(grid: BlockGrid): BlockGridViewModel {
  */
 export function cellWorldPosition(grid: BlockGrid, cell: CellCoord): Vec3ViewModel {
   return toVec3ViewModel(cellCentre(grid, cell));
+}
+
+/**
+ * Resolve a continuous world point to the absolute integer cell containing it.
+ *
+ * Delegates to the canonical Protocol `cellOf` rather than re-deriving the
+ * frozen `floor((p - origin) / cellSize)` rule, so the client and server can
+ * never disagree on which cell a point is in. This is a world FACT (which cell
+ * a point occupies), never a gameplay/placement rule: whether an edit or a
+ * placement at that cell is legal is a server-only Manager judgement.
+ *
+ * Exposed through the Organizer barrel because the UI/render layers are lint-
+ * forbidden from importing `@starvalley/protocol`.
+ */
+export function cellOfWorldPoint(
+  grid: BlockGridViewModel,
+  point: Vec3ViewModel,
+): CellCoordViewModel {
+  return toCellCoordViewModel(cellOf(grid, point));
+}
+
+/**
+ * Snap a requested placement centre onto the shared footprint lattice for a
+ * kind's footprint.
+ *
+ * Delegates to the canonical Protocol `snapFootprintCentre` ("where would the
+ * centre land"), so the client's pending placement ghost aligns identically to
+ * the Manager's Placement Resolver without a second source of truth. It answers
+ * WHERE only; it never decides whether a placement is legal.
+ */
+export function snapPlacementCentre(
+  position: Vec3ViewModel,
+  footprint: { readonly x: number; readonly z: number },
+  grid: BlockGridViewModel,
+): Vec3ViewModel {
+  const extents: FootprintExtents = { x: footprint.x, z: footprint.z };
+  return toVec3ViewModel(snapFootprintCentre(position, extents, grid));
 }
 
 /**
