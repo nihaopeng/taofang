@@ -35,7 +35,12 @@ import type {
   WorldSnapshot,
   WorldStreamMessage,
 } from '@starvalley/protocol';
-import { InteractionRejectedError, UnknownActorError, UnknownEntityError } from '@starvalley/manager';
+import {
+  InteractionRejectedError,
+  PlacementRejectedError,
+  UnknownActorError,
+  UnknownEntityError,
+} from '@starvalley/manager';
 import type { GameInfoManager, WorldManager } from '@starvalley/manager';
 import { createRequestListener } from '../src/index.ts';
 import type { ResolveActorId, WorldStreamPort } from '../src/index.ts';
@@ -54,6 +59,18 @@ function interactionRejection(reason: string): InteractionRejectedError {
   return new InteractionRejectedError(
     parseEntityId('tree-1'),
     reason as InteractionRejectedError['reason'],
+  );
+}
+
+/**
+ * Build a `PlacementRejectedError` whose reason is typed as a plain string, so
+ * a test can also exercise the router's fallback for an unrecognised (but
+ * runtime-reachable) reason value.
+ */
+function placementRejection(reason: string): PlacementRejectedError {
+  return new PlacementRejectedError(
+    'tree' as PlacementRejectedError['kind'],
+    reason as PlacementRejectedError['reason'],
   );
 }
 
@@ -690,6 +707,86 @@ describe('createRequestListener', () => {
 
     const body = await expectProtocolError(response, 'CONFLICT', 409);
     expect(body.error.message).toBe('That cannot be done.');
+  });
+
+  it.each([
+    ['not-placeable', 'That cannot be placed there.'],
+    ['no-supported-orientation', 'That cannot face that way.'],
+    ['insufficient-support', 'It needs something to rest on.'],
+    ['occupied', 'Something is already there.'],
+  ])(
+    'maps a PlacementRejectedError reason %s to 409 CONFLICT with the player-facing message %s',
+    async (reason, message) => {
+      const baseUrl = await startServer(
+        createFakeManager(),
+        createFakeWorld({
+          submitIntent: () => {
+            throw placementRejection(reason);
+          },
+        }),
+      );
+
+      const response = await postCommand(baseUrl, JSON.stringify(ENTITY_PLACE));
+
+      const body = await expectProtocolError(response, 'CONFLICT', 409);
+      expect(body.error.message).toBe(message);
+    },
+  );
+
+  it('maps a refused entity.rotate placement to 409 CONFLICT', async () => {
+    const baseUrl = await startServer(
+      createFakeManager(),
+      createFakeWorld({
+        submitIntent: () => {
+          throw placementRejection('occupied');
+        },
+      }),
+    );
+
+    const response = await postCommand(baseUrl, JSON.stringify(ENTITY_ROTATE));
+
+    const body = await expectProtocolError(response, 'CONFLICT', 409);
+    expect(body.error.message).toBe('Something is already there.');
+  });
+
+  it('surfaces an unknown PlacementRejectedError reason verbatim on a 409 rather than a 500', async () => {
+    const baseUrl = await startServer(
+      createFakeManager(),
+      createFakeWorld({
+        submitIntent: () => {
+          throw placementRejection('mystery-reason');
+        },
+      }),
+    );
+
+    const response = await postCommand(baseUrl, JSON.stringify(ENTITY_PLACE));
+
+    // Forward-compatibility: a new discriminator must still reach the wire, not
+    // be misclassified as an internal failure.
+    const body = await expectProtocolError(response, 'CONFLICT', 409);
+    expect(body.error.message).toBe('mystery-reason');
+  });
+
+  it('still maps a genuinely unexpected command error to an opaque 500 INTERNAL_ERROR', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const baseUrl = await startServer(
+      createFakeManager(),
+      createFakeWorld({
+        submitIntent: () => {
+          throw new TypeError('unexpected bug');
+        },
+      }),
+    );
+
+    try {
+      const response = await postCommand(baseUrl, JSON.stringify(ENTITY_PLACE));
+
+      const body = await expectProtocolError(response, 'INTERNAL_ERROR', 500);
+      expect(body.error.message).toBe('Internal server error');
+      expect(consoleError).toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+    }
   });
 
   it('maps a manager UnknownEntityError to 404 NOT_FOUND naming the entity id', async () => {

@@ -54,6 +54,12 @@ export interface GhostCandidate {
   readonly footprintX: number;
   readonly footprintZ: number;
   readonly height: number;
+  /**
+   * Whether `position` anchors the ghost box at its base (default) or its
+   * centre. A block node root is the cell centre, so a block candidate uses
+   * `'center'`; an entity's transform is its base.
+   */
+  readonly pivot: 'base' | 'center';
 }
 
 /**
@@ -77,6 +83,7 @@ export function buildGhostSpec(
     footprintX: candidate.footprintX,
     footprintZ: candidate.footprintZ,
     height: candidate.height,
+    pivot: candidate.pivot,
     valid: verdict === null ? null : verdict.valid,
     occupiedCells: verdict?.occupiedCells.map((cell) => ({ ...cell })) ?? [],
   };

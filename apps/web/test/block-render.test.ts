@@ -11,14 +11,21 @@
  * - a full cube's top face is the cell's top (`+cellSize/2` above the cell
  *   centre the bridge places the node at), so stacked/adjacent full blocks are
  *   continuous and the dark backdrop cannot show through a base layer; and
- * - a slab is half-height (top at the cell centre) and `air` never renders.
+ * - a slab is half-height (top at the cell centre) and `air` never renders; and
+ * - the DIRECTIONAL kinds (`stairs`, `ramp`) match the authoritative collision
+ *   shape in `packages/manager/src/blocks.ts` at every yaw step, not merely in
+ *   their maximum height.
  */
 
 import { describe, expect, it } from 'vitest';
+import { Raycaster, Vector3 } from 'three';
+import type { Group } from 'three';
 
+import type { BlockKind, BlockState } from '@starvalley/protocol';
+import { supportHeightAt } from '@starvalley/manager';
 import type { AppearanceId, NodeCreateCommand, NodeId } from '@starvalley/render-protocol';
 
-import { BLOCK_RENDER_REGISTRY } from '../src/render/three/blocks.ts';
+import { BLOCK_RENDER_REGISTRY, blockRenderEntry } from '../src/render/three/blocks.ts';
 import { createThreeRuntime } from '../src/render/three/runtime.ts';
 
 const BOUNDS = { min: { x: -6, y: 0, z: -6 }, max: { x: 6, y: 8, z: 6 } };
@@ -119,5 +126,115 @@ describe('block render registry geometry', () => {
     const bLeft = (b?.world.x ?? 0) - (b?.footprintX ?? 0) / 2;
     expect(aRight).toBeCloseTo(bLeft, 9);
     runtime.dispose();
+  });
+});
+
+/**
+ * Yaw steps the bridge can apply to a directional block (the frozen contract).
+ */
+const DIRECTION_ORIENTATIONS = [0, 90, 180, 270] as const;
+
+/**
+ * Cell-local sample points across one cell. They deliberately avoid `0.5`, the
+ * stair step boundary: a ray exactly on a discontinuity is ambiguous, and the
+ * direction is already pinned by the many off-boundary samples.
+ */
+const CELL_SAMPLES = [0.15, 0.35, 0.65, 0.85] as const;
+
+/**
+ * Measure the visual's top at a cell-local point as a fraction of `cellSize`
+ * (`0` is the cell bottom, `1` the cell top). A downward ray at the point finds
+ * the top surface; the highest hit is the surface the actor would stand on.
+ */
+function visualTopFraction(
+  visual: Group,
+  cellSize: number,
+  localX: number,
+  localZ: number,
+): number {
+  const raycaster = new Raycaster();
+  raycaster.set(
+    new Vector3((localX - 0.5) * cellSize, cellSize * 4, (localZ - 0.5) * cellSize),
+    new Vector3(0, -1, 0),
+  );
+  const hits = raycaster.intersectObject(visual, true);
+  if (hits.length === 0) {
+    throw new Error(`no visual top at cell-local (${localX}, ${localZ})`);
+  }
+  let top = Number.NEGATIVE_INFINITY;
+  for (const hit of hits) {
+    top = Math.max(top, hit.point.y);
+  }
+  // Cell-local fraction = node-local y / cellSize + 0.5, because the node root is
+  // the cell centre.
+  return top / cellSize + 0.5;
+}
+
+/**
+ * B1 regression: the rendered `stairs`/`ramp` must rise on the SAME side the
+ * collision authority says they do.
+ *
+ * The authority is `packages/manager/src/blocks.ts`: a `stair`'s full-height step
+ * is the `+Z` half (`cz < 0.5 ? 0.5 : 1`) and a `ramp`'s top rises toward `+Z`
+ * (`top = clamp01(cz)`), with `toCanonicalLocal` undoing the yaw. The bridge then
+ * applies a plain right-handed `+Y` yaw to the node root. These tests build the
+ * real visual, apply the SAME yaw, and compare the whole measured height field
+ * against `supportHeightAt` at every yaw step, so a 180-degree mirror at any
+ * quarter turn fails here rather than shipping.
+ */
+describe('block direction matches the authoritative collision shape', () => {
+  it('rises on the same side as packages/manager/src/blocks.ts at every yaw', () => {
+    for (const kind of ['stairs', 'ramp'] as const) {
+      const entry = blockRenderEntry(kind);
+      if (entry === undefined) {
+        throw new Error(`no render entry for ${kind}`);
+      }
+      for (const orientation of DIRECTION_ORIENTATIONS) {
+        const block: BlockState = {
+          coord: { x: 0, y: 0, z: 0 },
+          kind: kind as BlockKind,
+          orientation,
+        };
+        const visual = entry.createVisual(CELL_SIZE);
+        // The runtime applies the node's yaw ON TOP of the visual's own group
+        // rotation, so compose it the same way (`rotateY` post-multiplies).
+        visual.rotateY((orientation * Math.PI) / 180);
+        visual.updateMatrixWorld(true);
+
+        let maxAuthority = Number.NEGATIVE_INFINITY;
+        let minAuthority = Number.POSITIVE_INFINITY;
+        let maxAuthorityTop = 0;
+        let minAuthorityTop = 0;
+        for (const localX of CELL_SAMPLES) {
+          for (const localZ of CELL_SAMPLES) {
+            const authority = supportHeightAt(block, localX, localZ);
+            if (authority === null) {
+              throw new Error(`non-solid ${kind} at (${localX}, ${localZ})`);
+            }
+            const measured = visualTopFraction(visual, CELL_SIZE, localX, localZ);
+            // The measured height field must equal the authoritative one at every
+            // sample: this pins DIRECTION, not just the maximum height.
+            expect(
+              measured,
+              `${kind} yaw ${orientation} at (${localX}, ${localZ})`,
+            ).toBeCloseTo(authority, 6);
+            if (authority > maxAuthority) {
+              maxAuthority = authority;
+              maxAuthorityTop = measured;
+            }
+            if (authority < minAuthority) {
+              minAuthority = authority;
+              minAuthorityTop = measured;
+            }
+          }
+        }
+        // Direction, stated directly: the authoritative high side is visibly
+        // higher than the authoritative low side.
+        expect(maxAuthority, `${kind} yaw ${orientation} has a rise`).toBeGreaterThan(
+          minAuthority,
+        );
+        expect(maxAuthorityTop).toBeGreaterThan(minAuthorityTop);
+      }
+    }
   });
 });

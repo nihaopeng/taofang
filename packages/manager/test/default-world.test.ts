@@ -108,6 +108,20 @@ describe('authored placeable construction guard', () => {
     ).toThrow(/overlaps/i);
   });
 
+  it('throws when an authored entity body intersects a solid block (bridge deck)', () => {
+    const blocks = [...flatBlocks(8, 8)];
+    for (let x = 1; x <= 6; x += 1) {
+      blocks.push(block(x, 3, 3, 'stone'));
+    }
+    expect(() =>
+      makeManager({
+        blocks,
+        entities: [authored('tree-1', 'tree', 3.5, 1, 3.5)],
+        spawnCell: { x: 1, z: 1 },
+      }),
+    ).toThrow(/overlaps/i);
+  });
+
   it('accepts a valid authored entity seated on the ground', () => {
     expect(() =>
       makeManager({

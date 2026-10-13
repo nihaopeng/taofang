@@ -73,6 +73,7 @@ export {
   OCCUPANCY_EPSILON,
   assertAuthoredPlaceable,
   cellsAreFree,
+  checkPlacementInvariants,
   columnSupportTop,
   createOccupancyIndex,
   deriveOccupiedCells,
@@ -86,7 +87,9 @@ export {
 } from './placement.ts';
 export type {
   AssertAuthoredPlaceableInput,
+  CheckPlacementInvariantsInput,
   OccupancyIndex,
+  PlacementInvariantViolation,
   PlacementRejected,
   PlacementRejectionReason,
   PlacementResolution,

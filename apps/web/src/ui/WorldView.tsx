@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import {
+  cellCentreOf,
   cellOfWorldPoint,
   loadWorld,
   placeEntity,
@@ -38,10 +39,19 @@ const EMPTY_BLOCK_KINDS: readonly BlockKindInfoViewModel[] = Object.freeze([]);
 const EMPTY_ENTITY_KINDS: readonly EntityKindInfoViewModel[] = Object.freeze([]);
 
 /**
- * Resolve the block cell a pick targets: an existing block node names its own
- * cell, otherwise the picked world point is resolved to a cell by the Organizer's
- * shared `cellOfWorldPoint` (the UI may not import the game protocol, and must
- * not re-derive the cell rule).
+ * Resolve the block cell a pick targets.
+ *
+ * A hit on a block node targets the cell ABOVE it when the hit face is the TOP
+ * face (normal roughly +Y): the top face is the floor of the air cell above, and
+ * that is the cell a click should edit so the editor can stack and reach air
+ * cells. Any other face (side/bottom) targets the block's own cell. A non-block
+ * hit (the mathematical ground plane where no block exists) resolves the picked
+ * point to its cell through the Organizer's shared `cellOfWorldPoint` (the UI may
+ * not import the game protocol, and must not re-derive the cell rule).
+ *
+ * TOP-FACE RULE (documented): `normal.y > 0.5` counts as a top face. A cube top
+ * is exactly +Y and a 45-degree ramp slope is ~0.707; a vertical side/underside
+ * is <= 0, so it keeps the hit cell.
  */
 function resolveBlockCell(hit: RenderPick, grid: BlockGridViewModel): CellCoordViewModel | null {
   if (hit === null) {
@@ -50,7 +60,7 @@ function resolveBlockCell(hit: RenderPick, grid: BlockGridViewModel): CellCoordV
   if (hit.kind === 'node') {
     const cell = blockCellOfNodeId(hit.nodeId);
     if (cell !== null) {
-      return cell;
+      return hit.normal.y > 0.5 ? { x: cell.x, y: cell.y + 1, z: cell.z } : cell;
     }
   }
   return cellOfWorldPoint(grid, hit.point);
@@ -275,17 +285,22 @@ export function WorldView(props: {
       const cell = resolveBlockCell(hit, grid);
       blockCellRef.current = cell;
       verdictRef.current = null;
+      const centre = cell === null ? null : cellCentreOf(grid, cell);
       candidateRef.current =
-        cell === null
+        cell === null || centre === null
           ? null
           : {
-              // Pure catalogue geometry aligned with the shared snap helper. A
-              // block is a one-cell volume; the y is the picked point.
-              position: snapPlacementCentre({ ...hit.point }, { x: 1, z: 1 }, grid),
+              // The cell's canonical world CENTRE, from the Organizer's shared
+              // cell->world helper (never re-derived here). `pivot: 'center'`
+              // tells the runtime the ghost box is centred on `position`, which
+              // matches a block node root at the cell centre and keeps the ghost
+              // over exactly the cell a click will edit.
+              position: centre,
               rotation: yawQuat(selection.orientation),
               footprintX: 1,
               footprintZ: 1,
               height: grid.cellSize,
+              pivot: 'center',
             };
       // Blocks are not preview-validated: the Manager decides on `block.set`.
       previewRef.current?.clear();
@@ -314,6 +329,7 @@ export function WorldView(props: {
       footprintX: info.footprintX,
       footprintZ: info.footprintZ,
       height: info.height,
+      pivot: 'base',
     };
     previewRef.current?.setCandidate({
       kind: selection.kind,

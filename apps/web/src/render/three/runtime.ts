@@ -55,20 +55,18 @@
  * `layer` ('base' | 'object') is coarse ordering only and is applied here as
  * `renderOrder`.
  *
- * Seamless terrain + an independent grid layer (phase 9)
- * -----------------------------------------------------
- * Every terrain plate is exactly `cellSize` on both axes, so neighbouring cells
- * share their edges exactly and the surface is continuous. Per-terrain
- * differentiation never changes that horizontal footprint: it is colour/material,
- * a FULL-footprint vertical step (path/water are recessed), and/or a smaller
- * decoration resting ON TOP of the full-size plate (path inlay, blocked rock,
- * water ripple). The old "dark ground shows through as grid gaps" technique is
- * gone; grid lines are an independent `GridOverlay` layer instead.
+ * Block world + an independent grid layer
+ * ---------------------------------------
+ * The visible ground is the BLOCK layer: one object-layer node per non-air
+ * block, each a full-cell visual with an exact `cellSize` horizontal footprint so
+ * neighbouring blocks share their edges with no seam. The retired phase-14
+ * terrain plates and surface prefabs are gone; a block is placed directly at its
+ * authoritative world transform and the runtime knows nothing about cells.
  *
  * `GridOverlay` (one `LineSegments` plus one reusable marker, built once from the
  * grid spec) is hidden by default, sits under `WorldRoot` alongside the prefab
  * groups, and is lifted by one layer-wide `GRID_OVERLAY_LIFT` to avoid z-fighting.
- * The lift is an overlay concern only; it is never a per-tile seam fix.
+ * The lift is an overlay concern only; it is never a per-cell seam fix.
  * `setGridOverlayVisible` / `setHighlightedCell` drive it and `inspect()` reports
  * it as plain data.
  *
@@ -101,9 +99,9 @@ import {
   DirectionalLight,
   Float32BufferAttribute,
   Group,
-  IcosahedronGeometry,
   LineBasicMaterial,
   LineSegments,
+  Matrix3,
   Matrix4,
   Mesh,
   MeshBasicMaterial,
@@ -203,11 +201,17 @@ export type RenderPick =
       readonly nodeId: NodeId;
       /**
        * World-space point where the ray first met the node visual. The runtime
-       * does not know whether a node is an entity or a surface; the UI uses this
-       * point for a non-entity (surface) click exactly as it uses the ground
+       * does not know whether a node is an entity or a block; the UI uses this
+       * point for a non-entity (block) click exactly as it uses the ground
        * point for a flat-ground click.
        */
       readonly point: { readonly x: number; readonly y: number; readonly z: number };
+      /**
+       * World-space unit normal of the hit face. The runtime reports it so the
+       * caller can tell a TOP face (`normal.y > 0.5`) from a side/bottom face
+       * without re-deriving geometry; it carries no gameplay meaning.
+       */
+      readonly normal: { readonly x: number; readonly y: number; readonly z: number };
     }
   | {
       readonly kind: 'ground';
@@ -237,9 +241,9 @@ interface Prefab {
   readonly motion?: (animation: AnimationId, nowMs: number, visual: Group) => void;
   /**
    * Build a fresh visual rooted at the node's feet (local origin at y = 0).
-   * `cellSize` is the world-space edge length a terrain plate must occupy; a
-   * prefab that is not terrain ignores it. Threading it here is what makes the
-   * terrain footprint exactly the grid cell, with no per-terrain inset.
+   * `cellSize` is the world-space edge length the visual must span (a block
+   * visual fills exactly one cell; a non-cell visual ignores it). Threading it
+   * here is what makes a block footprint exactly the grid cell, with no inset.
    */
   createVisual(cellSize: number): Group;
 }
@@ -272,7 +276,7 @@ export interface RenderInspection {
   /**
    * World-space geometry of the single ground backdrop as plain data, or `null`
    * after `dispose`. `sizeX`/`sizeZ` are its full extents along world X/Z and
-   * `center` its world position (below the terrain plates). It is sized from the
+   * `center` its world position (below the block layer). It is sized from the
    * frustum's projected footprint with an overshoot (see
    * {@link backdropHalfExtents}). Tests can prove the floor silhouette never
    * reaches the viewport edge at any yaw or zoom.
@@ -359,9 +363,9 @@ export interface RenderInspection {
     /**
      * Horizontal footprint of the node's visual, measured from the real
      * world-space AABB the same way {@link visualTopY} measures height (the
-     * node's own authoritative transform cancels). For every terrain appearance
+     * node's own authoritative transform cancels). For every full-cell block
      * this is exactly the grid `cellSize`, which is the "no shrink, no seams"
-     * proof: a reintroduced per-terrain inset changes this measured value.
+     * proof: a reintroduced inset changes this measured value.
      */
     footprintX: number;
     footprintZ: number;
@@ -443,6 +447,12 @@ export interface RenderInspection {
     valid: boolean | null;
     colour: number;
     occupiedCellCount: number;
+    /**
+     * Whether `position` is the footprint's BASE (default) or its CENTRE.
+     * A block ghost is centre-anchored because a block node root sits at the
+     * cell centre; entity ghosts stay base-anchored.
+     */
+    pivot: 'base' | 'center';
   } | null;
 }
 
@@ -471,12 +481,12 @@ export interface RuntimeGridSpec {
 export const DEFAULT_CELL_SIZE = 1;
 
 /**
- * Single, layer-wide lift of the `GridOverlay` above the terrain surface so the
- * overlay's lines do not z-fight with the plates.
+ * Single, layer-wide lift of the `GridOverlay` above the block tops so the
+ * overlay's lines do not z-fight with the block visuals.
  *
  * This is an OVERLAY LIFT, not a seam fix: it is one constant for the whole
- * layer (never per-tile, never per-terrain) and says nothing about the terrain
- * geometry, which stays exactly cell-sized and continuous.
+ * layer (never per-cell) and says nothing about the block geometry, which stays
+ * exactly cell-sized and continuous.
  */
 const GRID_OVERLAY_LIFT = 0.05;
 
@@ -487,7 +497,9 @@ const GRID_OVERLAY_LIFT = 0.05;
  * runtime maps it to a colour and never re-decides it. `position`/`rotation` are
  * the client's snapped candidate or the server's `resolvedTransform`, and
  * `footprintX`/`footprintZ`/`height` are catalogue geometry. `occupiedCells` is
- * the server's occupancy report and is used only for a highlight.
+ * the server's occupancy report and is used only for a highlight. `pivot`
+ * chooses whether `position` is the footprint's base (default) or its centre: a
+ * block node root is the cell centre, so a block ghost sets `'center'`.
  */
 export interface PlacementGhost {
   position: { x: number; y: number; z: number };
@@ -499,6 +511,8 @@ export interface PlacementGhost {
   valid: boolean | null;
   /** Cells the server reported as occupied; presentation-only highlight. */
   occupiedCells?: readonly { x: number; y: number; z: number }[];
+  /** Where `position` anchors the box height: base (default) or centre. */
+  pivot?: 'base' | 'center';
 }
 
 /**
@@ -582,17 +596,19 @@ export interface RenderRuntime {
    * to plain pick data:
    *
    * 1. a registered `object`-layer node visual under the ray ->
-   *    `{ kind: 'node', nodeId, point }` (terrain `base` plates are the visible
-   *    ground and are never nodes here);
+   *    `{ kind: 'node', nodeId, point, normal }`. Blocks are object-layer and
+   *    ARE the visible ground, so a block hit reports a node AND its ray point;
+   *    the caller turns an entity node into an interact intent and any other
+   *    node (a block) into a move intent toward the point;
    * 2. otherwise the mathematical ground plane (`y = bounds.min.y`) ->
-   *    `{ kind: 'ground', point }`;
+   *    `{ kind: 'ground', point }` for cells with no block under the ray;
    * 3. otherwise `null`.
    *
-   * A node hit always reports the ray intersection `point` alongside the opaque
-   * `nodeId`. The runtime cannot tell an entity node from a surface node, so the
-   * caller decides what to do with it: an entity node becomes an interact
-   * intent, any other node (a raised surface) becomes a move intent toward the
-   * clicked point, exactly like the ground.
+   * A node hit always reports the ray intersection `point` and the face's
+   * world-space `normal` alongside the opaque `nodeId`. The runtime cannot tell
+   * an entity node from a block node, so the caller decides what to do with it:
+   * an entity node becomes an interact intent, any other node (a block) becomes
+   * a move intent toward the clicked point, exactly like the ground.
    *
    * A ground hit outside `bounds` returns `null`: there is no clamping and no
    * gameplay rule here. Node visuals win over the ground even when the ground is
@@ -1029,7 +1045,7 @@ function orbitDistance(
  *   margin. It is additionally clamped below the nearest VISIBLE ground depth so
  *   the backdrop can never be clipped on-screen. `far` is derived from the
  *   visible ground footprint (1.2x the farthest viewport ground corner plus 1),
- *   so terrain and backdrop stay inside the frustum.
+ *   so blocks and backdrop stay inside the frustum.
  *
  * Honest consequence of the fixed FOV: the world's projected OUTLINE still
  * varies with yaw, because a square world seen edge-on subtends a narrower width
@@ -1209,148 +1225,6 @@ export function backdropHalfExtents(options: {
 // Prefab realisation (standard primitives only; no external art)
 // ---------------------------------------------------------------------------
 
-/** A ground plate: a thin box whose top surface sits at `surfaceY`. */
-function createPlate(size: number, colour: number, surfaceY: number): Mesh {
-  const plate = new Mesh(new BoxGeometry(size, 0.2, size), material(colour));
-  // Top at `surfaceY`, so the box centre is 0.1 below it.
-  plate.position.y = surfaceY - 0.1;
-  plate.receiveShadow = true;
-  return plate;
-}
-
-/**
- * Grass: one FULL-cell plate, differentiated from other terrain by colour alone.
- *
- * Every terrain plate is exactly `cellSize` on both axes so neighbouring cells
- * share their edges exactly and the surface is continuous. There is deliberately
- * no inset and no per-terrain shrink anywhere: the old "dark ground shows through
- * as grid gaps" technique is gone, and grid lines are now an independent
- * presentation layer (the `GridOverlay`).
- */
-function createGrassVisual(cellSize: number): Group {
-  const group = new Group();
-  group.add(createPlate(cellSize, 0x5cab3f, 0));
-  return group;
-}
-
-/**
- * Path: a full-cell base recessed by a small vertical step, differentiated by
- * MATERIAL ONLY.
- *
- * The base keeps the FULL footprint, so the step is vertical only (allowed) and
- * path neighbours still share edges exactly. There is deliberately no raised
- * inlay: a per-cell shrunken flat pad (the old 0.7 plate) reads as a *smaller
- * tile*, which is precisely the artefact this layer must not produce. Richer
- * terrain differentiation belongs to real terrain art (a texture/atlas or a
- * continuous terrain mesh), not to a per-cell inset.
- */
-function createPathVisual(cellSize: number): Group {
-  const group = new Group();
-  group.add(createPlate(cellSize, 0xc2a76b, -0.03));
-  return group;
-}
-
-/**
- * Blocked: a full-cell plate plus a rock decoration resting ON the plate. The
- * rock is smaller, but the ground plate under it is the full cell.
- */
-function createBlockedVisual(cellSize: number): Group {
-  const group = new Group();
-  group.add(createPlate(cellSize, 0x454545, 0));
-  const rock = new Mesh(new IcosahedronGeometry(0.32, 0), material(0x757575));
-  rock.position.y = 0.24;
-  rock.castShadow = true;
-  rock.receiveShadow = true;
-  group.add(rock);
-  return group;
-}
-
-/**
- * Surface slab thickness, in world units.
- *
- * The bridge scales a surface node's local X/Z to the patch's full edge lengths
- * and leaves local Y at 1, so this is the real rendered thickness. It is thin and
- * floating so the demo platform reads as a raised deck with visible sides and
- * clear headroom underneath: the Manager authors NO side colliders, so an actor
- * walks under the platform at the ground plane and the slab must not look like a
- * solid block down to the floor.
- */
-const SURFACE_SLAB_THICKNESS = 0.25;
-
-/**
- * One non-ground surface visual: a unit-footprint slab whose TOP face is the
- * node's local `y = 0` plane.
- *
- * The bridge's surface transform scales local X/Z to the patch's full edge
- * lengths and leaves local Y at 1, so the slab's top is exactly the surface plane
- * and its thickness hangs below it. `platform`/`ramp`/`bridge` share this shape
- * and differ only by colour; a ramp is the same slab tilted by the transform, so
- * a future bridge deck needs no new code. This is deliberately the STANDARD 3D
- * transform path: no new Render ISA primitive, no height/level field.
- */
-function createSurfaceSlabVisual(colour: number): Group {
-  const group = new Group();
-  const slab = new Mesh(
-    new BoxGeometry(1, SURFACE_SLAB_THICKNESS, 1),
-    material(colour, { roughness: 0.85 }),
-  );
-  // Top face at local y = 0; the slab body extends downward by its thickness.
-  slab.position.y = -SURFACE_SLAB_THICKNESS / 2;
-  slab.castShadow = true;
-  slab.receiveShadow = true;
-  group.add(slab);
-  return group;
-}
-
-/** Raised flat deck (`platform`): the shared floating slab in a wood tone. */
-function createPlatformVisual(): Group {
-  return createSurfaceSlabVisual(0x8a6a3f);
-}
-
-/** Tilted traversal patch (`ramp`): the same slab, tilted by the bridge transform. */
-function createRampVisual(): Group {
-  return createSurfaceSlabVisual(0x9c7b4a);
-}
-
-/** Deck that may sit above another surface (`bridge`): the same slab, no new code. */
-function createBridgeVisual(): Group {
-  return createSurfaceSlabVisual(0xa8895c);
-}
-
-/**
- * Water: a full-cell plate recessed by a small vertical step (a pond bank), plus
- * a full-cell shallow sheen on its surface. The recess and the sheen are both
- * full-footprint, never an inset, so water neighbours share edges exactly. Opaque
- * on purpose: the depth buffer resolves it, not a transparent pass.
- */
-function createWaterVisual(cellSize: number): Group {
-  const group = new Group();
-  // Slightly shinier than the land plates: material differentiation that does
-  // not touch the horizontal footprint.
-  const pond = new Mesh(
-    new BoxGeometry(cellSize, 0.2, cellSize),
-    material(0x2f6fb0, { roughness: 0.25, metalness: 0.1 }),
-  );
-  // Top at -0.06, so the box centre is 0.1 below it: a full-footprint vertical
-  // step (a pond bank), not an inset.
-  pond.position.y = -0.16;
-  pond.receiveShadow = true;
-  group.add(pond);
-  // A FULL-cell shallow sheen, not a smaller pad: a per-cell shrunken patch reads
-  // as a shrunken tile (the same artefact the path inlay had). Because it is
-  // full-cell, neighbouring water sheens meet at their edges and the surface stays
-  // continuous.
-  const sheen = new Mesh(
-    new BoxGeometry(cellSize, 0.02, cellSize),
-    material(0x63a9e0, { roughness: 0.15, metalness: 0.05 }),
-  );
-  // Top at -0.04, i.e. 0.02 above the pond surface, so it never z-fights.
-  sheen.position.y = -0.05;
-  sheen.receiveShadow = true;
-  group.add(sheen);
-  return group;
-}
-
 /**
  * Character placeholder: body + head + a facing marker on the local `+z` front,
  * anchored at the feet. Its silhouette and its facing are both readable, and it
@@ -1525,7 +1399,7 @@ function buildGridOverlay(
  * Both are authored as ONE shared unit box geometry and scaled/positioned per
  * call, so a pointer-move stream never allocates geometry. The box draws on top
  * (`depthTest: false`) because it is UI, not world geometry, and must not be
- * occluded by the terrain a placement would replace.
+ * occluded by the blocks a placement would replace.
  */
 function buildPlacementGhost(): {
   group: Group;
@@ -1642,9 +1516,9 @@ function measureVisualTopY(visual: Object3D): number {
  * catalogue's `scale` on a loaded model all contribute. The node's own
  * authoritative world transform cancels, so this is the visual's own footprint.
  *
- * This is the seamlessness proof: a full-cell terrain plate measures exactly the
- * grid `cellSize` on both axes, so any per-terrain inset shows up here as a
- * measured shrink rather than passing inspection unnoticed.
+ * This is the seamlessness proof: a full-cell block measures exactly the grid
+ * `cellSize` on both axes, so any inset shows up here as a measured shrink
+ * rather than passing inspection unnoticed.
  */
 function measureVisualFootprint(visual: Object3D): { x: number; z: number } {
   visual.updateWorldMatrix(true, true);
@@ -1740,45 +1614,6 @@ function skeletonIdOf(visual: Object3D): string | null {
 }
 
 const PREFABS: Readonly<Record<string, Prefab>> = {
-  // Legacy terrain / surface visuals. The block-spatial bridge no longer emits
-  // these appearance ids (blocks are the world geometry now), but the runtime
-  // keeps the prefabs so an older/looser caller still renders something and the
-  // existing runtime coverage stays meaningful.
-  'appearance.terrain.grass': {
-    group: 'Terrain',
-    defaultAnimation: IDLE_ANIMATION,
-    createVisual: createGrassVisual,
-  },
-  'appearance.terrain.path': {
-    group: 'Terrain',
-    defaultAnimation: IDLE_ANIMATION,
-    createVisual: createPathVisual,
-  },
-  'appearance.terrain.blocked': {
-    group: 'Terrain',
-    defaultAnimation: IDLE_ANIMATION,
-    createVisual: createBlockedVisual,
-  },
-  'appearance.terrain.water': {
-    group: 'Terrain',
-    defaultAnimation: IDLE_ANIMATION,
-    createVisual: createWaterVisual,
-  },
-  'appearance.surface.platform': {
-    group: 'Terrain',
-    defaultAnimation: IDLE_ANIMATION,
-    createVisual: createPlatformVisual,
-  },
-  'appearance.surface.ramp': {
-    group: 'Terrain',
-    defaultAnimation: IDLE_ANIMATION,
-    createVisual: createRampVisual,
-  },
-  'appearance.surface.bridge': {
-    group: 'Terrain',
-    defaultAnimation: IDLE_ANIMATION,
-    createVisual: createBridgeVisual,
-  },
   'appearance.character': {
     group: 'Actors',
     defaultAnimation: IDLE_ANIMATION,
@@ -1878,10 +1713,10 @@ function normalizeYawDegrees(degrees: number): number {
 export function createThreeRuntime(options: {
   bounds: RuntimeWorldBounds;
   /**
-   * Grid spec the terrain footprint and the `GridOverlay` are built from. When
-   * omitted the runtime derives the default grid from `bounds` with
-   * {@link DEFAULT_CELL_SIZE}; the real client passes its view-model grid through
-   * so a non-default `cellSize`/origin is honoured.
+   * Grid spec the `GridOverlay` is built from. When omitted the runtime derives
+   * the default grid from `bounds` with {@link DEFAULT_CELL_SIZE}; the real
+   * client passes its view-model grid through so a non-default
+   * `cellSize`/origin is honoured.
    */
   grid?: RuntimeGridSpec;
   /** Injectable model loader; defaults to the real `GLTFLoader` (`loadGlbTemplate`). */
@@ -1917,7 +1752,7 @@ export function createThreeRuntime(options: {
   let disposed = false;
 
   const scene = new Scene();
-  // Fill the whole viewport, including the area outside the finite ground plate,
+  // Fill the whole viewport, including the area outside the finite block ground,
   // with the page-family background instead of the WebGL default black.
   const background = new Color(SCENE_BACKGROUND_COLOUR);
   scene.background = background;
@@ -2031,7 +1866,7 @@ export function createThreeRuntime(options: {
 
   // Single ground backdrop. The geometry stays a unit plane so reframing only
   // rescales ONE mesh instead of rebuilding/disposing geometry every frame. It
-  // lies in the XZ plane just below the terrain plates.
+  // lies in the XZ plane just below the block layer.
   const groundGeometry = new PlaneGeometry(1, 1);
   const groundMaterial = new MeshStandardMaterial({ color: 0x241c14 });
   let ground: Mesh | null = new Mesh(groundGeometry, groundMaterial);
@@ -2050,8 +1885,8 @@ export function createThreeRuntime(options: {
   // texel, so most of the floor was shaded by a value that is not its own,
   // producing a hard straight boundary in WORLD space. Projected through a yawed
   // camera that boundary reads exactly as a floor that tapers away / is seen from
-  // below (the false "trapezoid"). The TERRAIN plates keep receiving shadows:
-  // they are the visible lit ground and lie inside the +-10 frustum, as do all
+  // below (the false "trapezoid"). The BLOCKS keep receiving shadows: they are
+  // the visible lit ground and lie inside the +-10 frustum, as do all
   // props (the world is only +-6 here), so nothing else meaningful is outside it.
   // Do NOT restore receiveShadow here and do NOT shrink the backdrop back to a
   // bounds-sized plane (that reintroduces the phase-10 clipped floor edge).
@@ -2666,7 +2501,7 @@ export function createThreeRuntime(options: {
           : {
               // The backdrop is a unit `PlaneGeometry` scaled on local X/Y, so
               // the full world extent is the geometry size times the real mesh
-              // scale, read back off the mesh that lives below the terrain.
+              // scale, read back off the mesh that lives below the blocks.
               sizeX: groundGeometry.parameters.width * ground.scale.x,
               sizeZ: groundGeometry.parameters.height * ground.scale.y,
               center: {
@@ -2739,6 +2574,7 @@ export function createThreeRuntime(options: {
               valid: placementGhostState.valid,
               colour: ghostColourFor(placementGhostState.valid),
               occupiedCellCount: placementGhostState.occupiedCells?.length ?? 0,
+              pivot: placementGhostState.pivot ?? 'base',
             },
     };
   }
@@ -2923,6 +2759,7 @@ export function createThreeRuntime(options: {
             footprintZ: spec.footprintZ,
             height: spec.height,
             valid: spec.valid,
+            pivot: spec.pivot ?? 'base',
             occupiedCells: (spec.occupiedCells ?? []).map((cell) => ({
               x: cell.x,
               y: cell.y,
@@ -2944,11 +2781,13 @@ export function createThreeRuntime(options: {
       spec.rotation.z,
       spec.rotation.w,
     );
-    // Unit box scaled to the footprint/height and lifted so the transform is the
-    // footprint's geometric centre (pivot 'center') with the height rising from
-    // the transform's y (the placement base).
+    // Unit box scaled to the footprint/height. `pivot` decides whether the
+    // transform is the footprint's geometric centre with the height rising from
+    // it (base, the default) or the box's centre (centre, used by a block ghost
+    // whose node root is the cell centre).
+    const pivot = spec.pivot ?? 'base';
     ghost.box.scale.set(spec.footprintX, spec.height, spec.footprintZ);
-    ghost.box.position.set(0, spec.height / 2, 0);
+    ghost.box.position.set(0, pivot === 'center' ? 0 : spec.height / 2, 0);
     ghost.boxMaterial.color.setHex(ghostColourFor(spec.valid));
 
     syncGhostOccupied(spec.occupiedCells ?? []);
@@ -2957,8 +2796,11 @@ export function createThreeRuntime(options: {
   // Reused across picks so a drag/click loop does not allocate per query.
   const raycaster = new Raycaster();
   const pickNdc = new Vector2();
-  // The mathematical ground plane at the world's floor; independent of the tile
-  // plates, which are full-footprint and seamless by construction.
+  const normalMatrix = new Matrix3();
+  const worldNormal = new Vector3();
+  // The mathematical ground plane at the world's floor. Blocks are object-layer
+  // node visuals and ARE the visible ground, so this plane is only reached where
+  // the ray finds no block (an air cell) or outside the block world.
   const groundPlane = new Plane(new Vector3(0, 1, 0), -groundY);
   const groundHit = new Vector3();
 
@@ -2984,9 +2826,10 @@ export function createThreeRuntime(options: {
 
     // 1. Registered node visuals win outright, even over a nearer ground hit, so
     //    a click on a prop never falls through to a move intent. Only the
-    //    `object` layer is pickable: terrain plates live in `base` and ARE the
-    //    visible ground, so raycasting them would shadow the mathematical-plane
-    //    pick and a ground click could never produce a move intent.
+    //    `object` layer is pickable. Blocks are object-layer and ARE the pickable
+    //    ground, so a click on a block yields a node hit whose `point` the UI
+    //    turns into a move intent; the mathematical-plane fallback below only
+    //    fires where there is no block under the ray.
     const roots: Object3D[] = [];
     for (const node of nodes.values()) {
       if (node.layer === 'object' && node.root.visible) {
@@ -2998,10 +2841,20 @@ export function createThreeRuntime(options: {
       const firstHit = nodeHits[0];
       const hitNodeId = nodeIdForObject(firstHit.object);
       if (hitNodeId !== null) {
+        // Transform the face normal into world space so the caller can classify
+        // a face without knowing the node's rotation or scale.
+        const faceNormal = firstHit.face?.normal;
+        let normal = { x: 0, y: 1, z: 0 };
+        if (faceNormal !== undefined) {
+          normalMatrix.getNormalMatrix(firstHit.object.matrixWorld);
+          worldNormal.copy(faceNormal).applyMatrix3(normalMatrix).normalize();
+          normal = { x: worldNormal.x, y: worldNormal.y, z: worldNormal.z };
+        }
         return {
           kind: 'node',
           nodeId: hitNodeId,
           point: { x: firstHit.point.x, y: firstHit.point.y, z: firstHit.point.z },
+          normal,
         };
       }
     }

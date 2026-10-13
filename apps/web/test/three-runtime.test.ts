@@ -59,12 +59,12 @@ const nodeA = 'node-a' as NodeId;
 const nodeB = 'node-b' as NodeId;
 const appearanceCharacter = 'appearance.character' as AppearanceId;
 const appearanceTree = 'appearance.tree' as AppearanceId;
-const appearanceGrass = 'appearance.terrain.grass' as AppearanceId;
-const appearancePath = 'appearance.terrain.path' as AppearanceId;
-const appearanceWater = 'appearance.terrain.water' as AppearanceId;
-const appearanceBlocked = 'appearance.terrain.blocked' as AppearanceId;
-const appearanceSurfacePlatform = 'appearance.surface.platform' as AppearanceId;
-const appearanceSurfaceRamp = 'appearance.surface.ramp' as AppearanceId;
+// Block appearances (the retired phase-14 `appearance.terrain.*` /
+// `appearance.surface.*` prefabs were deleted; blocks are the world geometry).
+const appearanceGrass = 'appearance.block.grass' as AppearanceId;
+const appearancePath = 'appearance.block.path' as AppearanceId;
+const appearanceWater = 'appearance.block.water' as AppearanceId;
+const appearanceStone = 'appearance.block.stone' as AppearanceId;
 
 /** Default 12x12 ground, 8 units tall, centred on the world origin. */
 const BOUNDS = { min: { x: -6, y: 0, z: -6 }, max: { x: 6, y: 8, z: 6 } } as const;
@@ -450,7 +450,7 @@ describe('three runtime animation completion', () => {
 });
 
 describe('three runtime depth and occlusion', () => {
-  /** A 12x12 ground of plates plus two trees and the actor, all in world space. */
+  /** A 12x12 block ground plus two trees and the actor, all in world space. */
   function makeWorldFrame(): RenderFrame {
     const frame: NodeCreateCommand[] = [];
     for (let cellZ = 0; cellZ < 12; cellZ += 1) {
@@ -459,7 +459,7 @@ describe('three runtime depth and occlusion', () => {
         if (cellX === 3 && cellZ === 3) {
           appearance = appearanceWater;
         } else if (cellX === 2 && cellZ === 8) {
-          appearance = appearanceBlocked;
+          appearance = appearanceStone;
         } else if (cellZ === 1 || cellZ === 6) {
           appearance = appearancePath;
         }
@@ -485,7 +485,7 @@ describe('three runtime depth and occlusion', () => {
     return frame;
   }
 
-  it('applies the 12x12 map + entities frame and groups 144 terrain / 2 trees / 1 actor', () => {
+  it('applies the 12x12 map + entities frame and groups 144 blocks / 2 trees / 1 actor', () => {
     const runtime = makeRuntime();
     runtime.apply(makeWorldFrame());
 
@@ -505,8 +505,8 @@ describe('three runtime depth and occlusion', () => {
     runtime.apply(makeWorldFrame());
 
     // The bridge sends UNIT_SCALE for every node, and the runtime must not invent
-    // a per-node/per-terrain scale. Any anomalous scale would break this, and a
-    // scale is exactly what would fake a per-terrain footprint change.
+    // a per-node/per-block scale. Any anomalous scale would break this, and a
+    // scale is exactly what would fake a per-block footprint change.
     for (const node of runtime.inspect().nodes) {
       expect(node.scale).toEqual({ x: 1, y: 1, z: 1 });
     }
@@ -772,7 +772,7 @@ describe('three runtime camera rig', () => {
 });
 
 describe('three runtime shadows', () => {
-  it('derives cast/receive flags from the real meshes: terrain receives, a tree casts', () => {
+  it('derives cast/receive flags from the real meshes: a block receives and casts, a tree casts', () => {
     const runtime = makeRuntime();
     runtime.apply([
       createCommand('tile:0,0' as NodeId, 'base', appearanceGrass),
@@ -790,7 +790,8 @@ describe('three runtime shadows', () => {
 
     const grass = findNode(runtime, 'tile:0,0' as NodeId);
     expect(grass.receivesShadow).toBe(true);
-    expect(grass.castsShadow).toBe(false);
+    // A full-cell block is a real volume, so it casts as well as receives.
+    expect(grass.castsShadow).toBe(true);
     const tree = findNode(runtime, 'entity:tree' as NodeId);
     expect(tree.castsShadow).toBe(true);
     expect(tree.receivesShadow).toBe(false);
@@ -799,7 +800,7 @@ describe('three runtime shadows', () => {
     runtime.dispose();
   });
 
-  it('keeps the oversized backdrop out of shadowing while the terrain still receives', () => {
+  it('keeps the oversized backdrop out of shadowing while the block layer still receives', () => {
     const runtime = makeRuntime();
     runtime.apply([createCommand('tile:0,0' as NodeId, 'base', appearanceGrass)]);
 
@@ -817,8 +818,8 @@ describe('three runtime shadows', () => {
     expect(backdrop.receivesShadow).toBe(false);
     expect(backdrop.castsShadow).toBe(false);
 
-    // The terrain plates are inside the shadow frustum and remain the visible
-    // lit ground, so they must KEEP receiving shadows.
+    // The block layer is inside the shadow frustum and remains the visible lit
+    // ground, so it must KEEP receiving shadows.
     expect(findNode(runtime, 'tile:0,0' as NodeId).receivesShadow).toBe(true);
 
     runtime.dispose();
@@ -1035,7 +1036,7 @@ describe('three runtime buckets', () => {
     frame.push(createCommand('entity:actor' as NodeId, 'object', appearanceCharacter, { x: 1, y: 0, z: 1 }));
     runtime.apply(frame);
 
-    expect(bucketCount(runtime, 'base:appearance.terrain.grass')).toBe(100);
+    expect(bucketCount(runtime, 'base:appearance.block.grass')).toBe(100);
     expect(bucketCount(runtime, 'object:appearance.character')).toBe(1);
     expect(runtime.inspect().buckets).toHaveLength(2);
 
@@ -1043,17 +1044,17 @@ describe('three runtime buckets', () => {
       { type: 'appearance.set', nodeId: 'tile:0,0' as NodeId, appearance: appearancePath },
     ]);
 
-    expect(bucketCount(runtime, 'base:appearance.terrain.grass')).toBe(99);
-    expect(bucketCount(runtime, 'base:appearance.terrain.path')).toBe(1);
+    expect(bucketCount(runtime, 'base:appearance.block.grass')).toBe(99);
+    expect(bucketCount(runtime, 'base:appearance.block.path')).toBe(1);
 
     runtime.apply([{ type: 'node.destroy', nodeId: 'tile:1,0' as NodeId }]);
 
-    expect(bucketCount(runtime, 'base:appearance.terrain.grass')).toBe(98);
+    expect(bucketCount(runtime, 'base:appearance.block.grass')).toBe(98);
     runtime.apply([
       { type: 'appearance.set', nodeId: 'tile:0,0' as NodeId, appearance: appearanceGrass },
     ]);
     expect(runtime.inspect().buckets.map((bucket) => bucket.key)).not.toContain(
-      'base:appearance.terrain.path',
+      'base:appearance.block.path',
     );
 
     runtime.dispose();
@@ -1076,169 +1077,8 @@ describe('three runtime buckets', () => {
   });
 });
 
-describe('three runtime terrain differentiation (phase 9)', () => {
-  it('differentiates path by a full-cell recessed step, never by a shrunken raised pad', () => {
-    const runtime = makeRuntime();
-    runtime.apply([
-      createCommand('tile:0,0' as NodeId, 'base', appearanceGrass, { x: 0, y: 0, z: 0 }),
-      createCommand('tile:1,0' as NodeId, 'base', appearancePath, { x: 1, y: 0, z: 0 }),
-    ]);
-
-    const grass = findNode(runtime, 'tile:0,0' as NodeId);
-    const path = findNode(runtime, 'tile:1,0' as NodeId);
-
-    // The allowed cue is a VERTICAL step on a FULL-cell plate (path is paved slightly
-    // below the grass). A per-cell raised inlay (the old `cellSize * 0.7` plate) is
-    // forbidden: a shrunken flat pad inside every cell reads as a smaller tile, which
-    // is exactly the artefact phase 9 removed. This assertion also fails if such a pad
-    // is reintroduced, because the pad would raise `visualTopY` above the grass surface.
-    expect(grass.visualTopY).toBeCloseTo(0, 6);
-    expect(path.visualTopY).toBeLessThan(grass.visualTopY);
-
-    // ...and neither cue may touch the horizontal footprint, so neighbours share edges.
-    expect(grass.footprintX).toBeCloseTo(DEFAULT_CELL_SIZE, 6);
-    expect(grass.footprintZ).toBeCloseTo(DEFAULT_CELL_SIZE, 6);
-    expect(path.footprintX).toBeCloseTo(DEFAULT_CELL_SIZE, 6);
-    expect(path.footprintZ).toBeCloseTo(DEFAULT_CELL_SIZE, 6);
-
-    runtime.dispose();
-  });
-});
-
-describe('three runtime seamless terrain footprint (phase 9)', () => {
-  const TERRAIN_APPEARANCES = [
-    appearanceGrass,
-    appearancePath,
-    appearanceBlocked,
-    appearanceWater,
-  ];
-
-  it('measures every terrain plate at exactly cellSize on both axes (no inset)', () => {
-    const runtime = makeRuntime();
-    const frame: RenderFrame = TERRAIN_APPEARANCES.map((appearance, index) =>
-      createCommand(`tile:${index},0` as NodeId, 'base', appearance, {
-        x: index,
-        y: 0,
-        z: 0,
-      }),
-    );
-    runtime.apply(frame);
-
-    for (const appearance of TERRAIN_APPEARANCES) {
-      const node = runtime
-        .inspect()
-        .nodes.find((candidate) => candidate.appearance === appearance);
-      if (node === undefined) {
-        throw new Error(`terrain ${appearance} was not created`);
-      }
-      // Measured off the real geometry, never the intended value: reintroducing
-      // any per-terrain inset (the old 0.96 / 0.98 / 0.70 footprint plates) makes
-      // this fail, which is the "no shrink, no seams" proof.
-      expect(node.footprintX).toBeCloseTo(DEFAULT_CELL_SIZE, 6);
-      expect(node.footprintZ).toBeCloseTo(DEFAULT_CELL_SIZE, 6);
-    }
-
-    runtime.dispose();
-  });
-
-  it('honours a non-default grid cellSize for the terrain footprint', () => {
-    const cellSize = 2;
-    const runtime = createThreeRuntime({
-      bounds: BOUNDS,
-      grid: { origin: { x: -6, y: 0, z: -6 }, width: 6, depth: 6, cellSize },
-    });
-    runtime.apply([
-      createCommand('tile:0,0' as NodeId, 'base', appearanceGrass, { x: 0, y: 0, z: 0 }),
-      createCommand('tile:1,0' as NodeId, 'base', appearancePath, {
-        x: cellSize,
-        y: 0,
-        z: 0,
-      }),
-    ]);
-
-    for (const node of runtime.inspect().nodes) {
-      expect(node.footprintX).toBeCloseTo(cellSize, 6);
-      expect(node.footprintZ).toBeCloseTo(cellSize, 6);
-    }
-
-    runtime.dispose();
-  });
-});
-
-describe('three runtime surface prefabs (phase 14)', () => {
-  /** Hardcoded output of the bridge's `surfaceRenderTransform` for the demo platform. */
-  const PLATFORM_TRANSFORM: RenderTransform = {
-    position: { x: 3.5, y: 2, z: -4.5 },
-    rotation: IDENTITY,
-    scale: { x: 3, y: 1, z: 1 },
-  };
-
-  it('realises a platform as a Terrain-group object slab with its top face on the surface plane', () => {
-    const runtime = makeRuntime();
-    runtime.apply([
-      createCommand('surface:surface-platform' as NodeId, 'object', appearanceSurfacePlatform, {
-        x: 3.5,
-        y: 2,
-        z: -4.5,
-      }),
-    ]);
-    // Overwrite the transform with the real bridge-derived one and then read back
-    // what the scene graph actually contains.
-    runtime.apply([
-      { type: 'transform.set', nodeId: 'surface:surface-platform' as NodeId, transform: PLATFORM_TRANSFORM },
-    ]);
-
-    const node = findNode(runtime, 'surface:surface-platform' as NodeId);
-    expect(node.group).toBe('Terrain');
-    expect(node.layer).toBe('object');
-    expect(node.appearance).toBe(appearanceSurfacePlatform);
-    expect(node.world).toEqual({ x: 3.5, y: 2, z: -4.5 });
-    expect(node.scale).toEqual({ x: 3, y: 1, z: 1 });
-    // The prefab is a unit-footprint slab, so its own measured footprint is 1x1;
-    // the bridge's X/Z scale turns that into the patch's 3 x 1 full edges.
-    expect(node.footprintX).toBeCloseTo(1, 6);
-    expect(node.footprintZ).toBeCloseTo(1, 6);
-    // Top face at local y = 0 => the top is exactly the surface plane (y = 2).
-    expect(node.visualTopY).toBeCloseTo(0, 6);
-    // The platform slab is opaque; it neither casts nor receives on the backdrop.
-    expect(node.castsShadow).toBe(true);
-
-    runtime.dispose();
-  });
-
-  it('tilts a ramp by applying the bridge rotation to the same slab prefab', () => {
-    const runtime = makeRuntime();
-    // A rotation from the bridge's `surfaceRenderTransform` for the demo ramp:
-    // local X -> +X, local Y -> up-normal (0, 0.8660, 0.5), local Z -> (0, -0.5, 0.8660).
-    const rampRotation: Quat = { x: 0.25881904510252074, y: 0, z: 0, w: 0.9659258262890683 };
-    runtime.apply([
-      {
-        type: 'node.create',
-        layer: 'object',
-        nodeId: 'surface:surface-ramp' as NodeId,
-        appearance: appearanceSurfaceRamp,
-        transform: {
-          position: { x: 3.5, y: 1, z: -2.267949192431123 },
-          rotation: rampRotation,
-          scale: { x: 3, y: 1, z: 4 },
-        },
-        visible: true,
-      },
-    ]);
-
-    const node = findNode(runtime, 'surface:surface-ramp' as NodeId);
-    expect(node.appearance).toBe(appearanceSurfaceRamp);
-    expect(node.group).toBe('Terrain');
-    expect(node.rotation.x).toBeCloseTo(rampRotation.x, 9);
-    expect(node.rotation.w).toBeCloseTo(rampRotation.w, 9);
-    expect(node.scale).toEqual({ x: 3, y: 1, z: 4 });
-
-    runtime.dispose();
-  });
-});
-
 describe('three runtime grid overlay (phase 9)', () => {
-  /** 100 grass tiles, plus the world, so the overlay is provably not per-tile. */
+  /** 100 grass blocks, plus the world, so the overlay is provably not per-block. */
   function hundredTileFrame(): RenderFrame {
     const frame: NodeCreateCommand[] = [];
     for (let cellZ = 0; cellZ < 10; cellZ += 1) {
@@ -1282,13 +1122,13 @@ describe('three runtime grid overlay (phase 9)', () => {
     runtime.dispose();
   });
 
-  it('holds exactly one line object and one marker regardless of tile count', () => {
+  it('holds exactly one line object and one marker regardless of block count', () => {
     const runtime = makeRuntime();
     runtime.apply(hundredTileFrame());
 
-    // 100 terrain nodes exist, yet the overlay is still one line object plus one
-    // reusable marker: it is built from the grid spec, not from the tiles. A
-    // per-tile implementation would report 100 here.
+    // 100 block nodes exist, yet the overlay is still one line object plus one
+    // reusable marker: it is built from the grid spec, not from the blocks. A
+    // per-block implementation would report 100 here.
     expect(runtime.inspect().nodes).toHaveLength(100);
     const overlay = runtime.inspect().gridOverlay;
     expect(overlay.lineObjectCount).toBe(1);
@@ -1396,8 +1236,8 @@ describe('three runtime rotation stability (phase 11: perspective)', () => {
 describe('three runtime unbounded backdrop and framing margin (phase 11)', () => {
   const MIN_ZOOM = RENDER_CAMERA.minZoom;
 
-  /** 12x12 grass tiles whose combined footprint is exactly the world bounds. */
-  function tileWorldFrame(): NodeCreateCommand[] {
+  /** 12x12 grass blocks whose combined footprint is exactly the world bounds. */
+  function blockWorldFrame(): NodeCreateCommand[] {
     const frame: NodeCreateCommand[] = [];
     for (let cellZ = 0; cellZ < 12; cellZ += 1) {
       for (let cellX = 0; cellX < 12; cellX += 1) {
@@ -1425,7 +1265,7 @@ describe('three runtime unbounded backdrop and framing margin (phase 11)', () =>
     expect(FIT_NDC).toBeLessThanOrEqual(0.95);
 
     const runtime = makeRuntime();
-    runtime.apply(tileWorldFrame());
+    runtime.apply(blockWorldFrame());
 
     for (const zoom of [1, MIN_ZOOM]) {
       runtime.setZoom(zoom);
@@ -1557,7 +1397,7 @@ describe('three runtime unbounded backdrop and framing margin (phase 11)', () =>
     runtime.dispose();
   });
 
-  it('uses one backdrop mesh, below the terrain, released on dispose', () => {
+  it('uses one backdrop mesh, below the block layer, released on dispose', () => {
     const runtime = makeRuntime();
     const backdrop = runtime.inspect().backdrop;
     expect(backdrop).not.toBeNull();
@@ -1565,7 +1405,7 @@ describe('three runtime unbounded backdrop and framing margin (phase 11)', () =>
       return;
     }
     // Far larger than a bounds-sized floor (the exact-fit floor was what showed
-    // a clipped inverted trapezoid) and below the terrain plates.
+    // a clipped inverted trapezoid) and below the block layer.
     expect(backdrop.sizeX).toBeGreaterThan((BOUNDS.max.x - BOUNDS.min.x) * 3);
     expect(backdrop.sizeZ).toBeGreaterThan((BOUNDS.max.z - BOUNDS.min.z) * 3);
     expect(backdrop.center.x).toBeCloseTo(0, 6);
@@ -1649,7 +1489,7 @@ describe('three runtime pitch clamp composition (phase 13)', () => {
 
   it('keeps the world framed, the floor edge hidden and every node unclipped at both clamp ends across yaw and zoom', () => {
     const runtime = makeRuntime();
-    // A tall prop and an actor at opposite corners, plus a terrain plate, so
+    // A tall prop and an actor at opposite corners, plus a block, so
     // "nothing is clipped" covers props/actors as well as the ground.
     runtime.apply([
       createCommand('entity:tree' as NodeId, 'object', appearanceTree, { x: 5, y: 0, z: 5 }),
@@ -1827,14 +1667,14 @@ describe('three runtime pitch clamp composition (phase 13)', () => {
 
             // (c) Nodes. While the whole world must fit, every footprint corner
             //     and visual top stays inside the frame and the clip planes. The
-            //     terrain invariants (scale 1, footprint == cellSize, no inset)
+            //     block invariants (scale 1, footprint == cellSize, no inset)
             //     hold at EVERY pitch/zoom/yaw, independent of the camera domain.
             for (const node of inspection.nodes) {
               expect(node.scale.x).toBe(1);
               expect(node.scale.y).toBe(1);
               expect(node.scale.z).toBe(1);
               if (node.layer === 'base') {
-                // Exactly one grid cell with no inset, so neighbouring plates
+                // Exactly one grid cell with no inset, so neighbouring blocks
                 // share edges and no crack opens between them.
                 expect(node.footprintX).toBeCloseTo(DEFAULT_CELL_SIZE, 9);
                 expect(node.footprintZ).toBeCloseTo(DEFAULT_CELL_SIZE, 9);
@@ -1942,7 +1782,7 @@ describe('three runtime picking', () => {
     ]);
 
     // `pick` now reports the ray intersection point with the node visual, so the
-    // UI can move onto raised surfaces; the node identity is unchanged.
+    // UI can move onto blocks; the node identity is unchanged.
     const hit = runtime.pick(0, 0);
     expect(hit).toMatchObject({ kind: 'node', nodeId: 'entity:actor' });
     if (hit?.kind === 'node') {
@@ -1987,7 +1827,7 @@ describe('three runtime picking', () => {
     ]);
 
     // `pick` now reports the ray intersection point with the node visual, so the
-    // UI can move onto raised surfaces; the node identity is unchanged.
+    // UI can move onto blocks; the node identity is unchanged.
     const hit = runtime.pick(0, 0);
     expect(hit).toMatchObject({ kind: 'node', nodeId: 'entity:tree' });
     if (hit?.kind === 'node') {
@@ -1999,10 +1839,11 @@ describe('three runtime picking', () => {
     runtime.dispose();
   });
 
-  it('does not let a base-layer terrain plate shadow the mathematical ground pick', () => {
+  it('does not let a base-layer node shadow the mathematical ground pick', () => {
     const runtime = makeRuntime();
-    // A grass plate is the visible ground at the focus. If it were raycast as a
-    // node, every ground click would pick a tile node and never reach moveTo.
+    // Only `object`-layer nodes are pickable. A `base`-layer node (the ISA keeps
+    // the layer for coarse ordering) must never shadow the mathematical plane,
+    // so the ray still resolves to a ground hit.
     runtime.apply([
       createCommand('tile:0,0' as NodeId, 'base', appearanceGrass, { x: 0, y: 0, z: 0 }),
     ]);
@@ -2017,20 +1858,17 @@ describe('three runtime picking', () => {
     runtime.dispose();
   });
 
-  it('reports the ray intersection point for a picked raised surface node', () => {
+  it('reports the ray point and world-space face normal for a picked block node', () => {
     const runtime = makeRuntime();
-    // A large platform slab raised to y = 0.5 (its top face) over the focus. The
-    // pick must hand back the opaque surface node id AND the world point where
-    // the ray met it, so the UI can emit a moveTo onto the raised geometry.
+    // A block node widened on X/Z so its TOP face is large enough for the centre
+    // ray to land on it. The pick must hand back the opaque node id, the world
+    // point, and the face normal so the editor can tell a top face from a side
+    // face (the top face targets the cell above the block).
     runtime.apply([
-      createCommand('surface:surface-platform' as NodeId, 'object', appearanceSurfacePlatform, {
-        x: 0,
-        y: 0.5,
-        z: 0,
-      }),
+      createCommand('block:0,0,0' as NodeId, 'object', appearanceGrass, { x: 0, y: 0.5, z: 0 }),
       {
         type: 'transform.set',
-        nodeId: 'surface:surface-platform' as NodeId,
+        nodeId: 'block:0,0,0' as NodeId,
         transform: {
           position: { x: 0, y: 0.5, z: 0 },
           rotation: IDENTITY,
@@ -2040,12 +1878,16 @@ describe('three runtime picking', () => {
     ]);
 
     const hit = runtime.pick(0, 0);
-    expect(hit).toMatchObject({ kind: 'node', nodeId: 'surface:surface-platform' });
+    expect(hit).toMatchObject({ kind: 'node', nodeId: 'block:0,0,0' });
     if (hit?.kind === 'node') {
       expect(Number.isFinite(hit.point.x)).toBe(true);
       expect(Number.isFinite(hit.point.z)).toBe(true);
-      // The hit lands on the raised geometry, above the ground plane.
-      expect(hit.point.y).toBeCloseTo(0.5, 6);
+      // The block's top face sits at y = 0.5 (root) + 0.5 (half a unit cube).
+      expect(hit.point.y).toBeCloseTo(1, 6);
+      // ...and the reported normal is the top face's world +Y.
+      expect(hit.normal.x).toBeCloseTo(0, 6);
+      expect(hit.normal.y).toBeCloseTo(1, 6);
+      expect(hit.normal.z).toBeCloseTo(0, 6);
     }
 
     runtime.dispose();

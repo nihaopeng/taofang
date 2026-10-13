@@ -39,7 +39,7 @@ export type {
 // UI/render layers (which may not import `@starvalley/protocol`) can resolve a
 // target cell and snap a placement ghost without re-deriving the frozen rule.
 // These answer WHERE only; placement legality stays server-side.
-export { cellOfWorldPoint, snapPlacementCentre } from './world-view-model';
+export { cellCentreOf, cellOfWorldPoint, snapPlacementCentre } from './world-view-model';
 
 export type { StreamStatus, WorldState, WorldStatus } from './world-store';
 

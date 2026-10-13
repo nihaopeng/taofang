@@ -497,6 +497,7 @@ describe('Block editing emits block.set / block.remove', () => {
       kind: 'node',
       nodeId: 'block:0,0,0' as never,
       point: { x: 0.5, y: 0.9, z: 0.5 },
+      normal: { x: 1, y: 0, z: 0 },
     };
     const canvas = await mountEditor(recorder);
     selectBlock('stone');
@@ -510,6 +511,119 @@ describe('Block editing emits block.set / block.remove', () => {
       coord: { x: 0, y: 0, z: 0 },
       kind: 'stone',
     });
+  });
+
+  it('left click on a block TOP face targets the cell above it (air cells are reachable)', async () => {
+    const recorder = createRecordingRuntime();
+    // Block at cell (0,0,0); its top face is the floor of the air cell (0,1,0).
+    recorder.pickResult = {
+      kind: 'node',
+      nodeId: 'block:0,0,0' as never,
+      point: { x: -4.5, y: 1, z: -4.5 },
+      normal: { x: 0, y: 1, z: 0 },
+    };
+    const canvas = await mountEditor(recorder);
+    selectBlock('grass');
+
+    clickCanvas(canvas, 0, 15);
+    await flush();
+
+    expect(commandBodies).toHaveLength(1);
+    expect(commandBodies[0]).toMatchObject({
+      type: 'block.set',
+      coord: { x: 0, y: 1, z: 0 },
+      kind: 'grass',
+    });
+  });
+
+  it('left click on a block SIDE face keeps targeting the hit cell', async () => {
+    const recorder = createRecordingRuntime();
+    recorder.pickResult = {
+      kind: 'node',
+      nodeId: 'block:0,0,0' as never,
+      point: { x: -4, y: 0.5, z: -4.5 },
+      normal: { x: 1, y: 0, z: 0 },
+    };
+    const canvas = await mountEditor(recorder);
+    selectBlock('stone');
+
+    clickCanvas(canvas, 0, 16);
+    await flush();
+
+    expect(commandBodies[0]).toMatchObject({
+      type: 'block.set',
+      coord: { x: 0, y: 0, z: 0 },
+      kind: 'stone',
+    });
+  });
+
+  it('two successive left clicks stack two blocks (first on the ground, then on its top face)', async () => {
+    const recorder = createRecordingRuntime();
+    const canvas = await mountEditor(recorder);
+    selectBlock('soil');
+
+    // First click: bare ground under cell (5,0,5) -> place there.
+    recorder.pickResult = { kind: 'ground', point: { x: 0.1, y: 0, z: 0.2 } };
+    clickCanvas(canvas, 0, 17);
+    await flush();
+    expect(commandBodies[0]).toMatchObject({
+      type: 'block.set',
+      coord: { x: 5, y: 0, z: 5 },
+      kind: 'soil',
+    });
+
+    // Second click: the newly placed block's TOP face -> the air cell above it.
+    recorder.pickResult = {
+      kind: 'node',
+      nodeId: 'block:5,0,5' as never,
+      point: { x: 0.5, y: 1, z: 0.5 },
+      normal: { x: 0, y: 1, z: 0 },
+    };
+    clickCanvas(canvas, 0, 18);
+    await flush();
+
+    expect(commandBodies).toHaveLength(2);
+    expect(commandBodies[1]).toMatchObject({
+      type: 'block.set',
+      coord: { x: 5, y: 1, z: 5 },
+      kind: 'soil',
+    });
+  });
+
+  it('builds the block ghost from the resolved target cell centre, not the raw pick point', async () => {
+    const recorder = createRecordingRuntime();
+    // Top face of cell (0,0,0): the resolved target is (0,1,0), whose world
+    // centre for grid origin (-5,0,-5) is (-4.5, 1.5, -4.5).
+    recorder.pickResult = {
+      kind: 'node',
+      nodeId: 'block:0,0,0' as never,
+      point: { x: -4.5, y: 1, z: -4.5 },
+      normal: { x: 0, y: 1, z: 0 },
+    };
+    const canvas = await mountEditor(recorder);
+    selectBlock('grass');
+
+    hover(canvas, 55, 55, 1);
+
+    const ghost = recorder.ghostCalls.at(-1);
+    expect(ghost).not.toBeNull();
+    expect(ghost?.position).toEqual({ x: -4.5, y: 1.5, z: -4.5 });
+    // A block node root is the cell centre, so the ghost is centre-anchored.
+    expect(ghost?.pivot).toBe('center');
+    expect(ghost?.height).toBe(1);
+  });
+
+  it('builds the block ghost from the target cell centre for a bare ground click too', async () => {
+    const recorder = createRecordingRuntime();
+    recorder.pickResult = { kind: 'ground', point: { x: 0.1, y: 0, z: 0.2 } };
+    const canvas = await mountEditor(recorder);
+    selectBlock('grass');
+
+    hover(canvas, 55, 55, 1);
+
+    // Picked point is in cell (5,0,5); its world centre is (0.5, 0.5, 0.5).
+    expect(recorder.ghostCalls.at(-1)?.position).toEqual({ x: 0.5, y: 0.5, z: 0.5 });
+    expect(recorder.ghostCalls.at(-1)?.pivot).toBe('center');
   });
 
   it('selecting air left-clicks as a removal', async () => {
@@ -655,6 +769,7 @@ describe('Placement ghost is server-authoritative', () => {
       kind: 'node',
       nodeId: 'block:0,0,0' as never,
       point: { x: 0.5, y: 0.9, z: 0.5 },
+      normal: { x: 0, y: 1, z: 0 },
     };
     hover(canvas, 55, 55, 1);
     await flush();

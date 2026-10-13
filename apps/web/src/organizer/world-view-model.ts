@@ -192,6 +192,22 @@ export function cellWorldPosition(grid: BlockGrid, cell: CellCoord): Vec3ViewMod
 }
 
 /**
+ * Derive a cell's world-space centre from a UI-facing grid/cell view model.
+ *
+ * Delegates to {@link cellWorldPosition} (and therefore to the canonical
+ * Protocol `cellCentre`) so the UI can place a ghost over a resolved cell
+ * without importing `@starvalley/protocol` and without re-deriving the frozen
+ * `origin + (cell + 0.5) * cellSize` rule. This is the SAME world fact as
+ * {@link cellWorldPosition}, only typed with view-model types.
+ */
+export function cellCentreOf(
+  grid: BlockGridViewModel,
+  cell: CellCoordViewModel,
+): Vec3ViewModel {
+  return cellWorldPosition(grid, cell);
+}
+
+/**
  * Resolve a continuous world point to the absolute integer cell containing it.
  *
  * Delegates to the canonical Protocol `cellOf` rather than re-deriving the

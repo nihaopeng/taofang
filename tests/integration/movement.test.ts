@@ -615,6 +615,51 @@ describe('phase 15: editing blocks and placing entities over the real chain', ()
     expect(verdict === null || verdict.valid === false).toBe(true);
     expect(getWorldState().entities.length).toBe(before);
   });
+
+  it('refuses a placement whose BODY would intersect a solid block, with the `blocked` reason', async () => {
+    useRealServer();
+    await loadWorld();
+
+    // Free grass cell next to the spawn, then fill the cell the chest would occupy.
+    const position = { x: cellCentreX(6), y: GROUND_TOP, z: cellCentreZ(5) };
+    await setBlock({ x: 6, y: 1, z: 5 }, 'stone', 0);
+
+    const response = await fetch(new URL(COMMAND_PATH, baseUrl), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ type: 'entity.place', kind: 'chest', position, yawDegrees: 0 }),
+    });
+
+    // The server is the authority: the same rule the authoring guard applies.
+    expect(response.status).toBe(409);
+    const body = (await response.json()) as { error?: { message?: string } };
+    expect(body.error?.message).toContain('no room');
+  });
+
+  it('maps a REFUSED placement to 409 CONFLICT with a player-facing reason (not a 500)', async () => {
+    useRealServer();
+    await loadWorld();
+
+    // Straight at the router: the editor sends `entity.place` unconditionally, so a
+    // refusal is routine on the real user path and must NOT surface as a 500.
+    const response = await fetch(new URL(COMMAND_PATH, baseUrl), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        type: 'entity.place',
+        kind: 'chest',
+        // Outside the authored grid: nothing to rest on.
+        position: { x: cellCentreX(14), y: GROUND_TOP, z: cellCentreZ(5) },
+        yawDegrees: 0,
+      }),
+    });
+
+    expect(response.status).toBe(409);
+    const body = (await response.json()) as { error?: { message?: string } };
+    // The client renders this message verbatim, so it is player-facing text - and it
+    // must be the placement reason, not the generic transport failure.
+    expect(body.error?.message).toContain('rest on');
+  });
 });
 
 describe('phase 8: mouse-first intents (moveTo / interact) over the real chain', () => {

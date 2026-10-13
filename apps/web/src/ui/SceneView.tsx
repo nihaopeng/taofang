@@ -20,15 +20,14 @@
  *
  * World extent
  * ------------
- * The runtime needs the authoritative world AABB so its orthographic frustum
- * fits the WORLD now, not a tile count. `WorldState.bounds` is that source; tiles
+ * The runtime needs the authoritative world AABB so its perspective frustum
+ * frames the WORLD, not a tile count. `WorldState.bounds` is that source; blocks
  * already arrive at their world positions, so nothing render-side needs the
- * gameplay grid to place them. The grid spec IS passed, however, because the
- * runtime builds its terrain footprint and its `GridOverlay` layer from
- * `cellSize`/`origin`. Until the bounds/grid are known (`bounds === null`) the
- * canvas renders but no runtime is created. If the world reloads with different
- * bounds or grid, the effect re-runs and a runtime for the new spec replaces the
- * old one.
+ * block grid to place them. The grid spec IS passed, however, because the runtime
+ * builds its `GridOverlay` layer from `cellSize`/`origin`. Until the bounds/grid
+ * are known (`bounds === null`) the canvas renders but no runtime is created. If
+ * the world reloads with different bounds or grid, the effect re-runs and a
+ * runtime for the new spec replaces the old one.
  *
  * Lifecycle
  * ---------
@@ -173,8 +172,8 @@ export function SceneView(props: {
 
   /**
    * The default (non-editor) click behaviour. An entity node becomes an interact
-   * intent; any other node (a raised surface) or the ground becomes a move intent
-   * toward the clicked world point. The UI applies no walkability rule.
+   * intent; any other node (a block) or the ground becomes a move intent toward
+   * the clicked world point. The UI applies no walkability rule.
    */
   function applyDefaultClick(hit: RenderPick): void {
     if (hit === null) {
@@ -187,7 +186,7 @@ export function SceneView(props: {
         return;
       }
     }
-    // Ground and non-entity node (surface) hits alike carry a world point; both
+    // Ground and non-entity node (block) hits alike carry a world point; both
     // express the same move intent.
     void moveTo(hit.point);
   }

@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { MAX_STEP_HEIGHT } from '../src/index.ts';
+import {
+  DEFAULT_ACTOR_HEIGHT,
+  DEFAULT_ACTOR_RADIUS,
+  MAX_STEP_HEIGHT,
+} from '../src/index.ts';
 import {
   ACTOR_ID,
   actorOf,
@@ -20,6 +24,38 @@ function bridgeBlocks(): ReturnType<typeof flatBlocks> {
     blocks.push(block(x, 3, 3, 'stone'));
   }
   return blocks;
+}
+
+/**
+ * True when the actor's body AABB overlaps a solid block CELL. This enumerates
+ * every cell the body occupies (not just the destination point), with a tiny
+ * inset so an exact face-touch is not reported as penetration.
+ */
+function actorOverlapsSolid(manager: ReturnType<typeof makeManager>): boolean {
+  const snapshot = snapshotOf(manager);
+  const actor = actorOf(manager).transform.position;
+  const { origin, cellSize } = snapshot.blockGrid;
+  const inset = 1e-6;
+  const minX = actor.x - DEFAULT_ACTOR_RADIUS + inset;
+  const maxX = actor.x + DEFAULT_ACTOR_RADIUS - inset;
+  const minY = actor.y + inset;
+  const maxY = actor.y + DEFAULT_ACTOR_HEIGHT - inset;
+  const minZ = actor.z - DEFAULT_ACTOR_RADIUS + inset;
+  const maxZ = actor.z + DEFAULT_ACTOR_RADIUS - inset;
+  const x0 = Math.floor((minX - origin.x) / cellSize);
+  const x1 = Math.floor((maxX - origin.x) / cellSize);
+  const y0 = Math.floor((minY - origin.y) / cellSize);
+  const y1 = Math.floor((maxY - origin.y) / cellSize);
+  const z0 = Math.floor((minZ - origin.z) / cellSize);
+  const z1 = Math.floor((maxZ - origin.z) / cellSize);
+  for (const entry of snapshot.blocks) {
+    if (entry.coord.x < x0 || entry.coord.x > x1) continue;
+    if (entry.coord.y < y0 || entry.coord.y > y1) continue;
+    if (entry.coord.z < z0 || entry.coord.z > z1) continue;
+    if (entry.kind === 'water') continue;
+    return true;
+  }
+  return false;
 }
 
 describe('movement: horizontal', () => {
@@ -198,6 +234,52 @@ describe('movement: gravity and invariants', () => {
     expect(batch.events).toEqual([]);
     expect(snapshotOf(manager).entities).toEqual(before);
   });
+});
+
+describe('movement: axis-separated sliding (restored coverage)', () => {
+  const WALL_X = 3;
+
+  /** The flat ground plus a solid cube wall at `x = 3` spanning every `z`. */
+  function wallBlocks(wallHeight: number): ReturnType<typeof flatBlocks> {
+    const blocks = flatBlocks(8, 8);
+    for (let y = 1; y <= wallHeight; y += 1) {
+      for (let z = 0; z < 8; z += 1) {
+        blocks.push(block(WALL_X, y, z, 'stone'));
+      }
+    }
+    return blocks;
+  }
+
+  for (const wallHeight of [1, 2]) {
+    it(`slides diagonally along a ${wallHeight}-high cube wall and never penetrates it`, () => {
+      const manager = makeManager({
+        blocks: wallBlocks(wallHeight),
+        spawnCell: { x: 1, z: 1 },
+      });
+      expect(actorOverlapsSolid(manager)).toBe(false);
+
+      manager.submitIntent({ actorId: ACTOR_ID, command: move({ x: 1, z: 1 }) });
+
+      // Reach the wall, asserting the non-penetration invariant every tick.
+      for (let i = 0; i < 12; i += 1) {
+        manager.step(50);
+        expect(actorOverlapsSolid(manager)).toBe(false);
+      }
+      const stalled = actorOf(manager).transform.position;
+      // The blocked axis stopped at the wall face (never inside the cell).
+      expect(stalled.x).toBeLessThanOrEqual(WALL_X - DEFAULT_ACTOR_RADIUS + 1e-6);
+      expect(stalled.x).toBeGreaterThan(1.5);
+
+      // The free axis keeps advancing while the blocked axis is held.
+      for (let i = 0; i < 20; i += 1) {
+        manager.step(50);
+        expect(actorOverlapsSolid(manager)).toBe(false);
+      }
+      const later = actorOf(manager).transform.position;
+      expect(later.x).toBeCloseTo(stalled.x, 9);
+      expect(later.z).toBeGreaterThan(stalled.z + 0.5);
+    });
+  }
 });
 
 describe('movement: the default authored world is navigable', () => {

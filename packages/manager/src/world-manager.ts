@@ -150,7 +150,12 @@ export interface WorldManager {
    * returns a `ValidatePlacementResponse` (it never mutates).
    */
   submitIntent(input: { actorId: ActorId; command: GameCommand }): CommandResponse;
-  /** Advance the simulation by `dtMs`. Pure/deterministic; emits movement deltas. */
+  /**
+   * Advance the simulation by `dtMs`. The STATE TRANSITION is a pure,
+   * deterministic function of `(state, dtMs)` and emits movement deltas. The
+   * returned batch is not itself pure: its `serverTime` is stamped from the
+   * injected clock (the only non-state input).
+   */
   step(dtMs: number): GameEventBatch;
   /**
    * Server-only introspection: the live placement-occupancy index (never wire
@@ -722,6 +727,8 @@ export function createWorldManager(deps: CreateWorldManagerDeps = {}): WorldMana
     },
 
     step(dtMs: number): GameEventBatch {
+      // `serverTime` is a clock reading, not simulated state; see the interface
+      // docstring. Everything below it is a pure function of `(state, dtMs)`.
       const serverTime = clock().toISOString();
       const mode = movementMode;
       if (!(dtMs > 0)) {

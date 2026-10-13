@@ -671,6 +671,83 @@ placement ghost without a second source of truth.
 snapshot fields, and their guards, parsers and exports. No parallel authority or
 wire adapter is kept. A v8 snapshot fixture pins the 8 -> 9 break.
 
+## Phase 15 Manager rules — the block-spatial kernel
+
+Every rule here is a Manager runtime rule implemented with named constants; none of it is a wire
+field. Verified values are quoted so this section cannot drift silently.
+
+### Authoritative shape semantics (the renderer MUST match these)
+
+`BlockDefinition.collisionShape` is the spatial primitive and the solver reads the SHAPE and the
+TAGS, never the kind (a kind-agnostic test proves `grass` behaves exactly like `stone`). In CANONICAL
+cell-local coordinates for yaw 0:
+
+| shape | authoritative top |
+|---|---|
+| `empty` | no support, no blocking |
+| `cube` | the whole cell |
+| `slab` | `height` (half-height slabs) |
+| `stair` | a low full-footprint step plus a FULL-HEIGHT step in the **+Z half** (`cz < 0.5 ? 0.5 : 1`) |
+| `ramp` | `clamp01(cz)` - the plane RISES TOWARD **+Z** |
+
+`BlockOrientation` (0/90/180/270) is applied by mapping a world query point into canonical local space
+(`toCanonicalLocal`, the inverse-yaw map), so the orientation rotates the shape and nothing else.
+
+**The renderer mirrors these exactly.** A visual that is mirrored or rotated 180 degrees relative to
+the shape is a presentation bug that no height-only assertion can catch, so the render tests pin the
+DIRECTION (which local side is high) for `stair` and `ramp` at all four yaws, not just the top height.
+
+### Movement constants
+
+`TICK_RATE_HZ = 20`, `DEFAULT_ACTOR_SPEED = 3`, actor body `DEFAULT_ACTOR_RADIUS = 0.35` and
+`DEFAULT_ACTOR_HEIGHT = 1.8` (a vertical cylinder), `MAX_STEP_HEIGHT = 0.6` (the single step-up/down
+tolerance that makes slabs and stairs walkable WITHOUT any per-kind rule), `GRAVITY = 20`,
+`JUMP_SPEED = 7.2` (grounded-gated). A fall snaps onto the crossed support (no tunnelling even at a
+huge `dt`), penetration is resolved by an escape push, and a long varied run is asserted NaN-free.
+
+### The placement resolver and its lattice
+
+`requested position/orientation -> resolve -> snapped Transform -> commit -> deriveOccupiedCells`.
+`pivot = 'center'`: the committed transform sits at the geometric centre of the entity's current
+integer block footprint, so on one axis an ODD extent puts the centre at a CELL CENTRE and an EVEN
+extent puts it at a CELL BOUNDARY. Consequences that are pinned by tests: a rotation that preserves
+parity (2x2, 2x4, 1x3) leaves the position bit-identical, while a parity-CHANGING rotation (1x2, 2x3)
+deterministically shifts by half a cell on the affected axes with an explicit round-half-up
+tie-break. Mixed-parity footprints are legal and required.
+
+The base anchor `y` is the SUPPORT TOP FACE, not a cell boundary - a tree on the half-height slab sits
+at `y = 1.5` while one on the full grass layer sits at `y = 1.0` - and `y` is continuous authoritative
+state from then on.
+
+### Occupancy is DERIVED, never authoritative
+
+`deriveOccupiedCells(committedTransform, placementDefinition, grid)` is a pure function of the
+committed transform; nothing ever writes a transform from occupancy. The index is
+`CellCoord -> EntityId[]`, is written ONLY by placeable entities (never by dynamic actors), is updated
+atomically on place/rotate/remove, and `rebuildOccupancyFromEntities` reproduces the live index
+exactly (asserted). Vertical occupancy uses the owner's rule with `OCCUPANCY_EPSILON = 1e-6`:
+`full = floor(height / cellSize)`, `+1` only when `remainder > 0.5 * cellSize`, and at least one layer -
+so EXACTLY half a cell adds no layer and a 1e-9 overshoot cannot flap.
+
+### Validation
+
+`requireFullSupport`: every footprint column's highest solid top at or below the base must EQUAL the
+base within `SUPPORT_EPSILON = 1e-6` (no half-floating footprint). ONE shared support+clearance rule is
+used by BOTH the construction guard for authored entities and `resolvePlacement`, so a placement can
+never produce a state the authoring path forbids. `entity.validatePlacement` is the pure PREVIEW seam
+(it mutates nothing and reuses the same resolver), and `place` re-validates so a stale preview can
+never place. A refusal is a typed error that transport maps to `CONFLICT` (409) with the
+discriminator surfaced, which is why the editor can send `entity.place` unconditionally.
+
+### Declarative catalogues and the editor
+
+`blockKinds`/`entityKinds` carry GEOMETRY ONLY (footprint, height, allowed yaw steps, pivot) and are
+derived from the registries, with a bijection test so a new kind cannot be missing. Placeability is the
+SERVER's decision (`not-placeable` is a resolver reason); no client filter exists. The editor's ghost is
+built from the client's snapped candidate purely for geometry, its colour comes from the server verdict
+alone (neutral while pending, red on invalid, green on valid), `validatePlacement` is called only when
+the snapped candidate / kind / yaw actually changes, and stale responses are discarded.
+
 ## Phase 14 frozen contract — real 3D world geometry; the grid is demoted to gameplay metadata
 
 > **SUPERSEDED by phase 15.** The phase-14 `surfaces`/`colliders` world-geometry
@@ -897,6 +974,12 @@ must implement against this shape and must not alter it.
 
 ## Phase 14 Manager rules (wave 2) — the world model and movement
 
+> **SUPERSEDED by phase 15.** This section describes the RETIRED `surfaces`/`colliders` model and its
+> constants (`findSupportY`, `WALKABILITY_BY_TERRAIN`, the 30-degree demo ramp, `MAX_STEP_UP 0.3`,
+> `DEFAULT_ACTOR_HEIGHT 1.7`, a 45-degree slope limit). None of it is current: the block kernel and its
+> real constants are in "Phase 15 Manager rules" above, and the removed symbols are listed under
+> "Removed in this version" in the phase-15 contract section.
+
 Wave 2 implements the frozen phase-14 contract in `packages/manager`. No wire
 field is added: every rule below is a Manager runtime rule with a named constant
 in `packages/manager/src/world-manager.ts`.
@@ -1033,6 +1116,11 @@ inside `packages/manager`. Wave-1 downstream consumers (Router, Organizer, the
 web app) and `tests/integration` are expected to fail until waves 3+ land.
 
 ## Phase 14 wave 4 — rendering the real 3D world (UI)
+
+> **SUPERSEDED by phase 15.** The `surface:` nodes, `APPEARANCE_BY_SURFACE`, `SURFACE_SLAB_THICKNESS`
+> and the per-cell terrain plates described below are gone; blocks are rendered by the block registry
+> with chunk grouping, and the ground is drawn exactly once (a `ground` block is not double-drawn
+> against any tile pipeline).
 
 Wave 4 consumes the frozen contract through the Organizer and renders the world
 geometry. The boundary is unchanged: the Organizer hands the bridge

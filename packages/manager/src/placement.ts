@@ -1,6 +1,7 @@
 import type {
   BlockGrid,
   BlockOrientation,
+  BlockState,
   CellCoord,
   EntityId,
   EntityState,
@@ -31,11 +32,20 @@ export const OCCUPANCY_EPSILON = 1e-6;
 /** Slack for comparing support tops across a footprint. */
 const SUPPORT_EPSILON = 1e-6;
 
-/** Why a placement request was refused. Transport maps these to `CONFLICT`. */
+/**
+ * Why a placement request was refused. Transport maps these to `CONFLICT`.
+ *
+ * `'blocked'` is the shared CLEARANCE rule: the entity's own body would
+ * intersect a solid block (for example a tree under a bridge deck). It is
+ * deliberately distinct from `'occupied'`, which is entity-vs-entity occupancy
+ * alone; the wire type for the reason is a plain string, so adding it needs no
+ * Protocol change.
+ */
 export type PlacementRejectionReason =
   | 'not-placeable'
   | 'no-supported-orientation'
   | 'insufficient-support'
+  | 'blocked'
   | 'occupied';
 
 /** Successful placement resolution: the transform the server would commit. */
@@ -339,9 +349,6 @@ export function columnSupportTop(
   return null;
 }
 
-/** Slack for authored entity validation. */
-const AUTHORING_EPSILON = 1e-6;
-
 interface AuthoringAabb {
   readonly min: Vec3;
   readonly max: Vec3;
@@ -380,6 +387,87 @@ function entityColliderAabb(collider: EntityCollider, position: Vec3): Authoring
   }
 }
 
+/** A committed placement that fails the shared support/clearance rule. */
+export type PlacementInvariantViolation =
+  | {
+      /** Some footprint column's solid top is not exactly the base. */
+      readonly kind: 'support';
+      readonly column: { readonly x: number; readonly z: number };
+      readonly top: number | null;
+    }
+  | {
+      /** The entity's collider body intersects a solid block. */
+      readonly kind: 'blocked';
+      readonly block: BlockState;
+    };
+
+/** Input for the shared support+clearance rule {@link checkPlacementInvariants}. */
+export interface CheckPlacementInvariantsInput {
+  readonly placement: EntityPlacementDefinition;
+  readonly collider: EntityCollider;
+  /** A COMMITTED base position (already snapped and seated by the caller). */
+  readonly position: Vec3;
+  readonly yaw: BlockOrientation;
+  readonly grid: BlockGrid;
+  readonly blocks: BlockReadPort;
+  readonly minY: number;
+}
+
+/**
+ * The SINGLE server-side support+clearance rule for a committed placement.
+ *
+ * Both the authored construction guard ({@link assertAuthoredPlaceable}) and the
+ * wire resolver ({@link resolvePlacement}) call this, so a placement can never
+ * produce a state the authoring path forbids:
+ *
+ * 1. SUPPORT: every footprint column's highest solid top at or below the base
+ *    is exactly the base. A `slab`/`stair`/`ramp` top is CONTINUOUS, so the
+ *    base is that face, never the cell boundary. This catches a floating entity.
+ * 2. CLEARANCE: the entity's collider body does not intersect a solid block.
+ *    This catches an entity embedded in a solid (or a tree under a bridge deck)
+ *    even when a lower support exists beneath it.
+ *
+ * The caller decides how to report the violation (a `RangeError` at authoring,
+ * a `PlacementRejectionReason` on the wire); this function stays pure.
+ */
+export function checkPlacementInvariants(
+  input: CheckPlacementInvariantsInput,
+): PlacementInvariantViolation | null {
+  const { placement, collider, position, yaw, grid, blocks, minY } = input;
+
+  const extents = extentsForYaw(placement.footprint, yaw);
+  for (const column of footprintColumns(grid, position, extents)) {
+    const top = columnSupportTop(grid, blocks, column.x, column.z, position.y, minY);
+    if (top === null || Math.abs(top - position.y) > SUPPORT_EPSILON) {
+      return { kind: 'support', column, top };
+    }
+  }
+
+  const box = entityColliderAabb(collider, position);
+  for (const block of blocks.queryAabb(box.min, box.max)) {
+    if (!isSolidBlockKind(block.kind)) {
+      continue;
+    }
+    const cell = blockCellAabb(block, grid);
+    const rx0 = Math.max(box.min.x, cell.min.x);
+    const rx1 = Math.min(box.max.x, cell.max.x);
+    const rz0 = Math.max(box.min.z, cell.min.z);
+    const rz1 = Math.min(box.max.z, cell.max.z);
+    if (rx1 - rx0 <= SUPPORT_EPSILON || rz1 - rz0 <= SUPPORT_EPSILON) {
+      continue;
+    }
+    const top = blockSolidTopOverRect(block, grid, rx0, rx1, rz0, rz1);
+    if (top === null) {
+      continue;
+    }
+    if (box.min.y < top - SUPPORT_EPSILON && box.max.y > cell.min.y + SUPPORT_EPSILON) {
+      return { kind: 'blocked', block };
+    }
+  }
+
+  return null;
+}
+
 /** Input for the authored-placeable construction guard {@link assertAuthoredPlaceable}. */
 export interface AssertAuthoredPlaceableInput {
   readonly entity: EntityState;
@@ -396,19 +484,22 @@ export interface AssertAuthoredPlaceableInput {
  * placement before the world is served.
  *
  * The resolver would produce exactly this transform for a compliant placement,
- * so authoring one directly must meet the same invariants:
+ * so authoring one directly must meet the same invariants. SUPPORT and
+ * CLEARANCE are delegated to the single shared rule
+ * ({@link checkPlacementInvariants}), which the wire resolver also calls, so
+ * the two paths can never disagree:
  *
  * 1. SUPPORT: the entity's base sits exactly on the highest solid top under its
- *    own footprint (within `AUTHORING_EPSILON`). A `slab`/`stair`/`ramp` top is
- *    CONTINUOUS, so the base is that face, never the cell boundary. This is the
- *    check that catches a floating entity.
- * 2. CLEARANCE: the entity's collider does not intersect a solid block, and its
- *    derived occupancy does not collide with another authored entity. The
- *    block check catches an entity authored embedded in a solid even when a
- *    lower support exists beneath it.
+ *    own footprint. A `slab`/`stair`/`ramp` top is CONTINUOUS, so the base is
+ *    that face, never the cell boundary. This is the check that catches a
+ *    floating entity.
+ * 2. CLEARANCE: the entity's collider does not intersect a solid block. This
+ *    catches an entity authored embedded in a solid even when a lower support
+ *    exists beneath it.
  *
- * Both throw a `RangeError` (the spawn guard's style) at construction, so this
- * class of authoring error can never be silent again.
+ * Derived occupancy is then checked separately for entity-vs-entity overlap.
+ * Every failure throws a `RangeError` (the spawn guard's style) at construction,
+ * so this class of authoring error can never be silent again.
  */
 export function assertAuthoredPlaceable(input: AssertAuthoredPlaceableInput): void {
   const { entity, definition, grid, blocks, occupancy, minY } = input;
@@ -417,44 +508,27 @@ export function assertAuthoredPlaceable(input: AssertAuthoredPlaceableInput): vo
     throw new RangeError(`Authored entity ${entity.entityId} (${entity.kind}) is not placeable`);
   }
   const position = entity.transform.position;
-  const yaw = yawStepFromRotation(entity.transform.rotation);
-  const extents = extentsForYaw(placement.footprint, yaw);
-  const columns = footprintColumns(grid, position, extents);
-
-  for (const column of columns) {
-    const top = columnSupportTop(grid, blocks, column.x, column.z, position.y, minY);
-    if (top === null || Math.abs(top - position.y) > AUTHORING_EPSILON) {
+  const violation = checkPlacementInvariants({
+    placement,
+    collider: definition.collider,
+    position,
+    yaw: yawStepFromRotation(entity.transform.rotation),
+    grid,
+    blocks,
+    minY,
+  });
+  if (violation !== null) {
+    if (violation.kind === 'support') {
       throw new RangeError(
         `Authored ${entity.kind} ${entity.entityId} at (${position.x}, ${position.y}, ${position.z}) ` +
-          `must sit on its support top, but the support under cell (${column.x}, ${column.z}) ` +
-          `tops at ${top === null ? 'no solid block' : top}`,
+          `must sit on its support top, but the support under cell (${violation.column.x}, ${violation.column.z}) ` +
+          `tops at ${violation.top === null ? 'no solid block' : violation.top}`,
       );
     }
-  }
-
-  const box = entityColliderAabb(definition.collider, position);
-  for (const block of blocks.queryAabb(box.min, box.max)) {
-    if (!isSolidBlockKind(block.kind)) {
-      continue;
-    }
-    const cell = blockCellAabb(block, grid);
-    const rx0 = Math.max(box.min.x, cell.min.x);
-    const rx1 = Math.min(box.max.x, cell.max.x);
-    const rz0 = Math.max(box.min.z, cell.min.z);
-    const rz1 = Math.min(box.max.z, cell.max.z);
-    if (rx1 - rx0 <= AUTHORING_EPSILON || rz1 - rz0 <= AUTHORING_EPSILON) {
-      continue;
-    }
-    const top = blockSolidTopOverRect(block, grid, rx0, rx1, rz0, rz1);
-    if (top === null) {
-      continue;
-    }
-    if (box.min.y < top - AUTHORING_EPSILON && box.max.y > cell.min.y + AUTHORING_EPSILON) {
-      throw new RangeError(
-        `Authored ${entity.kind} ${entity.entityId} overlaps the solid ${block.kind} at ` +
-          `(${block.coord.x}, ${block.coord.y}, ${block.coord.z})`,
-      );
-    }
+    throw new RangeError(
+      `Authored ${entity.kind} ${entity.entityId} overlaps the solid ${violation.block.kind} at ` +
+        `(${violation.block.coord.x}, ${violation.block.coord.y}, ${violation.block.coord.z})`,
+    );
   }
 
   const occupiedCells = deriveOccupiedCells(entity.transform, placement, grid);
@@ -475,7 +549,10 @@ export function assertAuthoredPlaceable(input: AssertAuthoredPlaceableInput): vo
  * 3. Y is the server support query: every footprint column must have a solid
  *    support and all supports must be at the same top (`requireFullSupport`).
  * 4. The committed transform is the resolved centre on that support top face.
- * 5. Occupancy is derived from the committed transform and checked for conflict.
+ * 5. The committed transform re-enters the shared support+clearance rule
+ *    ({@link checkPlacementInvariants}), so the wire path can never accept a
+ *    body that intersects a solid block (`'blocked'`).
+ * 6. Occupancy is derived from the committed transform and checked for conflict.
  */
 export function resolvePlacement(input: ResolvePlacementInput): PlacementResolution {
   const { definition, grid, blocks, occupancy, ignoreEntityId, minY } = input;
@@ -510,6 +587,22 @@ export function resolvePlacement(input: ResolvePlacementInput): PlacementResolut
     rotation: quatFromYaw((yaw * Math.PI) / 180),
   };
   const occupiedCells = deriveOccupiedCells(transform, placement, grid);
+  const violation = checkPlacementInvariants({
+    placement,
+    collider: definition.collider,
+    position: transform.position,
+    yaw,
+    grid,
+    blocks,
+    minY,
+  });
+  if (violation !== null) {
+    return {
+      ok: false,
+      reason: violation.kind === 'blocked' ? 'blocked' : 'insufficient-support',
+      occupiedCells,
+    };
+  }
   if (!cellsAreFree(occupancy, occupiedCells, ignoreEntityId)) {
     return { ok: false, reason: 'occupied', occupiedCells };
   }

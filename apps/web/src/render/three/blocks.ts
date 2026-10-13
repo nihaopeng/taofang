@@ -124,9 +124,15 @@ function createSlabVisual(cellSize: number): Group {
 
 /**
  * Stairs: a lower full-footprint step (top at the cell centre) plus an upper
- * half-footprint step behind it (top at the cell top). The node's yaw-step
- * orientation rotates the whole profile, so a directional stair faces its own
- * way without any additional derivation.
+ * half-footprint step in the **+Z half** (top at the cell top). The node's
+ * yaw-step orientation rotates the whole profile, so a directional stair faces
+ * its own way without any additional derivation.
+ *
+ * DIRECTION IS AUTHORITATIVE: `packages/manager/src/blocks.ts` is the collision
+ * authority, and for `{ type: 'stair' }` it makes the FULL-HEIGHT step the `+Z`
+ * half of the cell (`top = cz < 0.5 ? 0.5 : 1`). This visual MUST therefore
+ * place the upper step on `+Z` too, otherwise the actor visibly climbs the
+ * downhill-looking face at every yaw.
  */
 function createStairsVisual(cellSize: number): Group {
   const group = new Group();
@@ -139,12 +145,13 @@ function createStairsVisual(cellSize: number): Group {
   lower.receiveShadow = true;
   group.add(lower);
 
-  // Upper step: back half of the cell (local -Z), top at the cell top.
+  // Upper step: +Z half of the cell (the authority's full-height side), top at
+  // the cell top.
   const upper = new Mesh(
     new BoxGeometry(cellSize, cellSize / 2, cellSize / 2),
     material(0xb08f5b, { roughness: 0.9 }),
   );
-  upper.position.set(0, cellSize / 4, -cellSize / 4);
+  upper.position.set(0, cellSize / 4, cellSize / 4);
   upper.castShadow = true;
   upper.receiveShadow = true;
   group.add(upper);
@@ -156,12 +163,19 @@ function createStairsVisual(cellSize: number): Group {
  * the back-top edge: a ramp reads as a slope. Authored as an explicit triangular
  * prism so the standard 3D transform stays shear-free and the horizontal
  * footprint stays exactly one cell (a rotated box would not).
+ *
+ * DIRECTION IS AUTHORITATIVE: `packages/manager/src/blocks.ts` is the collision
+ * authority, and for `{ type: 'ramp' }` the top is `clamp01(cz)`, i.e. it RISES
+ * TOWARD `+Z`. The raw prism below is authored tall at `-Z`, so the whole group
+ * is mirrored about Z (`rotation.y = Math.PI`) to put the tall edge on `+Z` and
+ * match the authority at every yaw.
  */
 function createRampVisual(cellSize: number): Group {
   const half = cellSize / 2;
   const group = new Group();
 
-  // Cell-local corners. `y` spans the cell; +Z is the low (front) side.
+  // Cell-local corners; the top edge is at `-Z` here and the group is rotated by
+  // PI to put it on `+Z` (the authority's rise direction).
   const positions = new Float32Array([
     -half, -half, half, // 0 front-left bottom
     half, -half, half, // 1 front-right bottom
@@ -186,6 +200,9 @@ function createRampVisual(cellSize: number): Group {
   ramp.castShadow = true;
   ramp.receiveShadow = true;
   group.add(ramp);
+  // Mirror Z so the tall edge is the authority's `+Z` side. The prism is
+  // symmetric on X, so the PI yaw mirrors Z without changing the footprint.
+  group.rotation.y = Math.PI;
   return group;
 }
 

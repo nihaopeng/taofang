@@ -10,9 +10,11 @@ import { QUAT_IDENTITY } from '@starvalley/math';
 import type { EntityDefinition } from '../src/index.ts';
 import {
   PlacementRejectedError,
+  checkPlacementInvariants,
   createBlockStore,
   createOccupancyIndex,
   deriveOccupiedCells,
+  entityDefinition,
   extentsForYaw,
   rebuildOccupancyFromEntities,
   resolvePlacement,
@@ -23,6 +25,15 @@ const GRID = { origin: { x: 0, y: 0, z: 0 }, cellSize: 1 };
 
 function ground(): BlockState[] {
   return flatBlocks(8, 8);
+}
+
+/** The flat ground plus a one-cube bridge deck row at `z = 3`, `y = 3`. */
+function bridgeBlocks(): BlockState[] {
+  const blocks = ground();
+  for (let x = 1; x <= 6; x += 1) {
+    blocks.push(block(x, 3, 3, 'stone'));
+  }
+  return blocks;
 }
 
 function store(blocks: readonly BlockState[] = ground()) {
@@ -144,6 +155,60 @@ describe('placement resolver: y is the support top face', () => {
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('expected rejection');
     expect(result.reason).toBe('not-placeable');
+  });
+});
+
+describe('shared support+clearance rule (R1: one rule, one owner)', () => {
+  it('flags a body intersecting a solid block and clears the same body on top', () => {
+    const blocks = store(bridgeBlocks());
+    const tree = entityDefinition('tree');
+    const placement = tree.placement;
+    if (placement === undefined) throw new Error('tree must be placeable');
+
+    const under = checkPlacementInvariants({
+      placement,
+      collider: tree.collider,
+      position: { x: 3.5, y: 1, z: 3.5 },
+      yaw: 0,
+      grid: GRID,
+      blocks,
+      minY: -1,
+    });
+    expect(under).toMatchObject({ kind: 'blocked' });
+
+    const onTop = checkPlacementInvariants({
+      placement,
+      collider: tree.collider,
+      position: { x: 3.5, y: 4, z: 3.5 },
+      yaw: 0,
+      grid: GRID,
+      blocks,
+      minY: -1,
+    });
+    expect(onTop).toBeNull();
+  });
+
+  it('resolver rejects a tree under the bridge deck with the new blocked reason', () => {
+    const result = resolve(
+      entityDefinition('tree'),
+      { x: 3.5, y: 1, z: 3.5 },
+      0,
+      store(bridgeBlocks()),
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('expected rejection');
+    expect(result.reason).toBe('blocked');
+  });
+
+  it('resolver still accepts the equivalent legal tree seated on the deck', () => {
+    const result = resolve(
+      entityDefinition('tree'),
+      { x: 3.5, y: 4, z: 3.5 },
+      0,
+      store(bridgeBlocks()),
+    );
+    if (!result.ok) throw new Error(`expected resolved placement, got ${result.reason}`);
+    expect(result.transform.position.y).toBeCloseTo(4, 9);
   });
 });
 

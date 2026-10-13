@@ -560,6 +560,7 @@ describe('SceneView mouse-first interaction', () => {
       kind: 'node',
       nodeId: 'entity:entity-a' as never,
       point: { x: 3, y: 0, z: 4 },
+      normal: { x: 0, y: 1, z: 0 },
     };
     const requests: CapturedRequest[] = [];
     const canvas = await mountWithRuntime(recorder, requests);
@@ -621,6 +622,7 @@ describe('SceneView mouse-first interaction', () => {
       kind: 'node',
       nodeId: 'block:0,1,0' as never,
       point: { x: 0.5, y: 1.25, z: -0.75 },
+      normal: { x: 0, y: 1, z: 0 },
     };
     const requests: CapturedRequest[] = [];
     const canvas = await mountWithRuntime(recorder, requests);

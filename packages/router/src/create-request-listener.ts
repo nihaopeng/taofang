@@ -6,7 +6,12 @@ import type {
   ProtocolErrorCode,
   WorldStreamMessage,
 } from '@starvalley/protocol';
-import { InteractionRejectedError, UnknownActorError, UnknownEntityError } from '@starvalley/manager';
+import {
+  InteractionRejectedError,
+  PlacementRejectedError,
+  UnknownActorError,
+  UnknownEntityError,
+} from '@starvalley/manager';
 import type { GameInfoManager, WorldManager } from '@starvalley/manager';
 import { mapErrorCodeToStatus, protocolErrorBody } from './http-errors.ts';
 import { allowedMethods, findRoute, isKnownPath } from './routes.ts';
@@ -350,6 +355,32 @@ function interactionConflictMessage(reason: InteractionRejectedError['reason']):
   }
 }
 
+/**
+ * Player-facing notice for a refused placement/rotation.
+ *
+ * Like {@link interactionConflictMessage}, the client renders this 409 message
+ * verbatim, so it is phrased for a player. Keep the cases aligned with
+ * Manager's `PlacementRejectionReason`, but do NOT treat the switch as
+ * exhaustive: an unfamiliar (forward-compatible) reason falls back to the raw
+ * reason string rather than being swallowed as a 500.
+ */
+function placementConflictMessage(reason: PlacementRejectedError['reason']): string {
+  switch (reason) {
+    case 'not-placeable':
+      return 'That cannot be placed there.';
+    case 'no-supported-orientation':
+      return 'That cannot face that way.';
+    case 'insufficient-support':
+      return 'It needs something to rest on.';
+    case 'occupied':
+      return 'Something is already there.';
+    case 'blocked':
+      return 'There is no room for it.';
+    default:
+      return String(reason);
+  }
+}
+
 async function handleRequest(
   deps: RouterDependencies,
   request: IncomingMessage,
@@ -431,6 +462,15 @@ async function handleRequest(
       // The message is shown to the player for this case, hence the user-facing
       // phrasing; every other error message here stays developer-facing.
       sendProtocolError(response, 'CONFLICT', interactionConflictMessage(error.reason));
+      return;
+    }
+    if (error instanceof PlacementRejectedError) {
+      // The placement command was well-formed and named a known kind, but the
+      // resulting placement is illegal against current world state. Same 409
+      // shape as an interaction refusal; the discriminator is surfaced (via a
+      // player-facing phrase) so the client can show a precise notice rather
+      // than a generic failure.
+      sendProtocolError(response, 'CONFLICT', placementConflictMessage(error.reason));
       return;
     }
     // Log server-side; never leak the message/stack to the client. This also
